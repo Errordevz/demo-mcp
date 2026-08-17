@@ -1,96 +1,86 @@
-# DEMO MCP — Cloudflare Worker
+# DEMO MCP — Independent Tool Gateway
 
-DEMO MCP is the execution/backend layer for **DEMO Platform**. The Platform is the UI and control center; this Worker owns MCP tools, browser automation, skills.sh access and external-service integrations.
+DEMO MCP is an independent MCP gateway for connecting ChatGPT and other MCP clients to a large catalog of external tools. **DEMO is the product and public interface; Composio is an internal routing/integration backend.** Provider API keys and OAuth credentials stay server-side.
 
 ## Architecture
 
 ```text
-DEMO Platform (website)
+ChatGPT / MCP client
         │
-        │ HTTPS + CORS
         ▼
-DEMO MCP Worker (Cloudflare)
+DEMO — independent MCP + gateway surface
         │
         ├── /mcp
-        ├── /health
-        ├── /platform/stats
-        ├── skills.sh
+        ├── /gateway
+        ├── /gateway/tools
+        ├── /gateway/toolkits
         ├── Browser Run
-        └── external integrations
+        └── native DEMO utilities
+                │
+                ▼
+        Composio API (server-side)
+                │
+        ┌───────┼────────┐
+        ▼       ▼        ▼
+      GitHub   Gmail    Slack   …
 ```
 
-Current Worker entrypoint is `platform-entry.ts`. It wraps the existing `index.ts` MCP implementation rather than replacing its tools.
+Composio is deliberately hidden behind DEMO's gateway surface. Clients interact with DEMO tools rather than needing the backend provider's API key.
 
-## Current endpoints
+## Public UI
 
-- `GET /` — public basic status
-- `GET /health` — public health status
-- `GET /platform/stats` — safe Platform telemetry
+`GET /` now serves an independent DEMO Tool Gateway dashboard with:
+
+- DEMO branding and status
+- MCP endpoint information
+- backend health visibility without exposing secrets
+- live Composio-backed tool search
+- responsive glass-style presentation
+
+The UI is implemented in `ui.ts` and served directly by the Worker, so the gateway does not depend on a separate AI product UI.
+
+## Gateway endpoints
+
+- `GET /` — independent DEMO gateway UI
+- `GET /gateway` — gateway status and architecture metadata
+- `GET /gateway/tools?query=...` — server-side search of the Composio tool catalog
+- `GET /gateway/tools?toolkit=github` — filter tools by toolkit
+- `GET /gateway/toolkits` — server-side toolkit catalog
+- `GET /health` — health status
+- `GET /platform/stats` — safe operational telemetry
 - `/mcp` — remote MCP endpoint
 
-### Safe telemetry
+The gateway endpoints use the existing `COMPOSIO_API_KEY` Worker secret and never send that secret to the browser.
 
-`/platform/stats` exposes only operational metadata such as:
+## MCP gateway capabilities
 
-- DEMO version
-- online status
-- isolate-local uptime
-- isolate-local request counter
-- enabled capability flags
-- endpoint names
+The underlying MCP implementation provides DEMO-native utilities, browser automation, and Composio session routing. Composio-backed operations can discover tools, expose schemas, create secure app connection links, and execute authorized tools through a DEMO-owned MCP surface.
 
-It intentionally does **not** expose API keys, OAuth tokens, cookies, prompts, user content, SMTP credentials, environment variables or private account data.
+The intended flow is:
 
-The request counter and uptime are isolate-local because ordinary Worker memory is ephemeral. They reset when an isolate is recycled; they are not presented as globally authoritative analytics.
+1. ChatGPT connects to DEMO's `/mcp` endpoint.
+2. DEMO exposes the gateway operations.
+3. DEMO discovers the required external tool through Composio.
+4. If authorization is required, the user completes the secure connection flow.
+5. DEMO executes the selected tool server-side.
+6. Results return through DEMO to the MCP client.
 
-## Platform CORS
+This keeps the integration layer replaceable: Composio can power the backend without becoming DEMO's public identity.
 
-Browser requests are allowlisted before reaching MCP. The configured Platform origin is supplied through the non-secret `DEMO_PLATFORM_ORIGIN` variable, with the current fallback:
+## Security
 
-```text
-https://demo-platform.pages.dev
-```
+- `COMPOSIO_API_KEY` stays in Cloudflare Worker Secrets.
+- Optional `DEMO_API_KEY` protects the MCP and gateway APIs.
+- Browser origins are explicitly allowlisted.
+- OAuth credentials and connected-app tokens are not exposed to the UI.
+- `/platform/stats` intentionally excludes secrets, cookies, prompts, user content and private account data.
 
-Local development origins are also supported:
-
-```text
-http://localhost:3000
-http://localhost:5173
-http://127.0.0.1:3000
-http://127.0.0.1:5173
-```
-
-If the Platform gets a custom domain, update `DEMO_PLATFORM_ORIGIN` in Cloudflare Worker Variables. For multiple origins, use a comma-separated allowlist. Do not change this to `*` for the MCP endpoint.
-
-The gateway validates the incoming browser Origin and then delegates the already-validated request to the existing MCP implementation. This keeps the Platform connected without opening MCP to arbitrary websites.
-
-Cloudflare recommends explicit CORS handling for Worker APIs and warns that CORS is not authentication; the MCP endpoint should still use authentication when protected operations are exposed.
-
-## Existing capabilities
-
-The underlying `index.ts` implementation remains responsible for DEMO's existing capabilities, including:
-
-- DEMO ping
-- JSON formatting
-- SHA-256 / SHA-512 hashing
-- UUID generation
-- HTTP fetch
-- Roblox lookups
-- Cloudflare Browser Run navigation/inspection
-- screenshots
-- browser interaction
-- skills.sh discovery/fetching
-- Composio-connected app tools when configured
-
-## Authentication
-
-Optional Bearer authentication remains supported through `DEMO_API_KEY`:
+Set secrets with Wrangler:
 
 ```bash
+npx wrangler secret put COMPOSIO_API_KEY
 npx wrangler secret put DEMO_API_KEY
 ```
-
-Never put API keys, OAuth tokens, SMTP credentials or app passwords in GitHub source or `wrangler.jsonc`. Cloudflare recommends Worker secrets for sensitive values.
 
 ## Deployment
 
@@ -100,8 +90,8 @@ npm run typecheck
 npm run deploy
 ```
 
-The Worker should continue to deploy to the existing `demo-mcp.<subdomain>.workers.dev` hostname unless its Cloudflare configuration is changed.
+The Cloudflare entrypoint is `platform-entry.ts`.
 
-## DEMO Platform
+## Design direction
 
-The companion UI repository is `Errordevz/demo-platform`. It polls `/platform/stats` and `/health` and displays live Worker state in the independent DEMO Platform dashboard.
+DEMO should remain the recognizable layer: independent branding, gateway UX, MCP surface, policies and native utilities. Backend providers are implementation details and can be swapped or expanded without changing how ChatGPT connects to DEMO.
