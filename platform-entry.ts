@@ -8,7 +8,7 @@ type Env = {
   COMPOSIO_API_KEY?: string;
 };
 
-const VERSION = "0.4.0";
+const VERSION = "0.3.5";
 const DEFAULT_PLATFORM_ORIGIN = "https://demo-platform.pages.dev";
 const COMPOSIO_API = "https://backend.composio.dev/api/v3.1";
 const LOCAL_ORIGINS = new Set(["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:3000", "http://127.0.0.1:5173"]);
