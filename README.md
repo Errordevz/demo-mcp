@@ -1,81 +1,107 @@
-# DEMO v0.1 — Cloudflare Remote MCP
+# DEMO MCP — Cloudflare Worker
 
-A Cloudflare Workers implementation of DEMO, designed to be connected through one remote MCP URL.
+DEMO MCP is the execution/backend layer for **DEMO Platform**. The Platform is the UI and control center; this Worker owns MCP tools, browser automation, skills.sh access and external-service integrations.
 
-## What is included
+## Architecture
 
-- Streamable HTTP MCP endpoint: `/mcp`
-- Optional Bearer authentication
+```text
+DEMO Platform (website)
+        │
+        │ HTTPS + CORS
+        ▼
+DEMO MCP Worker (Cloudflare)
+        │
+        ├── /mcp
+        ├── /health
+        ├── /platform/stats
+        ├── skills.sh
+        ├── Browser Run
+        └── external integrations
+```
+
+Current Worker entrypoint is `platform-entry.ts`. It wraps the existing `index.ts` MCP implementation rather than replacing its tools.
+
+## Current endpoints
+
+- `GET /` — public basic status
+- `GET /health` — public health status
+- `GET /platform/stats` — safe Platform telemetry
+- `/mcp` — remote MCP endpoint
+
+### Safe telemetry
+
+`/platform/stats` exposes only operational metadata such as:
+
+- DEMO version
+- online status
+- isolate-local uptime
+- isolate-local request counter
+- enabled capability flags
+- endpoint names
+
+It intentionally does **not** expose API keys, OAuth tokens, cookies, prompts, user content, SMTP credentials, environment variables or private account data.
+
+The request counter and uptime are isolate-local because ordinary Worker memory is ephemeral. They reset when an isolate is recycled; they are not presented as globally authoritative analytics.
+
+## Platform CORS
+
+Browser requests are allowlisted before reaching MCP. The configured Platform origin is supplied through the non-secret `DEMO_PLATFORM_ORIGIN` variable, with the current fallback:
+
+```text
+https://demo-platform.pages.dev
+```
+
+Local development origins are also supported:
+
+```text
+http://localhost:3000
+http://localhost:5173
+http://127.0.0.1:3000
+http://127.0.0.1:5173
+```
+
+If the Platform gets a custom domain, update `DEMO_PLATFORM_ORIGIN` in Cloudflare Worker Variables. For multiple origins, use a comma-separated allowlist. Do not change this to `*` for the MCP endpoint.
+
+The gateway validates the incoming browser Origin and then delegates the already-validated request to the existing MCP implementation. This keeps the Platform connected without opening MCP to arbitrary websites.
+
+Cloudflare recommends explicit CORS handling for Worker APIs and warns that CORS is not authentication; the MCP endpoint should still use authentication when protected operations are exposed.
+
+## Existing capabilities
+
+The underlying `index.ts` implementation remains responsible for DEMO's existing capabilities, including:
+
 - DEMO ping
 - JSON formatting
 - SHA-256 / SHA-512 hashing
 - UUID generation
 - HTTP fetch
-- Roblox user lookup
-- Roblox experience lookup
+- Roblox lookups
+- Cloudflare Browser Run navigation/inspection
+- screenshots
+- browser interaction
+- skills.sh discovery/fetching
+- Composio-connected app tools when configured
 
-## Deploy from your computer
+## Authentication
 
-Install Node.js 22+ and authenticate Wrangler:
-
-```bash
-npm install
-npx wrangler login
-npm install
-npm run typecheck
-npm run deploy
-```
-
-Wrangler prints a URL similar to:
-
-```text
-https://demo-mcp.<your-subdomain>.workers.dev
-```
-
-Your MCP URL is:
-
-```text
-https://demo-mcp.<your-subdomain>.workers.dev/mcp
-```
-
-## Add an API key
-
-Create a strong secret:
+Optional Bearer authentication remains supported through `DEMO_API_KEY`:
 
 ```bash
 npx wrangler secret put DEMO_API_KEY
 ```
 
-Enter the key when prompted.
+Never put API keys, OAuth tokens, SMTP credentials or app passwords in GitHub source or `wrangler.jsonc`. Cloudflare recommends Worker secrets for sensitive values.
 
-Then clients should send:
+## Deployment
 
-```text
-Authorization: Bearer YOUR_KEY
+```bash
+npm install
+npm run typecheck
+npm run deploy
 ```
 
-## Test
+The Worker should continue to deploy to the existing `demo-mcp.<subdomain>.workers.dev` hostname unless its Cloudflare configuration is changed.
 
-Health:
+## DEMO Platform
 
-```text
-https://demo-mcp.<your-subdomain>.workers.dev/health
-```
-
-MCP:
-
-```text
-https://demo-mcp.<your-subdomain>.workers.dev/mcp
-```
-
-## Connect from a phone
-
-Use the `/mcp` URL in an MCP client that supports remote Streamable HTTP MCP servers. If the client asks for authentication, choose Bearer token and provide the value stored in `DEMO_API_KEY`.
-
-## Browser automation
-
-DEMO v0.1 keeps browser automation out of this base Worker. For the next release, integrate Cloudflare Browser Run / Playwright MCP rather than trying to install normal Chromium/Playwright inside a Worker.
-
-## Security
-
-Do not expose an unauthenticated DEMO server once you add powerful tools. The API key is intentionally simple for v0.1; production DEMO should add stronger authentication, rate limits, per-tool permissions, and auditing before adding shell or arbitrary server-side code execution.
+The companion UI repository is `Errordevz/demo-platform`. It polls `/platform/stats` and `/health` and displays live Worker state in the independent DEMO Platform dashboard.
