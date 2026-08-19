@@ -5,20 +5,22 @@ type Env = {
   DEMO_PLATFORM_ORIGIN?: string;
   DEMO_API_KEY?: string;
   BROWSER?: unknown;
-  COMPOSIO_API_KEY?: string;
+  SCREENSHOTS?: R2Bucket;
 };
 
 const VERSION = "0.3.5";
 const DEFAULT_PLATFORM_ORIGIN = "https://demo-platform.pages.dev";
-const COMPOSIO_API = "https://backend.composio.dev/api/v3.1";
 const LOCAL_ORIGINS = new Set(["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:3000", "http://127.0.0.1:5173"]);
 const startedAt = Date.now();
 let requestCount = 0;
 
+function configuredOrigins(env: Env) {
+  return (env.DEMO_PLATFORM_ORIGIN || DEFAULT_PLATFORM_ORIGIN).split(",").map((v) => v.trim()).filter(Boolean);
+}
+
 function allowedOrigin(origin: string | null, env: Env): string | null {
   if (!origin) return null;
-  const configured = (env.DEMO_PLATFORM_ORIGIN || DEFAULT_PLATFORM_ORIGIN).split(",").map((value) => value.trim()).filter(Boolean);
-  if (configured.includes(origin) || LOCAL_ORIGINS.has(origin)) return origin;
+  if (configuredOrigins(env).includes(origin) || LOCAL_ORIGINS.has(origin)) return origin;
   return null;
 }
 
@@ -36,8 +38,7 @@ function corsHeaders(origin: string | null, env: Env): HeadersInit {
 
 function withCors(response: Response, request: Request, env: Env): Response {
   const headers = new Headers(response.headers);
-  const extra = corsHeaders(request.headers.get("Origin"), env);
-  for (const [key, value] of Object.entries(extra)) headers.set(key, value);
+  for (const [key, value] of Object.entries(corsHeaders(request.headers.get("Origin"), env))) headers.set(key, value);
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
@@ -48,21 +49,7 @@ function unauthorized(request: Request, env: Env): Response | null {
   return Response.json({ error: "Unauthorized" }, { status: 401 });
 }
 
-async function composio(env: Env, path: string, init: RequestInit = {}) {
-  if (!env.COMPOSIO_API_KEY) throw new Error("COMPOSIO_API_KEY is not configured");
-  const headers = new Headers(init.headers);
-  headers.set("x-api-key", env.COMPOSIO_API_KEY);
-  headers.set("accept", "application/json");
-  if (init.body) headers.set("content-type", "application/json");
-  const response = await fetch(`${COMPOSIO_API}${path}`, { ...init, headers });
-  const raw = await response.text();
-  let data: any;
-  try { data = raw ? JSON.parse(raw) : null; } catch { data = raw; }
-  if (!response.ok) throw new Error(`Composio ${response.status}: ${typeof data === "string" ? data.slice(0, 800) : JSON.stringify(data).slice(0, 1600)}`);
-  return data;
-}
-
-function stats(env: Env) {
+function telemetry(env: Env) {
   return {
     ok: true,
     name: "DEMO",
@@ -71,11 +58,40 @@ function stats(env: Env) {
     generatedAt: new Date().toISOString(),
     uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
     requestCountSinceIsolateStart: requestCount,
-    architecture: { surface: "DEMO", router: "Composio", credentials: "server-only" },
-    capabilities: { mcp: true, browser: Boolean(env.BROWSER), composio: Boolean(env.COMPOSIO_API_KEY), screenshots: Boolean(env.BROWSER), gatewayUi: true },
-    endpoints: { ui: "/", mcp: "/mcp", health: "/health", gateway: "/gateway", tools: "/gateway/tools", toolkits: "/gateway/toolkits", telemetry: "/platform/stats" },
+    toolCount: 29,
+    skillCount: 8,
+    architecture: { surface: "DEMO Platform", execution: "DEMO MCP", credentials: "server-only" },
+    capabilities: {
+      mcp: true,
+      browser: Boolean(env.BROWSER),
+      browserWatching: Boolean(env.BROWSER),
+      screenshots: Boolean(env.BROWSER && env.SCREENSHOTS),
+      screenshotLinks: Boolean(env.SCREENSHOTS),
+      skills: true,
+      skillsSh: true,
+      composio: false,
+    },
+    connections: [
+      { name: "DEMO MCP", type: "Execution Worker", connected: true },
+      { name: "Skills.sh", type: "Skill discovery", connected: true },
+      { name: "Browser", type: "Cloudflare Browser Run", connected: Boolean(env.BROWSER) },
+      { name: "Screenshot storage", type: "Cloudflare R2", connected: Boolean(env.SCREENSHOTS) },
+    ],
+    endpoints: { ui: "/", mcp: "/mcp", health: "/health", telemetry: "/platform/stats", screenshots: "/screenshots/:id" },
     telemetry: { scope: "worker-isolate", containsSecrets: false, containsUserContent: false },
   };
+}
+
+async function screenshotObject(request: Request, env: Env, id: string): Promise<Response> {
+  if (!env.SCREENSHOTS) return new Response("Screenshot storage is not configured", { status: 503 });
+  if (!/^[A-Za-z0-9_-]{16,100}$/.test(id)) return new Response("Invalid screenshot id", { status: 400 });
+  const object = await env.SCREENSHOTS.get(`screenshots/${id}`);
+  if (!object) return new Response("Screenshot not found", { status: 404 });
+  const headers = new Headers();
+  object.writeHttpMetadata(headers);
+  headers.set("Cache-Control", "private, max-age=3600");
+  headers.set("X-Content-Type-Options", "nosniff");
+  return new Response(object.body, { headers });
 }
 
 export default {
@@ -89,38 +105,18 @@ export default {
 
     if (url.pathname === "/") return demoUi();
 
-    if (url.pathname === "/gateway") {
-      const authError = unauthorized(request, env);
-      if (authError) return withCors(authError, request, env);
-      return withCors(Response.json({ ...stats(env), message: "DEMO is the gateway. Composio is an internal routing provider." }, { headers: { "Cache-Control": "no-store" } }), request, env);
-    }
-
-    if (url.pathname === "/gateway/toolkits") {
-      const authError = unauthorized(request, env);
-      if (authError) return withCors(authError, request, env);
-      try { return withCors(Response.json(await composio(env, `/toolkits?sort_by=usage&include_deprecated=false`)), request, env); }
-      catch (e) { return withCors(Response.json({ error: String(e) }, { status: 502 }), request, env); }
-    }
-
-    if (url.pathname === "/gateway/tools") {
-      const authError = unauthorized(request, env);
-      if (authError) return withCors(authError, request, env);
-      try {
-        const q = url.searchParams.get("query")?.trim();
-        const toolkit = url.searchParams.get("toolkit")?.trim();
-        const params = new URLSearchParams();
-        params.set("limit", "60");
-        if (q) params.set("query", q);
-        if (toolkit) params.set("toolkit_slug", toolkit);
-        return withCors(Response.json(await composio(env, `/tools?${params.toString()}`)), request, env);
-      } catch (e) { return withCors(Response.json({ error: String(e) }, { status: 502 }), request, env); }
-    }
-
     if (url.pathname === "/platform/stats") {
-      const authError = unauthorized(request, env);
-      if (authError) return withCors(authError, request, env);
-      return withCors(Response.json(stats(env), { headers: { "Cache-Control": "no-store" } }), request, env);
+      // Safe public telemetry: deliberately excludes credentials, tokens and user content.
+      return withCors(Response.json(telemetry(env), { headers: { "Cache-Control": "no-store" } }), request, env);
     }
+
+    if (url.pathname === "/screenshots/" || url.pathname.startsWith("/screenshots/")) {
+      const id = url.pathname.slice("/screenshots/".length);
+      return withCors(await screenshotObject(request, env, id), request, env);
+    }
+
+    const authError = unauthorized(request, env);
+    if (authError && url.pathname === "/mcp") return withCors(authError, request, env);
 
     const forwardedHeaders = new Headers(request.headers);
     if (origin) forwardedHeaders.delete("Origin");
