@@ -8,6 +8,12 @@
   "browser": {
     "binding": "BROWSER"
   },
+  "r2_buckets": [
+    {
+      "binding": "SCREENSHOTS",
+      "bucket_name": "demo-mcp-screenshots"
+    }
+  ],
   "vars": {
     "DEMO_PLATFORM_ORIGIN": "https://demo-platform.pages.dev"
   }
