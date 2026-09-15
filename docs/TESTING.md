@@ -18,9 +18,10 @@ snapshot rendering and the whole MCP/HTTP surface run for real.
 | Page scripts | `tests/page-scripts.test.ts` | The serialised in-page functions run under jsdom in a `vm` context — the same way a browser would run them. |
 | Runtime integration | `tests/browser-session.test.ts` | `BrowserRuntime` against a fake provider: open, redirects, screenshots → R2, a11y snapshots, tabs, timeouts, login walls, CAPTCHA pause/resume, degraded capabilities, typing secrets. |
 | Media | `tests/media.test.ts` | Metadata reports and frame sampling, including the "cannot decode", "DRM protected" and "no video" honest-failure paths. |
-| MCP surface | `tests/mcp-tools.test.ts` | The Worker itself: tool inventory (40 tools incl. every original DEMO tool), `demo_ping`, utility tools, capability reporting without bindings, URL validation, session validation, auth on `/mcp`, `/health`, `/tools`, `/platform/stats`, screenshot id validation. |
+| Public video | `tests/video.test.ts` | Safe redirect/media-candidate resolution, SSRF redirect rejection, platform challenge reporting and content-addressed expiring artifact references. |
+| MCP surface | `tests/mcp-tools.test.ts` | The Worker itself: tool inventory (47 tools incl. every original DEMO tool), `demo_ping`, utility tools, capability reporting without bindings, URL validation, session validation, auth on `/mcp`, `/health`, `/tools`, `/platform/stats`, screenshot id validation. |
 | Build gate | `tests/worker-build.test.ts` | `wrangler deploy --dry-run` succeeds and the plan contains every binding. |
-| Live (opt-in) | `tests/live.test.ts` | Real Browser Run: open a page, screenshot to R2, read, snapshot, TikTok short link + honest failure reporting. |
+| Live (opt-in) | `tests/live.test.ts`, `tests/video-live.test.ts` | Real Browser Run: open a page, screenshot to R2, read, snapshot, TikTok short link, and the supplied TikTok URL with a requirement for actual MCP image frames or an exact technical failure. |
 
 ## Fixtures and helpers
 

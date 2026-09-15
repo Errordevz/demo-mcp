@@ -86,7 +86,10 @@ export class ScreenshotManager {
     const extension: StoredImage["extension"] = type === "jpeg" ? "jpg" : type;
     const prefix = options.prefix ?? "screenshots";
     const key = `${prefix}/${id}`;
-    const customMetadata: Record<string, string> = { createdAt: new Date().toISOString() };
+    const customMetadata: Record<string, string> = {
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + LIMITS.videoArtifactTtlSeconds * 1000).toISOString(),
+    };
     for (const [name, value] of Object.entries(meta)) {
       if (value === undefined || value === null) continue;
       customMetadata[name.slice(0, 100)] = String(value).slice(0, 500);

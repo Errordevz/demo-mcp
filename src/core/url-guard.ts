@@ -168,15 +168,21 @@ export function isPrivateIp(ip: string): boolean {
 export function createDohResolver(fetchImpl: typeof fetch = fetch, endpoint = "https://cloudflare-dns.com/dns-query"): DnsResolver {
   return {
     async resolve(hostname: string): Promise<string[]> {
-      const url = `${endpoint}?name=${encodeURIComponent(hostname)}&type=A,AAAA`;
-      const response = await fetchImpl(url, { headers: { accept: "application/dns-json" } });
-      if (!response.ok) throw new Error(`DNS lookup failed with status ${response.status}`);
-      const data = (await response.json()) as {
-        Status?: number;
-        Answer?: Array<{ type?: number; data?: string }>;
-      };
-      if (data.Status !== 0 || !Array.isArray(data.Answer)) return [];
-      return data.Answer.map((answer) => String(answer.data ?? "").trim()).filter((entry) => entry.length > 0);
+      const types = ["A", "AAAA"];
+      const answers = await Promise.all(
+        types.map(async (type) => {
+          const url = `${endpoint}?name=${encodeURIComponent(hostname)}&type=${type}`;
+          const response = await fetchImpl(url, { headers: { accept: "application/dns-json" } });
+          if (!response.ok) throw new Error(`DNS lookup failed with status ${response.status}`);
+          const data = (await response.json()) as {
+            Status?: number;
+            Answer?: Array<{ type?: number; data?: string }>;
+          };
+          if (data.Status !== 0 || !Array.isArray(data.Answer)) return [];
+          return data.Answer.map((answer) => String(answer.data ?? "").trim()).filter((entry) => entry.length > 0);
+        }),
+      );
+      return [...new Set(answers.flat())];
     },
   };
 }

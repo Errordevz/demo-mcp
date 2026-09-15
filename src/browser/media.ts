@@ -24,6 +24,7 @@ import {
   type MediaElementInfo,
   type MediaPayload,
 } from "./page-scripts.js";
+import { toInlineImage } from "./screenshot.js";
 import type { ScreenshotManager } from "./screenshot.js";
 import { isTikTokUrl, parseTikTok, type TikTokInfo } from "./tiktok.js";
 import type { PageHandle, ScreenshotType } from "./types.js";
@@ -236,20 +237,30 @@ export class MediaInspector {
       const clip = intersectClip(rect, viewport);
       try {
         const bytes = await page.screenshot({ type, fullPage: false, ...(clip ? { clip } : {}) });
-        const stored = await this.screenshots.store(bytes, type, {
-          source: "browser_video_frames",
-          url: page.url(),
-          frameIndex: i,
-          timeSeconds: time,
-          videoIndex: index,
-        });
+        let stored: Awaited<ReturnType<ScreenshotManager["store"]>> | null = null;
+        if (this.screenshots.available) {
+          try {
+            stored = await this.screenshots.store(bytes, type, {
+              source: "browser_video_frames",
+              url: page.url(),
+              frameIndex: i,
+              timeSeconds: time,
+              videoIndex: index,
+            });
+          } catch (error) {
+            safeLog("warn", "frame-storage-failed", { time, message: String(error) });
+            if (!options.inline) throw error;
+          }
+        }
+        const inlineData = options.inline ? await toInlineImage(bytes, type) : null;
+        if (!stored && !inlineData) throw new BrowserError("FRAMES_UNAVAILABLE", "The frame was decoded but could not be exposed: R2 storage is unavailable and the image exceeds the inline MCP size cap.");
         frames.push({
           index: i,
           timeSeconds: time,
-          url: stored.url,
-          mimeType: stored.mimeType,
-          bytes: stored.bytes,
-          ...(options.inline ? { inlineData: null } : {}),
+          url: stored?.url ?? null,
+          mimeType: stored?.mimeType ?? `image/${type === "jpeg" ? "jpeg" : type}`,
+          bytes: bytes.byteLength,
+          ...(inlineData ? { inlineData } : {}),
           ok: true,
         });
       } catch (error) {

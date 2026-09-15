@@ -5,6 +5,9 @@
   "compatibility_date": "2026-08-16",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
+  "triggers": {
+    "crons": ["0 * * * *"]
+  },
   "browser": {
     "binding": "BROWSER"
   },
@@ -33,6 +36,10 @@
     "BROWSER_PROVIDER": "cloudflare",
     "BROWSER_KEEPALIVE_MS": "300000",
     "SSRF_DNS_CHECK": "true",
-    "SSRF_DNS_FAIL_OPEN": "true"
+    "SSRF_DNS_FAIL_OPEN": "true",
+    "VIDEO_MAX_DOWNLOAD_MB": "50",
+    "VIDEO_MAX_DURATION_SECONDS": "600",
+    "VIDEO_ARTIFACT_TTL_SECONDS": "3600",
+    "VIDEO_RATE_LIMIT_PER_MINUTE": "12"
   }
 }

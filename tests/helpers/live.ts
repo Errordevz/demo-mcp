@@ -40,6 +40,8 @@ export interface CallResult {
   isError: boolean;
   text: string;
   parsed: any;
+  imageCount: number;
+  imageMimeTypes: string[];
 }
 
 interface JsonRpc {
@@ -86,14 +88,22 @@ export function connectLive(baseUrl?: string, apiKey?: string): LiveClient {
       if (!message) throw new Error(`Unparseable MCP response: ${body.slice(0, 400)}`);
       if (message.error) throw new Error(`MCP error ${message.error.code}: ${message.error.message}`);
       const result = message.result ?? {};
-      const text = (result.content ?? []).map((entry: { text?: string }) => entry.text ?? "").join("\n");
+      const content = Array.isArray(result.content) ? result.content : [];
+      const text = content.map((entry: { text?: string }) => entry.text ?? "").join("\n");
+      const imageEntries = content.filter((entry: { type?: string }) => entry.type === "image");
       let parsed: unknown = null;
       try {
         parsed = JSON.parse(text);
       } catch {
         parsed = null;
       }
-      return { isError: Boolean(result.isError), text, parsed };
+      return {
+        isError: Boolean(result.isError),
+        text,
+        parsed,
+        imageCount: imageEntries.length,
+        imageMimeTypes: imageEntries.map((entry: { mimeType?: string }) => String(entry.mimeType ?? "")),
+      };
     },
     async close(): Promise<void> {
       /* HTTP transport is stateless per request */

@@ -51,6 +51,9 @@ describe("MCP surface", () => {
     for (const legacy of ["browser_inspect", "browser_fill", "browser_press", "browser_evaluate", "browser_console", "browser_run", "browser_watch", "browser_task"]) {
       expect(names).toContain(legacy);
     }
+    for (const video of ["video_inspect_url", "video_download_public", "video_extract_frames", "video_extract_audio", "video_transcribe", "video_analyze", "video_get_frame"]) {
+      expect(names).toContain(video);
+    }
     for (const skill of ["skills_search", "skills_browse", "skills_get", "skills_use", "skills_audit", "skills_curated", "skill_install_info", "skill_builtin_caveman"]) {
       expect(names).toContain(skill);
     }
@@ -66,6 +69,7 @@ describe("MCP surface", () => {
     expect(parsed).toHaveProperty("browserSessions");
     expect(parsed).toHaveProperty("liveView");
     expect(parsed).toHaveProperty("videoFrames");
+    expect(parsed.publicVideo).toBe(true);
   });
 
   it("keeps the original utility tools working", async () => {
