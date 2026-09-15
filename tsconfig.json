@@ -3,9 +3,12 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "Bundler",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
     "strict": true,
     "skipLibCheck": true,
+    "noUnusedLocals": false,
     "types": ["@cloudflare/workers-types"]
   },
-  "include": ["index.ts"]
+  "include": ["tests/**/*.ts", "index.ts", "platform-entry.ts", "ui.ts", "src/**/*.ts"],
+  "exclude": ["node_modules"]
 }

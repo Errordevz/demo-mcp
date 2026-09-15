@@ -1,12 +1,16 @@
 {
   "name": "demo-cloudflare-mcp",
-  "version": "0.3.5",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:live": "DEMO_MCP_LIVE=1 vitest run tests/live.test.ts",
+    "build:check": "CI=1 wrangler deploy --dry-run --outdir dist"
   },
   "dependencies": {
     "@cloudflare/puppeteer": "^1.1.0",
@@ -16,7 +20,10 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20260731.1",
+    "@types/jsdom": "^30.0.0",
+    "jsdom": "^30.0.1",
     "typescript": "^5.9.0",
+    "vitest": "^3.2.7",
     "wrangler": "^4.0.0"
   }
 }
