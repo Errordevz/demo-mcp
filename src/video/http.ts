@@ -36,7 +36,12 @@ export interface PublicFetchOptions {
   referer?: string;
 }
 
-function guardOptions(env: VideoEnv) {
+/**
+ * SSRF guard options for the public video pipeline. Exported so the pipeline
+ * diagnostic (`video_inspect_pipeline`) can run the exact same validation as
+ * the resolver without duplicating the policy.
+ */
+export function videoGuardOptions(env: VideoEnv) {
   return {
     allowInsecureHttp: true,
     dns: String(env.SSRF_DNS_CHECK ?? "true").toLowerCase() !== "false" ? createDohResolver() : null,
@@ -59,7 +64,7 @@ export async function fetchPublic(
 ): Promise<PublicFetchResult> {
   const timeoutMs = Math.max(1_000, Math.min(options.timeoutMs ?? LIMITS.videoResolveTimeoutMs, 120_000));
   const maxRedirects = Math.max(0, Math.min(options.maxRedirects ?? LIMITS.videoMaxRedirects, 8));
-  let current = (await assertNavigableUrl(input, guardOptions(env))).url;
+  let current = (await assertNavigableUrl(input, videoGuardOptions(env))).url;
   const redirects: string[] = [];
 
   for (let hop = 0; hop <= maxRedirects; hop++) {
@@ -72,7 +77,7 @@ export async function fetchPublic(
       headers.set("accept", headers.get("accept") ?? "text/html,video/*,audio/*,application/json;q=0.9,*/*;q=0.2");
       headers.set("user-agent", headers.get("user-agent") ?? "DEMO-MCP-public-video/1.0 (+https://demo-mcp.pages.dev)");
       if (options.referer) {
-        const safeReferer = (await assertNavigableUrl(options.referer, guardOptions(env))).url;
+        const safeReferer = (await assertNavigableUrl(options.referer, videoGuardOptions(env))).url;
         headers.set("referer", safeReferer);
       }
       const response = await fetch(current, { ...init, headers, redirect: "manual", signal: controller.signal });
@@ -81,7 +86,7 @@ export async function fetchPublic(
       if (!location) throw videoError("VIDEO_NOT_PUBLIC", `The public URL returned redirect status ${response.status} without a Location header.`);
       if (hop >= maxRedirects) throw videoError("VIDEO_NOT_PUBLIC", `The URL exceeded the ${maxRedirects}-redirect safety limit.`);
       const next = new URL(location, current).toString();
-      const guarded = await assertNavigableUrl(next, guardOptions(env));
+      const guarded = await assertNavigableUrl(next, videoGuardOptions(env));
       redirects.push(guarded.url);
       current = guarded.url;
     } catch (error) {
@@ -331,6 +336,7 @@ function resolutionFailure(sourceUrl: string, platform: VideoPlatform, error: st
     error,
     message,
     redirects: extra.redirects ?? [],
+    candidateCount: extra.candidateCount ?? 0,
     challenge: extra.challenge ?? { detected: false, kind: null, reason: null },
     limitations: extra.limitations ?? [],
     ...(extra.pageText ? { pageText: extra.pageText } : {}),
@@ -367,7 +373,7 @@ export async function resolvePublicVideo(sourceUrl: string, env: VideoEnv): Prom
   const platform = platformForUrl(sourceUrl);
   let guarded: string;
   try {
-    guarded = (await assertNavigableUrl(sourceUrl, guardOptions(env))).url;
+    guarded = (await assertNavigableUrl(sourceUrl, videoGuardOptions(env))).url;
   } catch (error) {
     const info = error instanceof BrowserError ? error : null;
     return resolutionFailure(sourceUrl, platform, info?.code ?? "VIDEO_NOT_PUBLIC", info?.message ?? safeMessage(error));
@@ -397,6 +403,7 @@ export async function resolvePublicVideo(sourceUrl: string, env: VideoEnv): Prom
         error: null,
         message: null,
         redirects: head.redirects,
+        candidateCount: 1,
         challenge: { detected: false, kind: null, reason: null },
         limitations: type ? [] : ["The CDN did not provide a video content type; the URL extension was used as a bounded hint."],
       };
@@ -431,6 +438,7 @@ export async function resolvePublicVideo(sourceUrl: string, env: VideoEnv): Prom
       error: null,
       message: null,
       redirects: page.redirects,
+      candidateCount: 1,
       challenge: { detected: false, kind: null, reason: null },
       limitations: [],
     };
@@ -466,6 +474,7 @@ export async function resolvePublicVideo(sourceUrl: string, env: VideoEnv): Prom
       error: null,
       message: null,
       redirects: page.redirects,
+      candidateCount: candidates.length,
       challenge,
       limitations: [
         ...(challenge.detected ? ["The page also contained challenge/login signals; only the separately public media URL was used."] : []),
@@ -479,6 +488,7 @@ export async function resolvePublicVideo(sourceUrl: string, env: VideoEnv): Prom
   return resolutionFailure(sourceUrl, platform, error, challenge.reason ?? "No directly accessible public video media URL was exposed by the page.", {
     resolvedUrl: page.finalUrl,
     redirects: page.redirects,
+    candidateCount: candidates.length,
     metadata: mediaMetadata({ durationSeconds: parsed.durationSeconds, width: parsed.width, height: parsed.height, title: parsed.title, description: parsed.description, thumbnailUrl: parsed.thumbnailUrl }),
     challenge,
     limitations: [

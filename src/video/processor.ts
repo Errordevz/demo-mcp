@@ -1,21 +1,39 @@
 import { BrowserError, asBrowserError } from "../core/errors.js";
 import { LIMITS, clamp } from "../core/limits.js";
-import { redactText } from "../core/redact.js";
+import { redactText, redactValue } from "../core/redact.js";
 import { resolveScreenshotBase } from "../session/factory.js";
 import { SessionManager } from "../session/manager.js";
 import { MediaInspector } from "../browser/media.js";
 import { PuppeteerPageHandle } from "../browser/providers/puppeteer-adapter.js";
 import { ScreenshotManager } from "../browser/screenshot.js";
 import { capturePublicAudio, installPublicVideo } from "./page-functions.js";
-import { contentType, fetchPublic, isPlaylistContentType, isVideoContentType, looksLikeMediaUrl, readBounded, resolvePublicVideo, videoError } from "./http.js";
+import {
+  contentType,
+  fetchPublic,
+  formatBytes,
+  isPlaylistContentType,
+  isVideoContentType,
+  looksLikeMediaUrl,
+  readBounded,
+  resolvePublicVideo,
+  videoError,
+  videoGuardOptions,
+} from "./http.js";
 import { VideoArtifactStore, artifactBaseUrl } from "./store.js";
+import { assertNavigableUrl } from "../core/url-guard.js";
 import type {
+  PipelineStageReport,
   TimestampedTranscriptSegment,
   VideoArtifact,
   VideoEnv,
   VideoFrameOutput,
+  VideoIngestAudio,
+  VideoIngestOptions,
+  VideoIngestResult,
   VideoInput,
   VideoMetadata,
+  VideoPipelineReport,
+  VideoPlatform,
   VideoResolution,
   VideoTranscript,
 } from "./types.js";
@@ -70,8 +88,15 @@ export interface VideoInspectResult {
   limitations: string[];
 }
 
+/**
+ * Read a bounded numeric config value. Unset/blank values fall back to the
+ * default instead of being parsed (Number("") is 0, which would otherwise
+ * clamp every limit to its minimum whenever the variable is absent).
+ */
 function configuredNumber(value: string | number | undefined, fallback: number, min: number, max: number): number {
-  const parsed = typeof value === "number" ? value : Number(value ?? "");
+  const raw = value === undefined || (typeof value === "string" && value.trim() === "") ? undefined : value;
+  if (raw === undefined) return fallback;
+  const parsed = typeof raw === "number" ? raw : Number(raw);
   return Number.isFinite(parsed) ? Math.max(min, Math.min(Math.trunc(parsed), max)) : fallback;
 }
 
@@ -307,9 +332,427 @@ export class VideoProcessor {
     return base;
   }
 
+  /**
+   * One-call public video ingestion.
+   *
+   * Pipeline: validate + resolve (safe public redirects) -> bounded download to
+   * expiring R2 -> Browser Run frame decoding -> optional audio/transcript ->
+   * optional frame-grounded analysis. Every stage that fails is reported in
+   * `limitations`/`error` with its stable code; nothing is fabricated. The
+   * returned `frames` carry `inlineData` (base64) when they fit the MCP inline
+   * cap, so the tool layer can ship them to the client as real `image` content
+   * blocks, plus short-lived R2 references.
+   */
+  async ingest(url: string, options: VideoIngestOptions): Promise<VideoIngestResult> {
+    this.charge("ingest", url);
+    const outputMode = options.outputMode;
+    const needsArtifact = outputMode !== "frames";
+    const needsFrames = outputMode !== "video_artifact";
+
+    let resolution = await this.resolve(url);
+    const maxDuration = Math.min(options.maxDurationSeconds ?? this.maxDuration(), this.maxDuration());
+    const frameRequest: FrameRequest = {
+      ...(resolution.metadata.durationSeconds !== null
+        ? {
+            timestamps: frameTimestamps(
+              resolution.metadata.durationSeconds,
+              { frameInterval: options.frameIntervalSeconds, maxFrameCount: options.frameCount ?? LIMITS.videoFramesMaxCount },
+              maxDuration,
+            ),
+          }
+        : { frameInterval: options.frameIntervalSeconds, maxFrameCount: options.frameCount ?? LIMITS.videoFramesMaxCount }),
+      inline: true,
+    };
+
+    const limitations: string[] = [...resolution.limitations];
+    let artifact: VideoArtifact | null = null;
+    let frames: VideoFrameOutput[] = [];
+    let frameError: string | null = null;
+    let frameMessage: string | null = null;
+
+    if (needsArtifact && resolution.success && resolution.mediaUrl) {
+      const downloaded = await this.downloadResolved(resolution);
+      artifact = downloaded.artifact;
+      if (artifact) {
+        resolution = {
+          ...resolution,
+          metadata: {
+            ...resolution.metadata,
+            contentType: resolution.metadata.contentType ?? artifact.contentType,
+            contentLength: resolution.metadata.contentLength ?? artifact.bytes,
+            durationSeconds: resolution.metadata.durationSeconds ?? artifact.durationSeconds,
+            width: resolution.metadata.width ?? artifact.width,
+            height: resolution.metadata.height ?? artifact.height,
+          },
+        };
+      } else {
+        limitations.push(downloaded.message ?? "The public media URL could not be downloaded to temporary R2 storage.");
+      }
+    }
+
+    if (needsFrames) {
+      let captured: FrameCaptureResult;
+      if (resolution.success && resolution.mediaUrl) {
+        captured = await this.extractFramesFromSource(resolution.mediaUrl, frameRequest);
+        if (!captured.success) {
+          // The literal media URL may not decode (e.g. a CDN that only serves
+          // to browsers) while the public page's <video> element does.
+          const fallbackUrl = resolution.resolvedUrl && resolution.resolvedUrl !== resolution.mediaUrl ? resolution.resolvedUrl : url;
+          const fallback = await this.extractFramesFromSource(fallbackUrl, frameRequest, looksLikeMediaUrl(fallbackUrl));
+          if (fallback.success || fallback.frames.length > 0) captured = fallback;
+        }
+      } else if (resolution.error !== "blocked_url") {
+        // Dynamic platform pages frequently hide the media URL from a plain
+        // Worker fetch while exposing a normal HTML5 video to Browser Run.
+        captured = await this.extractFramesFromSource(url, frameRequest, looksLikeMediaUrl(url));
+      } else {
+        captured = {
+          success: false,
+          error: resolution.error,
+          message: resolution.message ?? undefined,
+          sourceUrl: url,
+          durationSeconds: null,
+          width: null,
+          height: null,
+          frames: [],
+          limitations: ["The URL was rejected by the SSRF guard, so no network or browser request was made."],
+        };
+      }
+      frames = captured.frames;
+      frameError = captured.error ?? null;
+      frameMessage = captured.message ?? null;
+      limitations.push(...captured.limitations);
+      if (captured.durationSeconds !== null || captured.width !== null || captured.height !== null) {
+        resolution = {
+          ...resolution,
+          metadata: {
+            ...resolution.metadata,
+            durationSeconds: resolution.metadata.durationSeconds ?? captured.durationSeconds,
+            width: resolution.metadata.width ?? captured.width,
+            height: resolution.metadata.height ?? captured.height,
+          },
+        };
+      }
+    }
+
+    let audio: VideoIngestAudio | null = null;
+    if (options.includeAudio) {
+      const input: VideoInput = artifact ? { videoReference: artifact.reference } : { url };
+      const extracted = await this.extractAudio(input);
+      if (extracted.artifact) {
+        audio = {
+          status: "audio_ready",
+          reference: extracted.artifact.reference,
+          url: extracted.artifact.url,
+          contentType: extracted.artifact.contentType,
+          bytes: extracted.artifact.bytes,
+          expiresAt: extracted.artifact.expiresAt,
+          message: null,
+        };
+      } else if (extracted.status === "no_audio_track") {
+        audio = { status: "no_audio_track", reference: null, url: null, contentType: null, bytes: null, expiresAt: null, message: extracted.message ?? null };
+      } else {
+        const message = extracted.message ?? extracted.error ?? "The audio track could not be extracted.";
+        audio = { status: "unavailable", reference: null, url: null, contentType: null, bytes: null, expiresAt: null, message };
+        limitations.push(message);
+      }
+    }
+
+    let transcript: VideoTranscript | null = null;
+    if (options.includeTranscript) {
+      const input: VideoInput = artifact ? { videoReference: artifact.reference } : { url };
+      transcript = await this.transcribe(input, { autoExtract: true, durationSeconds: resolution.metadata.durationSeconds });
+      if (transcript.status === "unavailable") limitations.push(transcript.message ?? "Speech-to-text was not available.");
+    }
+
+    let analysis: Record<string, unknown> | null = null;
+    if (outputMode === "analysis") {
+      const frameReferences = frames.filter((frame) => frame.imageReference).map((frame) => frame.imageReference as string);
+      if (frameReferences.length) {
+        analysis = await this.analyze({ url }, { frameReferences, includeTranscript: false });
+      } else {
+        analysis = {
+          success: false,
+          analysis_ready: false,
+          frames_inspected: [],
+          scene_changes: [],
+          visible_text_ocr: [],
+          objects_people: [],
+          actions_events: [],
+          audio_transcript_summary: { status: "not_requested", text: null, segments: [] },
+          limitations: ["No decoded frame with a retrievable reference was available for frame-grounded analysis."],
+        };
+      }
+    }
+
+    const framesOk = frames.some((frame) => frame.inspected);
+    let success: boolean;
+    let error: string | null;
+    let message: string | null;
+    if (resolution.error === "blocked_url") {
+      success = false;
+      error = "blocked_url";
+      message = resolution.message ?? "The URL was rejected by the SSRF guard.";
+    } else if (framesOk || artifact) {
+      success = true;
+      error = null;
+      message = null;
+    } else {
+      success = false;
+      error = resolution.error ?? frameError ?? "FRAMES_UNAVAILABLE";
+      message = resolution.message ?? frameMessage ?? "Neither decodable frames nor a downloadable public media file could be obtained.";
+    }
+
+    return {
+      success,
+      error,
+      message,
+      sourceUrl: url,
+      resolvedUrl: resolution.resolvedUrl,
+      mediaUrl: resolution.mediaUrl,
+      platform: resolution.platform,
+      mediaType: "video",
+      outputMode,
+      durationSeconds: resolution.metadata.durationSeconds,
+      width: resolution.metadata.width,
+      height: resolution.metadata.height,
+      contentType: resolution.metadata.contentType ?? artifact?.contentType ?? null,
+      frames,
+      videoArtifact: artifact,
+      audio,
+      transcript,
+      analysis,
+      analysisReady: framesOk,
+      challenge: resolution.challenge,
+      limitations,
+    };
+  }
+
+  /**
+   * Stage-by-stage diagnostic for the public video pipeline (admin-only tool).
+   *
+   * Runs the real stages in order and records each one's outcome, so it is
+   * obvious where a failure happens: URL validation, redirect resolution,
+   * media discovery, browser access, actual media retrieval (bounded sample),
+   * frame extraction, R2 upload (round-trip + cleanup), artifact URL
+   * generation, and MCP response serialization.
+   *
+   * The report never contains credentials, request bodies or page text: only
+   * validated public URLs, counts, sizes, durations and redacted error text.
+   * Media retrieval samples at most 64 KiB with a normal ranged public GET; it
+   * does not download or store the full file.
+   */
+  async inspectPipeline(url: string, options: { includeDownload?: boolean; includeFrames?: boolean } = {}): Promise<VideoPipelineReport> {
+    this.charge("pipeline", url);
+    const includeDownload = options.includeDownload !== false;
+    const includeFrames = options.includeFrames !== false;
+    const stages: PipelineStageReport[] = [];
+    const push = (stage: PipelineStageReport["stage"], status: PipelineStageReport["status"], detail: Record<string, unknown>, error: string | null, startedAt: number): void => {
+      stages.push({ stage, status, detail: redactedDetail(detail), error: error ? redactText(error, 400) : null, durationMs: Math.max(0, Date.now() - startedAt) });
+    };
+    const finish = (overall: VideoPipelineReport["overall"], message: string | null): VideoPipelineReport => {
+      const firstFailure = stages.find((stage) => stage.status === "failed")?.stage ?? null;
+      return { url, overall, firstFailure, stages, message };
+    };
+
+    // 1. URL validation (same SSRF guard + DoH policy as the resolver).
+    {
+      const startedAt = Date.now();
+      try {
+        const guarded = await assertNavigableUrl(url, videoGuardOptions(this.env));
+        push("url_validation", "ok", { url: guarded.url }, null, startedAt);
+      } catch (error) {
+        const normal = asBrowserError(error);
+        push("url_validation", "failed", {}, `${normal.code}: ${normal.message}`, startedAt);
+        return finish("failed", "The URL failed validation before any network request was made.");
+      }
+    }
+
+    // 2+3. Redirect resolution and media discovery share one bounded public
+    // fetch, so both stages report on the same resolution.
+    let resolution: VideoResolution | null = null;
+    {
+      // One bounded public fetch backs both stages: it follows safe redirects
+      // (redirect_resolution) and reads the page for literal media candidates
+      // (media_discovery).
+      const startedAt = Date.now();
+      resolution = await this.resolve(url);
+      push("redirect_resolution", resolution.success || resolution.resolvedUrl ? "ok" : "failed", {
+        platform: resolution.platform,
+        resolved_url: resolution.resolvedUrl,
+        redirects: resolution.redirects.length,
+        challenge: resolution.challenge,
+      }, resolution.success || resolution.resolvedUrl ? null : `${resolution.error}: ${resolution.message ?? "the public page could not be fetched"}`, startedAt);
+      push("media_discovery", resolution.mediaUrl ? "ok" : "failed", {
+        media_url: resolution.mediaUrl,
+        candidate_count: resolution.candidateCount,
+        title: (resolution.metadata.title ?? "").slice(0, 200) || null,
+        duration_seconds: resolution.metadata.durationSeconds,
+        content_type: resolution.metadata.contentType,
+      }, resolution.mediaUrl ? null : `${resolution.error}: ${resolution.message ?? "no literal public media URL was exposed"}`, startedAt);
+    }
+
+    // 4. Browser access: open the best known public URL in Browser Run.
+    {
+      const startedAt = Date.now();
+      const capabilities = new SessionManager(this.env as never, this.requestUrl).capabilities();
+      const target = resolution?.resolvedUrl ?? resolution?.mediaUrl ?? url;
+      if (!capabilities.browserAvailable) {
+        push("browser_access", "failed", { provider: capabilities.provider, available: false }, capabilities.reason ?? "browser unavailable", startedAt);
+      } else {
+        try {
+          const sessions = new SessionManager(this.env as never, this.requestUrl);
+          const info = await sessions.withRawPage(async (raw: any) => {
+            const page = new PuppeteerPageHandle(raw);
+            await page.goto(target, { waitUntil: "domcontentloaded", timeoutMs: LIMITS.videoResolveTimeoutMs });
+            return { finalUrl: page.url(), title: await page.title() };
+          });
+          push("browser_access", "ok", { provider: capabilities.provider, final_url: info.finalUrl, title: (info.title ?? "").slice(0, 200) || null, video_elements: null }, null, startedAt);
+        } catch (error) {
+          const normal = asBrowserError(error);
+          push("browser_access", "failed", { provider: capabilities.provider, final_url: target }, `${normal.code}: ${normal.message}`, startedAt);
+        }
+      }
+    }
+
+    // 5. Actual media retrieval: bounded ranged sample of the first 64 KiB.
+    if (!resolution?.mediaUrl) {
+      push("media_retrieval", includeDownload ? "skipped" : "skipped", { reason: includeDownload ? "no literal media URL was discovered" : "download sampling was not requested" }, null, Date.now());
+    } else {
+      const startedAt = Date.now();
+      try {
+        const result = await fetchPublic(
+          resolution.mediaUrl,
+          this.env,
+          { method: "GET", headers: { range: "bytes=0-65535", accept: "video/*,application/octet-stream;q=0.8" } },
+          { timeoutMs: LIMITS.videoResolveTimeoutMs, referer: resolution.resolvedUrl ?? url },
+        );
+        const bytes = await readBounded(result.response, 65_536, LIMITS.videoResolveTimeoutMs);
+        const type = contentType(result.response);
+        push("media_retrieval", "ok", {
+          http_status: result.response.status,
+          final_url: result.finalUrl,
+          content_type: type,
+          bytes_sampled: bytes.byteLength,
+          sample_shape: sampleShape(bytes),
+        }, null, startedAt);
+      } catch (error) {
+        const normal = asBrowserError(error);
+        push("media_retrieval", "failed", { media_url: resolution.mediaUrl }, `${normal.code}: ${normal.message}`, startedAt);
+      }
+    }
+
+    // 6. Frame extraction through Browser Run (inline off: the diagnostic does
+    // not need base64 in the payload, frames are still stored in R2).
+    {
+      const startedAt = Date.now();
+      if (!includeFrames) {
+        push("frame_extraction", "skipped", { reason: "frame extraction was not requested" }, null, startedAt);
+      } else if (!new SessionManager(this.env as never, this.requestUrl).capabilities().browserAvailable) {
+        push("frame_extraction", "skipped", { reason: "browser unavailable; frames cannot be decoded without Browser Run" }, null, startedAt);
+      } else {
+        const frameSource = resolution?.success && resolution.mediaUrl ? resolution.mediaUrl : resolution?.resolvedUrl ?? url;
+        try {
+          const captured = await this.extractFramesFromSource(frameSource, { frameInterval: LIMITS.videoFramesDefaultIntervalSeconds, maxFrameCount: Math.min(4, LIMITS.videoFramesMaxCount), inline: false }, looksLikeMediaUrl(frameSource));
+          push("frame_extraction", captured.success ? "ok" : "failed", {
+            source: frameSource,
+            frames_captured: captured.frames.filter((frame) => frame.inspected).length,
+            frames_total: captured.frames.length,
+            duration_seconds: captured.durationSeconds,
+            width: captured.width,
+            height: captured.height,
+          }, captured.success ? null : `${captured.error ?? "FRAMES_UNAVAILABLE"}: ${captured.message ?? "no decoded frame could be captured"}`, startedAt);
+        } catch (error) {
+          const normal = asBrowserError(error);
+          push("frame_extraction", "failed", { source: frameSource }, `${normal.code}: ${normal.message}`, startedAt);
+        }
+      }
+    }
+
+    // 7. R2 upload: real put + read-back + cleanup round trip.
+    {
+      const startedAt = Date.now();
+      const bucket = this.env.SCREENSHOTS as { get?: (key: string) => Promise<any>; delete?: (key: string) => Promise<unknown> } | undefined;
+      if (!this.screenshots.available) {
+        push("r2_upload", "failed", {}, this.screenshots.unavailableReason() ?? "R2 storage is not configured", startedAt);
+      } else if (!bucket?.get) {
+        push("r2_upload", "failed", {}, "The R2 binding does not expose reads, so the upload could not be verified.", startedAt);
+      } else {
+        try {
+          const marker = new TextEncoder().encode("demo-mcp video pipeline diagnostic");
+          const stored = await this.screenshots.store(marker, "jpeg", { source: "video_inspect_pipeline" });
+          const key = `screenshots/${stored.id}`;
+          const object = await bucket.get(key);
+          if (!object) throw new Error("the object could not be read back from R2");
+          const readBytes = object.arrayBuffer ? new Uint8Array(await object.arrayBuffer()) : new Uint8Array(await readStreamBytes(object.body as ReadableStream<Uint8Array>));
+          const verified = readBytes.byteLength === marker.byteLength;
+          await bucket.delete?.(key).catch(() => undefined);
+          push("r2_upload", verified ? "ok" : "failed", { key_prefix: "screenshots/", stored_bytes: stored.bytes, read_back_bytes: readBytes.byteLength, cleaned: true }, verified ? null : "the read-back bytes did not match the upload", startedAt);
+        } catch (error) {
+          push("r2_upload", "failed", {}, error instanceof Error ? error.message : String(error), startedAt);
+        }
+      }
+    }
+
+    // 8. Artifact URL generation: verify storage availability and the URL
+    // contract used by /video-assets/<reference>.
+    {
+      const startedAt = Date.now();
+      const sampleHash = "a".repeat(64);
+      const parsed = this.artifacts.parse(`video_${sampleHash}`);
+      push("artifact_url_generation", this.artifacts.available ? "ok" : "failed", {
+        base_url: this.artifacts.baseUrl,
+        route: "/video-assets/video_<sha256-hex-64>",
+        ttl_seconds: this.artifacts.ttlSeconds,
+        sample_reference: parsed ? `video_${sampleHash.slice(0, 8)}…` : null,
+        note: "diagnostic mode samples the media; run video_ingest to store a full artifact",
+      }, this.artifacts.available ? null : this.artifacts.unavailableReason(), startedAt);
+    }
+
+    // 9. MCP response serialization: what the client would actually receive.
+    {
+      const startedAt = Date.now();
+      const preview = finish(
+        stages.some((stage) => stage.status === "failed" && stage.stage === "url_validation")
+          ? "failed"
+          : stages.some((stage) => stage.status === "failed")
+            ? "partial"
+            : "ok",
+        null,
+      );
+      const serialized = JSON.stringify(preview, null, 2);
+      push("mcp_serialization", "ok", {
+        format: "MCP content array: [{ type: \"text\", text: <this JSON> }]",
+        payload_bytes: serialized.length,
+        image_blocks: 0,
+        contains_secrets: false,
+      }, null, startedAt);
+    }
+
+    const overall: VideoPipelineReport["overall"] = stages.some((stage) => stage.stage === "url_validation" && stage.status === "failed")
+      ? "failed"
+      : stages.some((stage) => stage.status === "failed")
+        ? "partial"
+        : "ok";
+    const firstFailure = stages.find((stage) => stage.status === "failed")?.stage ?? null;
+    const message = firstFailure
+      ? `The pipeline reached ${firstFailure} and failed there; inspect that stage's error and the stages before it for the full context.`
+      : "Every executed stage completed; skipped stages were not applicable to this URL or this environment.";
+    return { url, overall, firstFailure, stages, message };
+  }
+
   async download(url: string, requestedMb?: number): Promise<{ resolution: VideoResolution; artifact: VideoArtifact | null; error?: string; message?: string }> {
     this.charge("download", url);
     const resolution = await this.resolve(url);
+    return this.downloadResolved(resolution, requestedMb);
+  }
+
+  /**
+   * Download an already resolved media URL to expiring R2 storage. Shared by
+   * `download()` (which resolves first) and `ingest()` (which reuses its own
+   * resolution so the page is fetched once, not twice).
+   */
+  async downloadResolved(resolution: VideoResolution, requestedMb?: number): Promise<{ resolution: VideoResolution; artifact: VideoArtifact | null; error?: string; message?: string }> {
     if (!resolution.success || !resolution.mediaUrl) return { resolution, artifact: null };
     const maxBytes = this.maxDownloadBytes(requestedMb);
     let responseResult;
@@ -573,7 +1016,12 @@ export class VideoProcessor {
     return { success: resolution.success, sourceUrl: resolution.mediaUrl, error: resolution.error, message: resolution.message, metadata: resolution.metadata, limitations: resolution.limitations };
   }
 
-  private async extractFramesFromSource(sourceUrl: string, request: FrameRequest, directMedia = true): Promise<FrameCaptureResult> {
+  /**
+   * Decode actual frames from a public media URL or rendered page in
+   * Cloudflare Browser Run. Public so `ingest()` and diagnostics can reuse
+   * the exact same browser path as the individual tools.
+   */
+  async extractFramesFromSource(sourceUrl: string, request: FrameRequest, directMedia = true): Promise<FrameCaptureResult> {
     const maxDuration = this.maxDuration();
     try {
       const sessions = new SessionManager(this.env as never, this.requestUrl);
@@ -630,6 +1078,29 @@ function bytesToBase64(bytes: Uint8Array): string {
   let binary = "";
   for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
   return btoa(binary);
+}
+
+/** Classify the first bytes of a media sample so the diagnostic names the
+ * container it actually saw (mp4/mov, webm, HLS playlist, …). */
+function sampleShape(bytes: Uint8Array): string {
+  const head = (n: number) => bytes.subarray(0, n);
+  if (bytes.byteLength >= 12 && head(3).every((b) => b === 0) && new TextDecoder().decode(head(8).subarray(4)) === "ftyp") return "iso-base-media-file-format (mp4/mov)";
+  if (bytes.byteLength >= 4 && bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3) return "matroska/webm";
+  if (bytes.byteLength >= 3 && bytes[0] === 0xff && bytes[1] === 0xfb) return "mpeg audio";
+  if (bytes.byteLength >= 4 && bytes[0] === 0x4f && bytes[1] === 0x67 && bytes[2] === 0x67 && bytes[3] === 0x53) return "ogg";
+  if (bytes.byteLength >= 3 && bytes[0] === 0x23 && bytes[1] === 0x21 && bytes[2] === 0x41) return "hls playlist (#!)";
+  if (bytes.byteLength >= 4 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return "png (not a video container)";
+  if (bytes.byteLength >= 2 && bytes[0] === 0xff && bytes[1] === 0xd8) return "jpeg (not a video container)";
+  return "unknown";
+}
+
+/** Apply redaction to every detail value of a pipeline stage report. */
+function redactedDetail(detail: Record<string, unknown>): Record<string, unknown> {
+  const output: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(detail)) {
+    output[key] = typeof value === "string" ? redactText(value, 300) : redactValue(value);
+  }
+  return output;
 }
 
 async function readStreamBytes(stream: ReadableStream<Uint8Array>): Promise<ArrayBuffer> {

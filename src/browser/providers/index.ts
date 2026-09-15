@@ -21,6 +21,18 @@ export interface ProviderEnv {
 /** Not statically analyzable: keeps the Node-only module out of Worker bundles. */
 const NODE_PROVIDER_MODULE = ["../providers", "node.js"].join("/");
 
+/**
+ * Test seam: lets offline suites replace the provider factory (for example
+ * with `FakeProvider`). Production code never sets it; passing `null` restores
+ * the real factory. It is a runtime value, not an import, so it cannot pull
+ * test-only code into the Worker bundle.
+ */
+let providerFactoryOverride: ((env: ProviderEnv) => BrowserProvider) | null = null;
+
+export function setProviderFactory(factory: ((env: ProviderEnv) => BrowserProvider) | null): void {
+  providerFactoryOverride = factory;
+}
+
 const DISABLED_CAPABILITIES: ProviderCapabilities = {
   sessions: false,
   liveView: false,
@@ -37,6 +49,7 @@ function isNodeRuntime(): boolean {
 }
 
 export function createProvider(env: ProviderEnv): BrowserProvider {
+  if (providerFactoryOverride) return providerFactoryOverride(env);
   const requested = String(env.BROWSER_PROVIDER ?? "cloudflare").toLowerCase() as ProviderName;
   const maxConcurrentSessions = Number(env.BROWSER_MAX_SESSIONS ?? 0) || undefined;
   if (requested === "node") return new LazyNodeProvider(env);

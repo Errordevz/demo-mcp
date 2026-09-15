@@ -19,9 +19,10 @@ snapshot rendering and the whole MCP/HTTP surface run for real.
 | Runtime integration | `tests/browser-session.test.ts` | `BrowserRuntime` against a fake provider: open, redirects, screenshots → R2, a11y snapshots, tabs, timeouts, login walls, CAPTCHA pause/resume, degraded capabilities, typing secrets. |
 | Media | `tests/media.test.ts` | Metadata reports and frame sampling, including the "cannot decode", "DRM protected" and "no video" honest-failure paths. |
 | Public video | `tests/video.test.ts` | Safe redirect/media-candidate resolution, SSRF redirect rejection, platform challenge reporting and content-addressed expiring artifact references. |
-| MCP surface | `tests/mcp-tools.test.ts` | The Worker itself: tool inventory (47 tools incl. every original DEMO tool), `demo_ping`, utility tools, capability reporting without bindings, URL validation, session validation, auth on `/mcp`, `/health`, `/tools`, `/platform/stats`, screenshot id validation. |
+| Video ingestion | `tests/video-ingest.test.ts` | `video_ingest` end-to-end with a faked browser transport only: bounded download of the real media to R2 (content-addressed, bytes verified), decoded frames mapped to MCP image blocks (JPEG magic bytes checked), `max_duration_seconds`/`frame_count` honoured, honest platform-block failures with zero frames, SSRF-blocked URLs never fetched. Plus `video_inspect_pipeline`: all 9 stages reported, first failure named, R2 round-trip cleaned up, secret never echoed. Plus the MCP surface: tool inventory, artifact-only result without a browser, image content blocks with a JSON manifest, and admin gating (fail-closed `admin_required`, 401 without the key, no key leakage). |
+| MCP surface | `tests/mcp-tools.test.ts` | The Worker itself: tool inventory (49 tools incl. every original DEMO tool), `demo_ping`, utility tools, capability reporting without bindings, URL validation, session validation, auth on `/mcp`, `/health`, `/tools`, `/platform/stats`, screenshot id validation. |
 | Build gate | `tests/worker-build.test.ts` | `wrangler deploy --dry-run` succeeds and the plan contains every binding. |
-| Live (opt-in) | `tests/live.test.ts`, `tests/video-live.test.ts` | Real Browser Run: open a page, screenshot to R2, read, snapshot, TikTok short link, and the supplied TikTok URL with a requirement for actual MCP image frames or an exact technical failure. |
+| Live (opt-in) | `tests/live.test.ts`, `tests/video-live.test.ts` | Real Browser Run: open a page, screenshot to R2, read, snapshot, TikTok short link, plus the video acceptance matrix — `video_ingest` on a stable public MP4 (real frames, MCP image blocks, R2 artifact fetched back and SHA-256 verified), `video_ingest` on a public TikTok URL, `video_inspect_url` on the supplied short link, and honest structured failures (`blocked_url` on private IPs, stable codes with `frames: []` on missing media). Sandbox egress restrictions are skipped with an explicit note, never asserted as passes or pipeline failures. |
 
 ## Fixtures and helpers
 
@@ -55,7 +56,13 @@ npm run test:live
 DEMO_MCP_LIVE=1 \
 CLOUDFLARE_ACCOUNT_ID=… CLOUDFLARE_API_TOKEN=… \
 npm run test:live
+
+# video acceptance only (either mode above)
+DEMO_MCP_LIVE=1 … npm run test:live:video
 ```
+
+A copyable template with every variable (placeholders only) lives in
+`.env.example`.
 
 Requirements for a meaningful run:
 
@@ -66,10 +73,19 @@ Requirements for a meaningful run:
   the isolate that handled the request.
 * `LIVE_TIKTOK_URL` can point the TikTok test at a specific video; the default
   is a public TikTok video URL. TikTok may block Browser Run traffic — the test
-  accepts an honest `limitations` report as a pass.
+  accepts an honest structured error (stable code, `frames: []`,
+  `analysis_ready: false`) as a pass, never a thumbnail.
+* `LIVE_PUBLIC_VIDEO_URL` can point the `video_ingest` round-trip test at a
+  different fixture; the default is a small, short, DRM-free public MP4.
 
-Tests skip (not fail) when a capability the environment cannot provide is
-missing (`capability_unavailable`, `rate_limited`).
+The video live suite prefights the Worker via `/health` and classifies three
+kinds of failure: the **test host** cannot reach the Worker (aborts with an
+unambiguous sandbox-egress message), the **Worker** cannot reach the public
+source (the test **skips** with a note, since the deployed Worker has normal
+outbound access), and the **platform** blocks the Worker (asserted as an honest
+structured error). Tests otherwise skip (not fail) when a capability the
+environment cannot provide is missing (`capability_unavailable`,
+`rate_limited`).
 
 ## Verifying Cloudflare compatibility
 

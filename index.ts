@@ -148,7 +148,7 @@ async function applyBrowserAction(page: any, action: any) {
   return { action: action.action, state: { url: page.url(), title: await page.title() } };
 }
 
-function server(env: Env, requestUrl: string | null = null) {
+function server(env: Env, requestUrl: string | null = null, authorization: string | null = null) {
   const mcp = new McpServer({ name: "DEMO", version: VERSION }, { capabilities: { tools: {} } });
   const sessions = new SessionManager(env, requestUrl);
   const capabilities = sessions.capabilities();
@@ -420,7 +420,7 @@ function server(env: Env, requestUrl: string | null = null) {
 
   /* ------------------------------------------------------------- video tools */
 
-  registerVideoTools(mcp, { env: env as Env & Record<string, unknown>, requestUrl });
+  registerVideoTools(mcp, { env: env as Env & Record<string, unknown>, requestUrl, authorization });
 
   /* ----------------------------------------------------------- skills tools */
 
@@ -571,12 +571,14 @@ export const DEMO_TOOL_NAMES = [
   "browser_capabilities",
   // Public video understanding
   "video_inspect_url",
+  "video_ingest",
   "video_download_public",
   "video_extract_frames",
   "video_extract_audio",
   "video_transcribe",
   "video_analyze",
   "video_get_frame",
+  "video_inspect_pipeline",
   // Skills
   "skills_search",
   "skills_browse",
@@ -616,7 +618,12 @@ export default {
     if (url.pathname === "/tools") return Response.json({ count: TOOL_COUNT, tools: DEMO_TOOL_NAMES });
     if (url.pathname !== "/mcp") return new Response("Not Found", { status: 404 });
     if (!authorized(request, env)) return Response.json({ error: "Unauthorized" }, { status: 401 });
-    return createMcpHandler((mcpContext) => server(env, mcpContext.requestInfo?.url ?? request.url ?? null))(request, env, ctx);
+    // The Authorization header is forwarded to the server factory (never to a
+    // tool result) so admin-gated tools like video_inspect_pipeline can check
+    // the caller. The MCP handler is stateless, so this is read per request.
+    return createMcpHandler((mcpContext) =>
+      server(env, mcpContext.requestInfo?.url ?? request.url ?? null, mcpContext.requestInfo?.headers?.get("authorization") ?? null),
+    )(request, env, ctx);
   },
 };
 

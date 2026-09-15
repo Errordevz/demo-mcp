@@ -24,6 +24,8 @@ export type BrowserErrorCode =
   | "rate_limited"
   | "unsupported"
   | "internal"
+  // Admin-gated diagnostics.
+  | "admin_required"
   // Stable machine-readable video pipeline errors.
   | "VIDEO_NOT_FOUND"
   | "VIDEO_NOT_PUBLIC"
