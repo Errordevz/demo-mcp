@@ -14,7 +14,25 @@
       "bucket_name": "demo-mcp-screenshots"
     }
   ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "BROWSER_SESSIONS",
+        "class_name": "BrowserSession"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["BrowserSession"]
+    }
+  ],
   "vars": {
-    "DEMO_PLATFORM_ORIGIN": "https://demo-platform.pages.dev"
+    "DEMO_PLATFORM_ORIGIN": "https://demo-platform.pages.dev",
+    "BROWSER_PROVIDER": "cloudflare",
+    "BROWSER_KEEPALIVE_MS": "300000",
+    "SSRF_DNS_CHECK": "true",
+    "SSRF_DNS_FAIL_OPEN": "true"
   }
 }

@@ -1,21 +1,30 @@
-import demoWorker from "./index";
+import demoWorker, { TOOL_COUNT } from "./index";
 import { demoUi } from "./ui";
+import { SessionManager } from "./src/session/manager.js";
+
+// Re-exported so Wrangler can bind the Durable Object class
+// (`durable_objects.bindings[].class_name = "BrowserSession"`).
+export { BrowserSession } from "./src/session/durable-object.js";
 
 type Env = {
   DEMO_PLATFORM_ORIGIN?: string;
   DEMO_API_KEY?: string;
   BROWSER?: unknown;
   SCREENSHOTS?: R2Bucket;
+  BROWSER_SESSIONS?: unknown;
 };
 
-const VERSION = "0.3.5";
+const VERSION = "0.4.0";
 const DEFAULT_PLATFORM_ORIGIN = "https://demo-platform.pages.dev";
 const LOCAL_ORIGINS = new Set(["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:3000", "http://127.0.0.1:5173"]);
 const startedAt = Date.now();
 let requestCount = 0;
 
 function configuredOrigins(env: Env) {
-  return (env.DEMO_PLATFORM_ORIGIN || DEFAULT_PLATFORM_ORIGIN).split(",").map((v) => v.trim()).filter(Boolean);
+  return (env.DEMO_PLATFORM_ORIGIN || DEFAULT_PLATFORM_ORIGIN)
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean);
 }
 
 function allowedOrigin(origin: string | null, env: Env): string | null {
@@ -50,6 +59,7 @@ function unauthorized(request: Request, env: Env): Response | null {
 }
 
 function telemetry(env: Env) {
+  const capabilities = new SessionManager(env as never).capabilities();
   return {
     ok: true,
     name: "DEMO",
@@ -58,15 +68,20 @@ function telemetry(env: Env) {
     generatedAt: new Date().toISOString(),
     uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
     requestCountSinceIsolateStart: requestCount,
-    toolCount: 29,
+    toolCount: TOOL_COUNT,
     skillCount: 8,
     architecture: { surface: "DEMO Platform", execution: "DEMO MCP", credentials: "server-only" },
     capabilities: {
       mcp: true,
-      browser: Boolean(env.BROWSER),
-      browserWatching: Boolean(env.BROWSER),
-      screenshots: Boolean(env.BROWSER && env.SCREENSHOTS),
-      screenshotLinks: Boolean(env.SCREENSHOTS),
+      browser: capabilities.browserAvailable,
+      browserWatching: capabilities.browserAvailable,
+      browserSessions: capabilities.sessionStorage === "durable-object",
+      screenshots: capabilities.screenshots,
+      screenshotLinks: capabilities.screenshots,
+      liveView: capabilities.liveView,
+      humanHandoff: capabilities.handoff,
+      videoFrames: capabilities.videoFrames,
+      accessibilitySnapshot: capabilities.accessibilitySnapshot,
       skills: true,
       skillsSh: true,
       composio: false,
@@ -74,10 +89,11 @@ function telemetry(env: Env) {
     connections: [
       { name: "DEMO MCP", type: "Execution Worker", connected: true },
       { name: "Skills.sh", type: "Skill discovery", connected: true },
-      { name: "Browser", type: "Cloudflare Browser Run", connected: Boolean(env.BROWSER) },
-      { name: "Screenshot storage", type: "Cloudflare R2", connected: Boolean(env.SCREENSHOTS) },
+      { name: "Browser", type: "Cloudflare Browser Run", connected: capabilities.browserAvailable },
+      { name: "Browser sessions", type: "Durable Object", connected: capabilities.sessionStorage === "durable-object" },
+      { name: "Screenshot storage", type: "Cloudflare R2", connected: capabilities.screenshots },
     ],
-    endpoints: { ui: "/", mcp: "/mcp", health: "/health", telemetry: "/platform/stats", screenshots: "/screenshots/:id" },
+    endpoints: { ui: "/", mcp: "/mcp", health: "/health", tools: "/tools", telemetry: "/platform/stats", screenshots: "/screenshots/:id" },
     telemetry: { scope: "worker-isolate", containsSecrets: false, containsUserContent: false },
   };
 }
@@ -115,13 +131,19 @@ export default {
       return withCors(await screenshotObject(request, env, id), request, env);
     }
 
+    // Video frames and screenshots live under the same /screenshots/:id namespace.
+    if (url.pathname.startsWith("/frames/")) {
+      const id = url.pathname.slice("/frames/".length).replace(/^.*\//, "");
+      return withCors(await screenshotObject(request, env, id), request, env);
+    }
+
     const authError = unauthorized(request, env);
     if (authError && url.pathname === "/mcp") return withCors(authError, request, env);
 
     const forwardedHeaders = new Headers(request.headers);
     if (origin) forwardedHeaders.delete("Origin");
     const forwarded = new Request(request, { headers: forwardedHeaders });
-    const response = await demoWorker.fetch(forwarded, env as any, ctx);
+    const response = await demoWorker.fetch(forwarded, env as never, ctx);
     return withCors(response, request, env);
   },
 };
