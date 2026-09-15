@@ -1,6 +1,8 @@
 import demoWorker, { TOOL_COUNT } from "./index";
 import { demoUi } from "./ui";
 import { SessionManager } from "./src/session/manager.js";
+import { VideoArtifactStore, artifactBaseUrl } from "./src/video/store.js";
+import { LIMITS } from "./src/core/limits.js";
 
 // Re-exported so Wrangler can bind the Durable Object class
 // (`durable_objects.bindings[].class_name = "BrowserSession"`).
@@ -11,10 +13,12 @@ type Env = {
   DEMO_API_KEY?: string;
   BROWSER?: unknown;
   SCREENSHOTS?: R2Bucket;
+  VIDEO_ARTIFACTS?: R2Bucket;
   BROWSER_SESSIONS?: unknown;
+  VIDEO_ARTIFACT_TTL_SECONDS?: string | number;
 };
 
-const VERSION = "0.4.0";
+const VERSION = "0.5.0";
 const DEFAULT_PLATFORM_ORIGIN = "https://demo-platform.pages.dev";
 const LOCAL_ORIGINS = new Set(["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:3000", "http://127.0.0.1:5173"]);
 const startedAt = Date.now();
@@ -81,6 +85,8 @@ function telemetry(env: Env) {
       liveView: capabilities.liveView,
       humanHandoff: capabilities.handoff,
       videoFrames: capabilities.videoFrames,
+      publicVideo: true,
+      videoArtifacts: Boolean(env.SCREENSHOTS),
       accessibilitySnapshot: capabilities.accessibilitySnapshot,
       skills: true,
       skillsSh: true,
@@ -99,10 +105,17 @@ function telemetry(env: Env) {
 }
 
 async function screenshotObject(request: Request, env: Env, id: string): Promise<Response> {
+  void request;
   if (!env.SCREENSHOTS) return new Response("Screenshot storage is not configured", { status: 503 });
   if (!/^[A-Za-z0-9_-]{16,100}$/.test(id)) return new Response("Invalid screenshot id", { status: 400 });
-  const object = await env.SCREENSHOTS.get(`screenshots/${id}`);
+  const key = `screenshots/${id}`;
+  const object = await env.SCREENSHOTS.get(key);
   if (!object) return new Response("Screenshot not found", { status: 404 });
+  const expiresAt = object.customMetadata?.expiresAt ? Date.parse(object.customMetadata.expiresAt) : 0;
+  if (expiresAt && expiresAt <= Date.now()) {
+    await env.SCREENSHOTS.delete(key);
+    return new Response("Screenshot expired", { status: 404 });
+  }
   const headers = new Headers();
   object.writeHttpMetadata(headers);
   headers.set("Cache-Control", "private, max-age=3600");
@@ -110,7 +123,51 @@ async function screenshotObject(request: Request, env: Env, id: string): Promise
   return new Response(object.body, { headers });
 }
 
+async function videoObject(request: Request, env: Env): Promise<Response> {
+  const reference = new URL(request.url).pathname.slice("/video-assets/".length);
+  if (!/^(?:video|audio)_[a-f0-9]{64}$/.test(reference)) return new Response("Invalid video artifact reference", { status: 400 });
+  const bucket = env.VIDEO_ARTIFACTS ?? env.SCREENSHOTS;
+  if (!bucket) return new Response("Video artifact storage is not configured", { status: 503 });
+  const store = new VideoArtifactStore(
+    bucket as never,
+    artifactBaseUrl(request.url),
+    Number(env.VIDEO_ARTIFACT_TTL_SECONDS ?? LIMITS.videoArtifactTtlSeconds),
+  );
+  const object = await store.objectForRoute(reference);
+  if (!object) return new Response("Video artifact not found or expired", { status: 404 });
+  const headers = new Headers();
+  object.writeHttpMetadata?.(headers);
+  headers.set("Cache-Control", "private, max-age=3600");
+  headers.set("X-Content-Type-Options", "nosniff");
+  headers.set("Accept-Ranges", "bytes");
+  return new Response(object.body, { headers });
+}
+
+async function cleanupExpiredObjects(bucket: R2Bucket | undefined, prefixes: string[]): Promise<number> {
+  if (!bucket) return 0;
+  let removed = 0;
+  // Cleanup is deliberately bounded. R2 lifecycle rules should be configured
+  // as a second line of defence; the Worker only scans a small page per tick.
+  const listed = await bucket.list({ limit: 1_000 });
+  for (const object of listed.objects as Array<{ key: string; customMetadata?: Record<string, string> }>) {
+    if (!prefixes.some((prefix) => object.key.startsWith(prefix))) continue;
+    const expiresAt = object.customMetadata?.expiresAt ? Date.parse(object.customMetadata.expiresAt) : 0;
+    if (expiresAt && expiresAt <= Date.now()) {
+      await bucket.delete(object.key);
+      removed++;
+    }
+  }
+  return removed;
+}
+
 export default {
+  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    const cleanup = cleanupExpiredObjects(env.VIDEO_ARTIFACTS ?? env.SCREENSHOTS, ["video-artifacts/"])
+      .then((removed) => cleanupExpiredObjects(env.SCREENSHOTS, ["screenshots/"]).then((frames) => ({ removed, frames })))
+      .catch(() => ({ removed: 0, frames: 0 }));
+    ctx.waitUntil(cleanup.then(() => undefined));
+  },
+
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     requestCount++;
     const url = new URL(request.url);
@@ -124,6 +181,10 @@ export default {
     if (url.pathname === "/platform/stats") {
       // Safe public telemetry: deliberately excludes credentials, tokens and user content.
       return withCors(Response.json(telemetry(env), { headers: { "Cache-Control": "no-store" } }), request, env);
+    }
+
+    if (url.pathname.startsWith("/video-assets/")) {
+      return withCors(await videoObject(request, env), request, env);
     }
 
     if (url.pathname === "/screenshots/" || url.pathname.startsWith("/screenshots/")) {

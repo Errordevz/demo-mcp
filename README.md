@@ -23,6 +23,7 @@ DEMO MCP Worker  ─────────────────────
         ├── /platform/stats      safe telemetry                │
         ├── /screenshots/:id     R2-backed screenshot/frame    │
         ├── /frames/:id          alias for /screenshots/:id    │
+        ├── /video-assets/:ref  expiring R2 video/audio artifact│
         ├── /                    inspector UI (demoUi asset)   │
         └── skills.sh (remote)                                 │
                                                               │
@@ -33,7 +34,8 @@ DEMO MCP Worker  ─────────────────────
         │                                └── Node… (optional, dev only, lazy)
         ├── ChallengeManager     login walls / consent / CAPTCHA
         ├── ScreenshotManager    capture bounds + R2 storage
-        ├── MediaInspector       metadata + video frame sampling
+        ├── MediaInspector       metadata + rendered video frame sampling
+        ├── VideoPipeline         safe resolve/download/audio/transcript orchestration
         └── UrlGuard             SSRF protection
 ```
 
@@ -95,6 +97,71 @@ Every result is JSON, bounded in size, and redacted (tokens, cookies, passwords,
 authorization headers, e-mails, phone numbers are stripped before logging or
 returning).
 
+## Public video understanding
+
+DEMO 0.5 adds a separate public-media pipeline. It is intentionally conservative:
+it follows normal HTTP redirects, reads public HTML/JSON/OpenGraph metadata, and
+uses a literal media URL only when a normal public request exposes it. It does
+not use platform-private APIs or cookies and never solves CAPTCHAs, bypasses login
+walls, cracks signed URLs, circumvents DRM, or accesses private accounts.
+
+| Tool | Purpose |
+| --- | --- |
+| `video_inspect_url` | Resolve TikTok, Instagram, YouTube, X, Reddit, generic pages, or direct media URLs; return bounded metadata, representative timestamps, transcript status, and actual MCP image blocks when frames decode. |
+| `video_download_public` | Bounded download to an expiring R2 artifact (`video_<sha256>`), with public redirect, content-type, size, duration and timeout checks. |
+| `video_extract_frames` | Seek a public non-DRM HTML5 video and return timestamped JPEG image blocks plus short-lived `/screenshots/` references. |
+| `video_extract_audio` | Best-effort browser `captureStream`/`MediaRecorder` extraction of a decoded audio track into an expiring `audio_<sha256>` artifact. |
+| `video_transcribe` | Use an optional server-side Workers AI Whisper binding or configured HTTPS provider and return timestamped segments; no speech is `no_speech_detected`. |
+| `video_analyze` | Return frame-grounded scene/OCR/object/action fields. Without successfully decoded frames and a configured vision model it explicitly reports unavailable instead of guessing. |
+| `video_get_frame` | Return one actual frame at a requested timestamp as an MCP image content block when it fits the inline cap. |
+
+### AI visibility is explicit
+
+Video frames are not returned as an opaque filesystem path. When a decoded frame is
+at most `LIMITS.inlineImageMaxBytes`, the MCP result contains a native `type:
+"image"` content item with base64 image data. Larger frames are stored in R2 and
+returned as a high-entropy, expiring `image_reference`; the structured result
+still includes its timestamp, MIME type and byte count. If neither delivery path
+is possible, the tool returns `FRAMES_UNAVAILABLE` and does **not** say it saw the
+video. `video_inspect_url` sets `analysis_ready` only after at least one actual
+frame was captured.
+
+### Public-video safety and limits
+
+* Only `http`/`https` URLs pass the existing SSRF guard. Every redirect and every
+  media candidate is checked again; localhost, private/link-local/metadata IPs,
+  internal suffixes and infrastructure ports are denied. Video hostname DNS
+  verification fails closed when enabled.
+* No request sends caller cookies or authorization headers. Downloaded content is
+  limited to 50 MiB by default (`VIDEO_MAX_DOWNLOAD_MB`), 600 seconds
+  (`VIDEO_MAX_DURATION_SECONDS`), five redirects, bounded HTML, and finite
+  request timeouts. A duration that cannot be verified for a download is rejected
+  rather than silently exceeding policy.
+* Frames are capped at eight per call. Audio capture is capped at 120 seconds and
+  8 MiB. A best-effort isolate-local rate limit (`VIDEO_RATE_LIMIT_PER_MINUTE`)
+  protects expensive browser work; Cloudflare plan limits remain authoritative.
+* Temporary video/audio artifacts use content-addressed keys in the existing R2
+  bucket by default (`video-artifacts/<kind>/<sha256>`), expose only expiring
+  `/video-assets/video_<sha256>` or `audio_<sha256>` references, and are cleaned
+  by the hourly Worker cron plus expiry checks on access. Configure a separate
+  `VIDEO_ARTIFACTS` R2 binding if desired; no new binding is required for the
+  current deployment.
+
+### Platform behavior
+
+TikTok short links such as `https://vt.tiktok.com/...` are first resolved through
+normal public redirects. Instagram, YouTube, X and Reddit are handled through the
+same public HTML/media candidates rather than platform API credentials. A page may
+expose only a thumbnail, a login wall, a bot challenge, an HLS playlist, or a
+signed URL that has already expired. DEMO returns a stable error such as
+`VIDEO_NOT_FOUND`, `VIDEO_NOT_PUBLIC`, `PLATFORM_BLOCKED`, `UNSUPPORTED_MEDIA`,
+`DOWNLOAD_TOO_LARGE`, `PROCESSING_TIMEOUT`, or `FRAMES_UNAVAILABLE`, with the
+technical limitation and the final public URL when safe. A thumbnail is never
+labeled as a video frame.
+
+See [`docs/VIDEO.md`](docs/VIDEO.md) for the processing contract and deployment
+notes.
+
 ### Human in the loop (challenges)
 
 DEMO never solves CAPTCHAs and never tries to defeat anti-bot systems. The flow
@@ -115,6 +182,26 @@ browser via `puppeteer.connect(env.BROWSER, sessionId)`.
 
 ### TikTok
 
+* `video_inspect_url` is the acceptance path for the public short URL
+  `https://vt.tiktok.com/ZSq4b6A3K/`: it follows the short-link redirect, probes
+  only literal public media URLs, and asks Browser Run for decoded frames. If the
+  current TikTok response is a bot challenge or the media URL is not playable,
+  the result is still useful and honest, for example:
+
+  ```json
+  {
+    "success": false,
+    "error": "PLATFORM_BLOCKED",
+    "challenge": { "detected": true, "kind": "bot_challenge_or_access_denied" },
+    "frames": [],
+    "analysis_ready": false,
+    "message": "The platform returned ... instead of a public media page."
+  }
+  ```
+
+  A result with `success: true`, non-empty `frames`, and MCP `image` content is
+  the stronger outcome: it proves DEMO exposed decoded video pixels rather than
+  only creator/caption/statistics/thumbnail metadata.
 * `https://www.tiktok.com/@user/video/<id>` and short links
   (`https://vt.tiktok.com/…`, `https://vm.tiktok.com/…`, `https://m.tiktok.com/v/<id>.html`)
   are resolved by following redirects to the canonical URL.
@@ -152,6 +239,19 @@ Variables (all optional):
 | `SSRF_DNS_CHECK` | `true` | Resolve hostnames via DoH and block private/internal answers. |
 | `SSRF_DNS_FAIL_OPEN` | `true` | If the resolver is unreachable, allow navigation with a `dns-unverified` warning. Set to `false` to deny instead. |
 | `BROWSER_ALLOWED_DOMAINS` | *(unset)* | Optional comma-separated domain allowlist latched per browser session. |
+| `VIDEO_MAX_DOWNLOAD_MB` | `50` | Maximum public video download size. |
+| `VIDEO_MAX_DURATION_SECONDS` | `600` | Maximum duration accepted for processing/downloads. |
+| `VIDEO_ARTIFACT_TTL_SECONDS` | `3600` | TTL for video/audio/frame artifacts (also enforced on reads). |
+| `VIDEO_RATE_LIMIT_PER_MINUTE` | `12` | Best-effort per-source expensive-operation limit per Worker isolate. |
+| `VIDEO_TRANSCRIPTION_MODEL` | `@cf/openai/whisper` | Workers AI model used when optional `AI` is bound. |
+| `VIDEO_VISION_MODEL` | `@cf/llava-hf/llava-1.5-7b-hf` | Optional Workers AI vision model for `video_analyze`. |
+| `TRANSCRIPTION_ENDPOINT` | *(unset)* | Optional HTTPS speech-to-text endpoint; API key stays in the Worker secret `TRANSCRIPTION_API_KEY`. |
+
+`AI` and `VIDEO_ARTIFACTS` are optional bindings. The current deployment reuses
+`SCREENSHOTS` for temporary video artifacts so adding these bindings is not
+required. If `AI` is not bound, frame extraction still works, while transcription
+and model-based OCR/object/action labels return `TRANSCRIPTION_UNAVAILABLE` or
+an explicit analysis limitation.
 
 ## Limits (Cloudflare Browser Rendering)
 

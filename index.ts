@@ -9,9 +9,11 @@ import { assertNavigableUrl, createDohResolver } from "./src/core/url-guard.js";
 import { LIMITS } from "./src/core/limits.js";
 import { ScreenshotManager } from "./src/browser/screenshot.js";
 import { resolveScreenshotBase } from "./src/session/factory.js";
+import { registerVideoTools } from "./src/mcp/video-tools.js";
+import type { VideoEnv } from "./src/video/types.js";
 
-type Env = SessionManagerEnv & { DEMO_API_KEY?: string; SSRF_GUARD_HTTP_FETCH?: string };
-const VERSION = "0.4.0";
+type Env = SessionManagerEnv & VideoEnv & { DEMO_API_KEY?: string; SSRF_GUARD_HTTP_FETCH?: string };
+const VERSION = "0.5.0";
 const SKILLS_API = "https://skills.sh/api/v1";
 
 function authorized(request: Request, env: Env) {
@@ -169,6 +171,9 @@ function server(env: Env, requestUrl: string | null = null) {
         liveView: capabilities.liveView,
         humanHandoff: capabilities.handoff,
         videoFrames: capabilities.videoFrames,
+        publicVideo: true,
+        videoArtifacts: Boolean(env.VIDEO_ARTIFACTS ?? env.SCREENSHOTS),
+        videoTranscription: Boolean(env.AI || env.TRANSCRIPTION_ENDPOINT),
         accessibilitySnapshot: capabilities.accessibilitySnapshot,
         provider: capabilities.provider,
         toolCount: DEMO_TOOL_NAMES.length,
@@ -413,6 +418,10 @@ function server(env: Env, requestUrl: string | null = null) {
 
   registerBrowserTools(mcp, { env, sessions, requestUrl });
 
+  /* ------------------------------------------------------------- video tools */
+
+  registerVideoTools(mcp, { env: env as Env & Record<string, unknown>, requestUrl });
+
   /* ----------------------------------------------------------- skills tools */
 
   mcp.registerTool(
@@ -560,6 +569,14 @@ export const DEMO_TOOL_NAMES = [
   "browser_session",
   "browser_close",
   "browser_capabilities",
+  // Public video understanding
+  "video_inspect_url",
+  "video_download_public",
+  "video_extract_frames",
+  "video_extract_audio",
+  "video_transcribe",
+  "video_analyze",
+  "video_get_frame",
   // Skills
   "skills_search",
   "skills_browse",
@@ -588,6 +605,8 @@ export default {
       screenshots: capabilities.screenshots,
       screenshotLinks: capabilities.screenshots,
       liveView: capabilities.liveView,
+      publicVideo: true,
+      videoArtifacts: Boolean(env.VIDEO_ARTIFACTS ?? env.SCREENSHOTS),
       skillsSh: true,
       composio: false,
       toolCount: TOOL_COUNT,

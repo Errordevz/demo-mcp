@@ -63,6 +63,23 @@ export const LIMITS = {
   framesTimeoutMs: 30_000,
   frameSeekSettleMs: 700,
 
+  /** Public video pipeline. */
+  videoMaxDownloadBytes: 50 * 1024 * 1024,
+  videoMaxDownloadMb: 50,
+  videoMaxDurationSeconds: 10 * 60,
+  videoResolveTimeoutMs: 15_000,
+  videoDownloadTimeoutMs: 45_000,
+  videoMaxRedirects: 5,
+  videoMaxHtmlBytes: 2 * 1024 * 1024,
+  videoFramesDefaultIntervalSeconds: 8,
+  videoFramesMaxCount: 8,
+  videoFrameTimeoutMs: 45_000,
+  videoAudioMaxSeconds: 120,
+  videoAudioMaxBytes: 8 * 1024 * 1024,
+  videoInlineMaxTotalBytes: 2 * 1024 * 1024,
+  videoArtifactTtlSeconds: 60 * 60,
+  videoMaxVisionFrames: 4,
+
   /** Workflows (legacy `browser_run` / `browser_watch`). */
   maxWorkflowActions: 40,
 } as const;

@@ -23,7 +23,16 @@ export type BrowserErrorCode =
   | "size_limit_exceeded"
   | "rate_limited"
   | "unsupported"
-  | "internal";
+  | "internal"
+  // Stable machine-readable video pipeline errors.
+  | "VIDEO_NOT_FOUND"
+  | "VIDEO_NOT_PUBLIC"
+  | "PLATFORM_BLOCKED"
+  | "UNSUPPORTED_MEDIA"
+  | "DOWNLOAD_TOO_LARGE"
+  | "PROCESSING_TIMEOUT"
+  | "FRAMES_UNAVAILABLE"
+  | "TRANSCRIPTION_UNAVAILABLE";
 
 export interface BrowserErrorDetails {
   code: BrowserErrorCode;
