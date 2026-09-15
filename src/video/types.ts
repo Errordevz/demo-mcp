@@ -42,6 +42,8 @@ export interface VideoResolution {
   redirects: string[];
   challenge: { detected: boolean; kind: string | null; reason: string | null };
   limitations: string[];
+  /** How many literal public media candidates the page exposed (0 = none). */
+  candidateCount: number;
   /** Bounded page metadata used internally and never returned wholesale. */
   pageText?: string;
 }
@@ -105,4 +107,78 @@ export interface VideoEnv {
 export interface VideoInput {
   url?: string;
   videoReference?: string;
+}
+
+/** What a single `video_ingest` call should produce. */
+export type VideoIngestOutputMode = "frames" | "video_artifact" | "analysis" | "all";
+
+export interface VideoIngestOptions {
+  maxDurationSeconds?: number;
+  /** Preferred number of representative frames (caps still apply). */
+  frameCount?: number;
+  /** Seconds between representative frames when `frameCount` is not given. */
+  frameIntervalSeconds?: number;
+  includeAudio?: boolean;
+  includeTranscript?: boolean;
+  outputMode: VideoIngestOutputMode;
+}
+
+export interface VideoIngestAudio {
+  status: "audio_ready" | "no_audio_track" | "unavailable";
+  reference: string | null;
+  url: string | null;
+  contentType: string | null;
+  bytes: number | null;
+  expiresAt: string | null;
+  message: string | null;
+}
+
+export interface VideoIngestResult {
+  success: boolean;
+  error: string | null;
+  message: string | null;
+  sourceUrl: string;
+  resolvedUrl: string | null;
+  mediaUrl: string | null;
+  platform: VideoPlatform;
+  mediaType: "video";
+  outputMode: VideoIngestOutputMode;
+  durationSeconds: number | null;
+  width: number | null;
+  height: number | null;
+  contentType: string | null;
+  frames: VideoFrameOutput[];
+  videoArtifact: VideoArtifact | null;
+  audio: VideoIngestAudio | null;
+  transcript: VideoTranscript | null;
+  analysis: Record<string, unknown> | null;
+  analysisReady: boolean;
+  challenge: { detected: boolean; kind: string | null; reason: string | null };
+  limitations: string[];
+}
+
+/** One stage of the `video_inspect_pipeline` diagnostic report. */
+export interface PipelineStageReport {
+  stage:
+    | "url_validation"
+    | "redirect_resolution"
+    | "media_discovery"
+    | "browser_access"
+    | "media_retrieval"
+    | "frame_extraction"
+    | "r2_upload"
+    | "artifact_url_generation"
+    | "mcp_serialization";
+  status: "ok" | "failed" | "skipped";
+  durationMs: number;
+  detail: Record<string, unknown>;
+  error: string | null;
+}
+
+export interface VideoPipelineReport {
+  url: string;
+  overall: "ok" | "partial" | "failed";
+  firstFailure: string | null;
+  stages: PipelineStageReport[];
+  message: string | null;
 }

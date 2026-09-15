@@ -174,6 +174,79 @@ export function registerVideoTools(mcp: McpServer, ctx: VideoToolContext): void 
   );
 
   mcp.registerTool(
+    "video_ingest",
+    {
+      title: "Ingest Public Video",
+      description:
+        "One-call public video ingestion. Validates the URL, follows only safe public redirects (TikTok https://www.tiktok.com/..., https://vm.tiktok.com/... and https://vt.tiktok.com/... short links supported), downloads the actual media file to expiring R2 storage, decodes real frames in Cloudflare Browser Run, and returns MCP image content blocks plus short-lived artifact URLs. Never bypasses CAPTCHAs, logins, paywalls or DRM; failures name the exact stage and stable error code.",
+      inputSchema: {
+        url: z.string().url().describe("Public video URL: a page or a direct media URL, including TikTok short links."),
+        max_duration_seconds: z.number().int().min(1).max(LIMITS.videoMaxDurationSeconds).optional().describe("Maximum video duration processed; never raises the deployment limit."),
+        frame_count: z.number().int().min(1).max(LIMITS.videoFramesMaxCount).optional().describe("Representative frames to extract (capped by the deployment limit)."),
+        frame_interval_seconds: z.number().min(0.5).max(120).optional().describe("Seconds between frames when frame_count is omitted."),
+        include_audio: z.boolean().default(false).describe("Also extract the decoded audio track to an expiring audio artifact (best effort, non-DRM only)."),
+        include_transcript: z.boolean().default(false).describe("Also request speech-to-text when a server-side provider is configured."),
+        output_mode: z.enum(["frames", "video_artifact", "analysis", "all"]).default("all").describe("frames: decoded frames only; video_artifact: R2-stored media file only; analysis: frames plus frame-grounded analysis fields; all: frames and artifact (audio/transcript when requested)."),
+      },
+    },
+    (args) =>
+      runTool(async () => {
+        const result = await processor(ctx).ingest(args.url, {
+          maxDurationSeconds: args.max_duration_seconds,
+          frameCount: args.frame_count,
+          frameIntervalSeconds: args.frame_interval_seconds,
+          includeAudio: args.include_audio,
+          includeTranscript: args.include_transcript,
+          outputMode: args.output_mode,
+        });
+        const payload = {
+          success: result.success,
+          source_url: result.sourceUrl,
+          resolved_url: result.resolvedUrl,
+          media_url: result.mediaUrl,
+          platform: result.platform,
+          media_type: result.mediaType,
+          output_mode: result.outputMode,
+          duration_seconds: result.durationSeconds,
+          width: result.width,
+          height: result.height,
+          mime_type: result.contentType,
+          frames: result.frames.map((frame) => ({
+            timestamp_seconds: frame.timestamp,
+            mime_type: frame.contentType,
+            url: frame.imageReference,
+            bytes: frame.bytes,
+            inspected: frame.inspected,
+          })),
+          video_artifact: result.videoArtifact
+            ? {
+                mime_type: result.videoArtifact.contentType,
+                url: result.videoArtifact.url,
+                reference: result.videoArtifact.reference,
+                bytes: result.videoArtifact.bytes,
+                sha256: result.videoArtifact.sha256,
+                expires_at: result.videoArtifact.expiresAt,
+              }
+            : null,
+          audio: result.audio,
+          transcript: result.transcript ? transcriptPayload(result.transcript) : null,
+          analysis: result.analysis,
+          analysis_ready: result.analysisReady,
+          challenge: result.challenge,
+          limitations: result.limitations,
+          ...(result.error ? { error: result.error } : {}),
+          ...(result.message ? { message: result.message } : {}),
+          visibility_note: result.frames.some((frame) => frame.inlineData)
+            ? "Actual decoded frame images are included as MCP image content blocks. Frame url values are short-lived R2 retrieval links; video_artifact.url is a short-lived R2 media link."
+            : "No decoded frame image was returned. DEMO does not claim to have seen the video; inspect the error and limitations fields.",
+        };
+        const images = inlineImages(result.frames.filter((frame) => frame.inspected));
+        const safePayload = safeVideoValue(payload) as Record<string, unknown>;
+        return images.length ? imageResult(images, safePayload) : safeTextResult(safePayload);
+      }),
+  );
+
+  mcp.registerTool(
     "video_download_public",
     {
       title: "Download Public Video",
@@ -330,14 +403,43 @@ export function registerVideoTools(mcp: McpServer, ctx: VideoToolContext): void 
         return frameToolResult(result, { requested_timestamp: args.timestamp });
       }),
   );
+
+  mcp.registerTool(
+    "video_inspect_pipeline",
+    {
+      title: "Inspect Video Pipeline",
+      description:
+        "Diagnostic for the public video pipeline. Runs each stage in order — URL validation, redirect resolution, media discovery, browser access, actual media retrieval (64 KiB ranged sample), frame extraction, R2 upload (round trip), artifact URL generation and MCP response serialization — and reports exactly where it succeeds or fails. Never returns credentials, cookies or page bodies.",
+      inputSchema: {
+        url: z.string().url().describe("The public video URL to diagnose."),
+        include_download: z.boolean().default(true).describe("Sample the actual media URL with a bounded 64 KiB ranged GET."),
+        include_frames: z.boolean().default(true).describe("Attempt Browser Run frame extraction."),
+      },
+    },
+    (args) =>
+      runTool(async () => {
+        const report = await processor(ctx).inspectPipeline(args.url, { includeDownload: args.include_download, includeFrames: args.include_frames });
+        return safeTextResult({
+          tool: "video_inspect_pipeline",
+          success: report.overall !== "failed",
+          overall: report.overall,
+          first_failure: report.firstFailure,
+          stages: report.stages,
+          message: report.message,
+          note: "Stages identify the failing stage of the public video pipeline. No credentials, cookies or page bodies are included.",
+        });
+      }),
+  );
 }
 
 export const VIDEO_TOOL_NAMES = [
   "video_inspect_url",
+  "video_ingest",
   "video_download_public",
   "video_extract_frames",
   "video_extract_audio",
   "video_transcribe",
   "video_analyze",
   "video_get_frame",
+  "video_inspect_pipeline",
 ] as const;

@@ -32,6 +32,12 @@ export interface FakeRoute {
   redirect?: string;
   /** Throw this error message when navigated to (used for timeout tests). */
   failWith?: string;
+  /**
+   * Scripts run against the loaded DOM window after every navigation that
+   * lands on this route (constructor load included). Used to make fake media
+   * elements behave like decodable ones (duration, seeked events).
+   */
+  scripts?: Array<(window: any) => void>;
 }
 
 export interface FakeProviderOptions {
@@ -62,6 +68,13 @@ export class FakePage implements PageHandle {
     this.bytes = options.bytes;
     this.targetIdValue = options.id;
     this.dom = new JSDOM(html || "<html><body></body></html>", { url, runScripts: "outside-only", pretendToBeVisual: true });
+    this.applyRouteScripts();
+  }
+
+  /** Run the scripts registered for the route currently loaded in the DOM. */
+  private applyRouteScripts(): void {
+    const scripts = this.routeTable[this.currentUrl]?.scripts ?? [];
+    for (const script of scripts) script(this.dom.window);
   }
 
   private targetIdValue: string;
@@ -113,6 +126,7 @@ export class FakePage implements PageHandle {
   load(html: string, url: string): void {
     this.dom.window.close();
     this.dom = new JSDOM(html || "<html><body></body></html>", { url, runScripts: "outside-only", pretendToBeVisual: true });
+    this.applyRouteScripts();
   }
 
   async content(): Promise<string> {
@@ -215,7 +229,7 @@ export class FakeBrowser implements BrowserHandle {
   constructor(
     private readonly id: string,
     initial: FakePage | null,
-    private readonly options: { liveView: boolean; handoff: boolean; routes: Record<string, FakeRoute> },
+    private readonly options: { liveView: boolean; handoff: boolean; routes: Record<string, FakeRoute>; screenshotBytes?: Uint8Array },
   ) {
     if (initial) this.pages$.push(initial);
   }
@@ -233,7 +247,7 @@ export class FakeBrowser implements BrowserHandle {
     const page = new FakePage("about:blank", "<html><body></body></html>", {
       id: `target-${this.id}-${this.counter}`,
       routes: this.options.routes,
-      bytes: PNG_BYTES,
+      bytes: this.options.screenshotBytes ?? PNG_BYTES,
     });
     this.pages$.push(page);
     return page as unknown as PageHandle;
@@ -311,6 +325,7 @@ export class FakeProvider implements BrowserProvider {
       liveView: this.options.liveView ?? true,
       handoff: this.options.handoff ?? true,
       routes: this.options.routes ?? {},
+      screenshotBytes: this.options.screenshotBytes,
     });
     this.browsers.push(browser);
     return browser;

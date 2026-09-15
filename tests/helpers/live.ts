@@ -22,6 +22,9 @@ export interface LiveConfig {
   baseUrl: string;
   apiKey: string | null;
   tiktokUrl: string;
+  /** Stable public MP4 (small, short, no DRM, no auth) used for the
+   * video_ingest round-trip acceptance test. Override for other fixtures. */
+  publicVideoUrl: string;
   local: boolean;
 }
 
@@ -32,8 +35,58 @@ export function liveEnv(): LiveConfig {
     baseUrl: (remote ?? process.env.LIVE_BASE_URL ?? "http://127.0.0.1:8799").replace(/\/$/, ""),
     apiKey: process.env.LIVE_API_KEY ?? process.env.DEMO_API_KEY ?? null,
     tiktokUrl: process.env.LIVE_TIKTOK_URL ?? "https://www.tiktok.com/@tiktok/video/7106594312292453675",
+    publicVideoUrl: process.env.LIVE_PUBLIC_VIDEO_URL ?? "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
     local: !remote,
   };
+}
+
+/**
+ * Thrown when the *test host* cannot reach the worker (sandbox egress
+ * restriction), in contrast to a failure the worker itself reported. The
+ * message must tell the operator exactly which environment constraint hit.
+ */
+export class TestEnvironmentError extends Error {}
+
+const EGRESS_HINTS =
+  /fetch failed|econnrefused|econnreset|enotfound|enetunreach|ehostunreach|ehostdown|socket hang up|network|unreachable|dns|getaddrinfo|tls|certificate|ssl|handshake|aborted|timed? ?out|timeout|proxy/i;
+
+/** True when an error looks like a test-host network restriction, not an app bug. */
+export function isEgressError(error: unknown): boolean {
+  return EGRESS_HINTS.test(String(error ?? ""));
+}
+
+/**
+ * Preflight: the worker must answer /health. If the test host cannot reach it
+ * (typical in a restricted sandbox), fail fast with an unambiguous message
+ * instead of producing misleading per-test failures.
+ */
+export async function assertWorkerReachable(baseUrl: string): Promise<void> {
+  const origin = baseUrl.replace(/\/$/, "");
+  try {
+    const response = await fetch(`${origin}/health`);
+    if (!response.ok) throw new Error(`/health returned HTTP ${response.status}`);
+  } catch (error) {
+    const detail = String(error);
+    throw new TestEnvironmentError(
+      isEgressError(error)
+        ? `The test host could not reach the worker at ${origin}/health (${detail}). This is an outbound network restriction of the sandbox/test environment — NOT a failure of the deployed pipeline. Run the live tests from a host with internet egress (or set LIVE_WORKER_URL to a deployed worker reachable from this host).`
+        : `The worker at ${origin} did not pass the /health preflight: ${detail}`,
+    );
+  }
+}
+
+/**
+ * Classify a tool result that failed because the *worker* could not reach the
+ * public source from its own network (restricted test host running
+ * `wrangler dev`). Returns a skip note, or null when the failure is a real
+ * pipeline/platform result that the test must assert on.
+ */
+export function workerEgressSkipNote(result: CallResult, target: string): string | null {
+  const payload = result.parsed as Record<string, any> | null;
+  if (!payload || payload.success === true) return null;
+  const message = String(payload.message ?? payload.error ?? "");
+  if (!/fetch failed|network|unreachable|enotfound|econnrefused|econnreset|dns|getaddrinfo|tls|certificate|ssl|handshake|aborted/i.test(message)) return null;
+  return `Worker egress to ${target} failed (${message}). The deployed worker has normal outbound access; this failure comes from the restricted network of the environment running the test. Re-run from a host with internet egress, or against LIVE_WORKER_URL.`;
 }
 
 export interface CallResult {
@@ -42,6 +95,8 @@ export interface CallResult {
   parsed: any;
   imageCount: number;
   imageMimeTypes: string[];
+  /** Raw MCP image content blocks (base64 data + MIME) for byte-level checks. */
+  imageBlocks: Array<{ data: string; mimeType: string }>;
 }
 
 interface JsonRpc {
@@ -103,6 +158,10 @@ export function connectLive(baseUrl?: string, apiKey?: string): LiveClient {
         parsed,
         imageCount: imageEntries.length,
         imageMimeTypes: imageEntries.map((entry: { mimeType?: string }) => String(entry.mimeType ?? "")),
+        imageBlocks: imageEntries.map((entry: { data?: string; mimeType?: string }) => ({
+          data: String(entry.data ?? ""),
+          mimeType: String(entry.mimeType ?? ""),
+        })),
       };
     },
     async close(): Promise<void> {

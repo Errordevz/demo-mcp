@@ -148,7 +148,7 @@ async function applyBrowserAction(page: any, action: any) {
   return { action: action.action, state: { url: page.url(), title: await page.title() } };
 }
 
-function server(env: Env, requestUrl: string | null = null) {
+function server(env: Env, requestUrl: string | null = null, authorization: string | null = null) {
   const mcp = new McpServer({ name: "DEMO", version: VERSION }, { capabilities: { tools: {} } });
   const sessions = new SessionManager(env, requestUrl);
   const capabilities = sessions.capabilities();
@@ -571,12 +571,14 @@ export const DEMO_TOOL_NAMES = [
   "browser_capabilities",
   // Public video understanding
   "video_inspect_url",
+  "video_ingest",
   "video_download_public",
   "video_extract_frames",
   "video_extract_audio",
   "video_transcribe",
   "video_analyze",
   "video_get_frame",
+  "video_inspect_pipeline",
   // Skills
   "skills_search",
   "skills_browse",

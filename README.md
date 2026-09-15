@@ -107,6 +107,7 @@ walls, cracks signed URLs, circumvents DRM, or accesses private accounts.
 
 | Tool | Purpose |
 | --- | --- |
+| `video_ingest` | **One-call ingestion of a public video URL** (incl. TikTok `www`/`vm`/`vt` links): safe redirect resolution, bounded download to an expiring R2 artifact, Browser Run frame decoding, optional audio/transcript, and a single structured result with MCP image blocks + artifact URLs. `output_mode`: `frames` \| `video_artifact` \| `analysis` \| `all`. |
 | `video_inspect_url` | Resolve TikTok, Instagram, YouTube, X, Reddit, generic pages, or direct media URLs; return bounded metadata, representative timestamps, transcript status, and actual MCP image blocks when frames decode. |
 | `video_download_public` | Bounded download to an expiring R2 artifact (`video_<sha256>`), with public redirect, content-type, size, duration and timeout checks. |
 | `video_extract_frames` | Seek a public non-DRM HTML5 video and return timestamped JPEG image blocks plus short-lived `/screenshots/` references. |
@@ -114,6 +115,7 @@ walls, cracks signed URLs, circumvents DRM, or accesses private accounts.
 | `video_transcribe` | Use an optional server-side Workers AI Whisper binding or configured HTTPS provider and return timestamped segments; no speech is `no_speech_detected`. |
 | `video_analyze` | Return frame-grounded scene/OCR/object/action fields. Without successfully decoded frames and a configured vision model it explicitly reports unavailable instead of guessing. |
 | `video_get_frame` | Return one actual frame at a requested timestamp as an MCP image content block when it fits the inline cap. |
+| `video_inspect_pipeline` | **Diagnostic**: runs URL validation → redirect resolution → media discovery → browser access → media retrieval (64 KiB sample) → frame extraction → R2 round trip → artifact URL generation → MCP serialization, and reports exactly which stage failed. No separate key required (standard `/mcp` auth still applies if configured). Never returns secrets. |
 
 ### AI visibility is explicit
 
@@ -125,6 +127,81 @@ still includes its timestamp, MIME type and byte count. If neither delivery path
 is possible, the tool returns `FRAMES_UNAVAILABLE` and does **not** say it saw the
 video. `video_inspect_url` sets `analysis_ready` only after at least one actual
 frame was captured.
+
+**What the connected AI client actually receives** from `video_ingest` (the
+payload shown here is the JSON inside the MCP `text` content item; the decoded
+JPEGs additionally travel as separate `type: "image"` content items):
+
+```json
+{
+  "success": true,
+  "source_url": "https://vt.tiktok.com/ZSq4b6A3K/",
+  "resolved_url": "https://www.tiktok.com/@creator/video/7300000000000000001",
+  "media_url": "https://v16-webapp-prime.tiktok.com/video/tos/.../clip.mp4",
+  "platform": "tiktok",
+  "media_type": "video",
+  "output_mode": "all",
+  "duration_seconds": 12.4,
+  "width": 1080,
+  "height": 1920,
+  "mime_type": "video/mp4",
+  "frames": [
+    { "timestamp_seconds": 0, "mime_type": "image/jpeg", "url": "https://demo-mcp.<sub>.workers.dev/screenshots/screenshots/<id>", "bytes": 182441, "inspected": true },
+    { "timestamp_seconds": 6.2, "mime_type": "image/jpeg", "url": "https://demo-mcp.<sub>.workers.dev/screenshots/screenshots/<id>", "bytes": 176209, "inspected": true }
+  ],
+  "video_artifact": {
+    "mime_type": "video/mp4",
+    "url": "https://demo-mcp.<sub>.workers.dev/video-assets/video_<sha256-hex-64>",
+    "reference": "video_<sha256-hex-64>",
+    "bytes": 2411552,
+    "sha256": "<sha256-hex-64>",
+    "expires_at": "2026-09-15T20:00:00.000Z"
+  },
+  "audio": null,
+  "transcript": null,
+  "analysis_ready": true,
+  "challenge": { "detected": false, "kind": null, "reason": null },
+  "limitations": ["Frames are screenshots of the rendered video element..."],
+  "visibility_note": "Actual decoded frame images are included as MCP image content blocks. Frame url values are short-lived R2 retrieval links; video_artifact.url is a short-lived R2 media link."
+}
+```
+
+Notes:
+
+* A frame with `"inspected": true` was decoded by the browser; thumbnails and
+  OpenGraph images are never placed in `frames`.
+* `video_artifact.url` is **not** a local path — it is an expiring R2 object
+  (1 hour by default) served at `/video-assets/<reference>`; the live
+  acceptance test fetches it back and verifies the SHA-256.
+* `visibility_note` denies success whenever no inline image block was
+  returned, so a client can never mistake a URL for "I can see the video" when
+  it cannot inspect it.
+
+### Why a restricted sandbox fails while the deployed live test passes
+
+The pipeline has two distinct network actors:
+
+1. **The test host** (your laptop, CI, or a restricted sandbox) talks to the
+   Worker's `/mcp` endpoint.
+2. **The Worker** talks to the public video source.
+
+A sandbox with restricted outbound DNS/TLS breaks step 2 (and sometimes step
+1): the SSRF guard's DNS-over-HTTPS verification fails closed, so the honest
+result is `blocked_url` / `PROCESSING_TIMEOUT` with `frames: []` — *not* a
+pipeline bug. The live test suite therefore:
+
+* prefights the Worker (`/health`) and reports an unambiguous
+  "test host cannot reach the Worker" message instead of misleading failures;
+* **skips** (with a printed note) when the Worker's own egress to the source
+  fails in a restricted environment, because the deployed Worker has normal
+  outbound access;
+* **passes** when a platform (e.g. TikTok) blocks the Worker, as long as the
+  response is an explicit structured error with zero fabricated frames.
+
+To verify locally without deployment, `npm run build:check` plus the offline
+suite (`npm test`) cover the resolver, SSRF guard, artifact store, frame
+mapping, MCP serialization and stage reporting — only the
+*transport* (Browser Run) is faked, with jsdom page scripts.
 
 ### Public-video safety and limits
 
@@ -182,8 +259,12 @@ browser via `puppeteer.connect(env.BROWSER, sessionId)`.
 
 ### TikTok
 
-* `video_inspect_url` is the acceptance path for the public short URL
-  `https://vt.tiktok.com/ZSq4b6A3K/`: it follows the short-link redirect, probes
+* `video_ingest` is the one-shot path for TikTok (and any) public video URL:
+  `{"url": "https://vt.tiktok.com/ZSq4b6A3K/", "output_mode": "all",
+  "max_duration_seconds": 60, "frame_count": 4}` returns frames + a
+  hash-verified R2 artifact in a single call. `video_inspect_url` remains the
+  acceptance path for the public short URL `https://vt.tiktok.com/ZSq4b6A3K/`:
+  it follows the short-link redirect, probes
   only literal public media URLs, and asks Browser Run for decoded frames. If the
   current TikTok response is a bot challenge or the media URL is not playable,
   the result is still useful and honest, for example:
@@ -219,6 +300,10 @@ browser via `puppeteer.connect(env.BROWSER, sessionId)`.
 
 ## Configuration
 
+See `.env.example` for a copyable template covering both the live test suite
+(`DEMO_MCP_LIVE`, `LIVE_WORKER_URL`, Cloudflare credentials, fixtures) and the
+deployment variables below. Placeholders only — never commit real secrets.
+
 Bindings (`wrangler.jsonc`):
 
 | Binding | Type | Purpose |
@@ -231,7 +316,7 @@ Variables (all optional):
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `DEMO_API_KEY` | *(unset)* | Bearer token required on `/mcp`. Unset = open. |
+| `DEMO_API_KEY` | *(unset)* | Bearer token required on `/mcp`. Unset = open. Set with `wrangler secret put DEMO_API_KEY`. |
 | `DEMO_PLATFORM_ORIGIN` | `https://demo-platform.pages.dev` | CORS allowlist for Platform. |
 | `BROWSER_PROVIDER` | `cloudflare` | `cloudflare` or `node` (node = local dev only). |
 | `BROWSER_KEEPALIVE_MS` | `300000` | Session keep-alive heartbeat (10 s – 10 min). |
@@ -286,18 +371,26 @@ DEMO reports these limits through `browser_capabilities` and surfaces
 ## Testing
 
 ```bash
-npm test              # 100+ unit/integration tests, including a wrangler build gate
+npm test              # 120+ unit/integration tests, including a wrangler build gate
 npm run typecheck     # tsc --noEmit (src + tests)
 DEMO_MCP_LIVE=1 CLOUDFLARE_ACCOUNT_ID=… CLOUDFLARE_API_TOKEN=… npm run test:live
+# video acceptance only:
+DEMO_MCP_LIVE=1 LIVE_WORKER_URL=https://demo-mcp.<sub>.workers.dev npm run test:live:video
 ```
 
 * Unit/Integration (no network): SSRF guard, redaction, challenge detection,
   page scripts (real DOM via jsdom), snapshots, TikTok payload parsing, media
-  reports, frame sampling, session/tab/challenge flows, and the HTTP + MCP
-  surface (tool inventory, auth, routes, graceful capability errors).
+  reports, frame sampling, session/tab/challenge flows, the HTTP + MCP surface
+  (tool inventory, auth, routes, graceful capability errors), and the
+  `video_ingest`/`video_inspect_pipeline` pipeline — download-to-R2, frame
+  mapping to MCP image blocks, admin gating and stage reporting
+  (`tests/video-ingest.test.ts`).
 * Build gate: `wrangler deploy --dry-run` must succeed and must not pull any
   Node-only code into the Worker bundle.
-* Live: opt-in tests that drive the real Browser Run service.
+* Live: opt-in tests that drive the real Browser Run service; the video suite
+  verifies real frames (validated image bytes), R2 upload **and** retrieval
+  (SHA-256 checked) and distinguishes sandbox egress restrictions from real
+  failures (`tests/video-live.test.ts`).
 
 See [`docs/BROWSER.md`](docs/BROWSER.md) for the subsystem design and
 [`docs/TESTING.md`](docs/TESTING.md) for the test matrix.
