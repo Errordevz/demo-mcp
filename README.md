@@ -115,7 +115,7 @@ walls, cracks signed URLs, circumvents DRM, or accesses private accounts.
 | `video_transcribe` | Use an optional server-side Workers AI Whisper binding or configured HTTPS provider and return timestamped segments; no speech is `no_speech_detected`. |
 | `video_analyze` | Return frame-grounded scene/OCR/object/action fields. Without successfully decoded frames and a configured vision model it explicitly reports unavailable instead of guessing. |
 | `video_get_frame` | Return one actual frame at a requested timestamp as an MCP image content block when it fits the inline cap. |
-| `video_inspect_pipeline` | **Admin-only diagnostic** (requires `DEMO_API_KEY`): runs URL validation → redirect resolution → media discovery → browser access → media retrieval (64 KiB sample) → frame extraction → R2 round trip → artifact URL generation → MCP serialization, and reports exactly which stage failed. Never returns secrets. |
+| `video_inspect_pipeline` | **Diagnostic**: runs URL validation → redirect resolution → media discovery → browser access → media retrieval (64 KiB sample) → frame extraction → R2 round trip → artifact URL generation → MCP serialization, and reports exactly which stage failed. No separate key required (standard `/mcp` auth still applies if configured). Never returns secrets. |
 
 ### AI visibility is explicit
 
@@ -200,7 +200,7 @@ pipeline bug. The live test suite therefore:
 
 To verify locally without deployment, `npm run build:check` plus the offline
 suite (`npm test`) cover the resolver, SSRF guard, artifact store, frame
-mapping, MCP serialization, tool registration and admin gating — only the
+mapping, MCP serialization and stage reporting — only the
 *transport* (Browser Run) is faked, with jsdom page scripts.
 
 ### Public-video safety and limits
@@ -316,7 +316,7 @@ Variables (all optional):
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `DEMO_API_KEY` | *(unset)* | Bearer token required on `/mcp`. Unset = open. Also gates the admin-only `video_inspect_pipeline` diagnostic (fail-closed: it refuses to run when unset). Set with `wrangler secret put DEMO_API_KEY`. |
+| `DEMO_API_KEY` | *(unset)* | Bearer token required on `/mcp`. Unset = open. Set with `wrangler secret put DEMO_API_KEY`. |
 | `DEMO_PLATFORM_ORIGIN` | `https://demo-platform.pages.dev` | CORS allowlist for Platform. |
 | `BROWSER_PROVIDER` | `cloudflare` | `cloudflare` or `node` (node = local dev only). |
 | `BROWSER_KEEPALIVE_MS` | `300000` | Session keep-alive heartbeat (10 s – 10 min). |

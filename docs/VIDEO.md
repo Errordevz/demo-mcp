@@ -15,7 +15,7 @@ VPS with FFmpeg.
 | `video_extract_audio` | Best-effort `captureStream`/`MediaRecorder` audio artifact. |
 | `video_transcribe` | Server-side speech-to-text (Workers AI Whisper or configured HTTPS provider). |
 | `video_analyze` | Frame-grounded scene/OCR/object/action fields (vision model optional). |
-| `video_inspect_pipeline` | **Admin-only diagnostic**: runs every stage and reports where it fails (see below). |
+| `video_inspect_pipeline` | **Diagnostic**: runs every stage and reports where it fails (see below). No separate key required; standard `/mcp` auth still applies if configured. |
 
 ## Processing flow
 
@@ -101,8 +101,10 @@ the client received (inline image blocks vs. HTTPS references vs. nothing).
 
 ### `video_inspect_pipeline`
 
-Admin-only (see below). Input: `url`, optional `include_download` and
-`include_frames`. Runs the real stages in order and returns one report entry
+Input: `url`, optional `include_download` and
+`include_frames`. No separate key is required (the standard `/mcp` endpoint
+auth still applies if `DEMO_API_KEY` is configured). Runs the real stages in
+order and returns one report entry
 per stage with `status` (`ok` | `failed` | `skipped`), bounded `detail` and a
 redacted `error`:
 
@@ -122,13 +124,13 @@ redacted `error`:
 but everything else works) or `failed` (URL rejected). `first_failure` names
 the stage to inspect.
 
-**Admin gating (fail-closed).** The tool refuses to run unless the Worker has
-`DEMO_API_KEY` configured **and** the request presents it
-(`Authorization: Bearer <key>`). With the key set, `/mcp` itself requires the
-same bearer, so an unauthenticated caller gets HTTP 401 before any tool runs;
-with the key unset, the tool returns `admin_required`. The report never
-contains credentials, cookies or page bodies — only validated public URLs,
-counts, sizes, durations and redacted error text.
+**No per-tool key.** `video_inspect_pipeline` is open to any caller that can
+reach `/mcp`; it does not require a separate token. The standard `/mcp`
+endpoint auth still applies unchanged — when `DEMO_API_KEY` is configured, the
+whole endpoint (including this tool) requires the bearer, and unauthenticated
+requests get HTTP 401 before any tool runs. The report never contains
+credentials, cookies or page bodies — only validated public URLs, counts,
+sizes, durations and redacted error text.
 
 ### `video_inspect_url`
 
@@ -200,7 +202,6 @@ did not inspect.
 | `PROCESSING_TIMEOUT` | Public request or bounded processing time expired. |
 | `FRAMES_UNAVAILABLE` | No browser-decodable frame could be exposed. |
 | `TRANSCRIPTION_UNAVAILABLE` | No audio/provider or the configured provider failed. |
-| `admin_required` | `video_inspect_pipeline` called without the configured `DEMO_API_KEY`. |
 
 These codes are returned in the MCP text payload and, for hard failures, in the
 MCP `isError` result. `no_speech_detected` is a normal transcript status.

@@ -529,7 +529,7 @@ export class VideoProcessor {
   }
 
   /**
-   * Stage-by-stage diagnostic for the public video pipeline (admin-only tool).
+   * Stage-by-stage diagnostic for the public video pipeline.
    *
    * Runs the real stages in order and records each one's outcome, so it is
    * obvious where a failure happens: URL validation, redirect resolution,

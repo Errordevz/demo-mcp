@@ -10,8 +10,6 @@ import type { VideoEnv, VideoFrameOutput, VideoInput, VideoTranscript } from "..
 export interface VideoToolContext {
   env: VideoEnv & Record<string, unknown>;
   requestUrl?: string | null;
-  /** Authorization header of the current MCP request, for admin gating. */
-  authorization?: string | null;
 }
 
 function safeVideoUrl(value: string): string {
@@ -105,28 +103,6 @@ function frameToolResult(result: FrameCaptureResult, extra: Record<string, unkno
 
 function structuredVideoError(error: string, message: string, extra: Record<string, unknown> = {}): ToolResult {
   return errorResult(JSON.stringify(safeVideoValue({ success: false, error, message, ...extra }), null, 2));
-}
-
-/**
- * Admin gating for the pipeline diagnostic. Fail-closed: the tool is never
- * usable without an explicitly configured `DEMO_API_KEY`, and the request must
- * present it. The diagnostic itself returns no credentials, cookies or page
- * bodies — only validated public URLs, counts, sizes and redacted errors.
- */
-function assertAdminAccess(ctx: VideoToolContext): void {
-  const configured = String(ctx.env.DEMO_API_KEY ?? "").trim();
-  if (!configured) {
-    throw new BrowserError(
-      "admin_required",
-      "video_inspect_pipeline is admin-only: configure DEMO_API_KEY on the Worker and call with Authorization: Bearer <DEMO_API_KEY>.",
-      { capability: "video_pipeline_diagnostic" },
-    );
-  }
-  if (String(ctx.authorization ?? "") !== `Bearer ${configured}`) {
-    throw new BrowserError("admin_required", "video_inspect_pipeline requires the Worker's DEMO_API_KEY Authorization header.", {
-      capability: "video_pipeline_diagnostic",
-    });
-  }
 }
 
 function safeTextResult(value: unknown): ToolResult {
@@ -431,9 +407,9 @@ export function registerVideoTools(mcp: McpServer, ctx: VideoToolContext): void 
   mcp.registerTool(
     "video_inspect_pipeline",
     {
-      title: "Inspect Video Pipeline (admin)",
+      title: "Inspect Video Pipeline",
       description:
-        "Admin-only diagnostic for the public video pipeline. Runs each stage in order — URL validation, redirect resolution, media discovery, browser access, actual media retrieval (64 KiB ranged sample), frame extraction, R2 upload (round trip), artifact URL generation and MCP response serialization — and reports exactly where it succeeds or fails. Requires the Worker's DEMO_API_KEY. Never returns credentials, cookies or page bodies.",
+        "Diagnostic for the public video pipeline. Runs each stage in order — URL validation, redirect resolution, media discovery, browser access, actual media retrieval (64 KiB ranged sample), frame extraction, R2 upload (round trip), artifact URL generation and MCP response serialization — and reports exactly where it succeeds or fails. Never returns credentials, cookies or page bodies.",
       inputSchema: {
         url: z.string().url().describe("The public video URL to diagnose."),
         include_download: z.boolean().default(true).describe("Sample the actual media URL with a bounded 64 KiB ranged GET."),
@@ -442,7 +418,6 @@ export function registerVideoTools(mcp: McpServer, ctx: VideoToolContext): void 
     },
     (args) =>
       runTool(async () => {
-        assertAdminAccess(ctx);
         const report = await processor(ctx).inspectPipeline(args.url, { includeDownload: args.include_download, includeFrames: args.include_frames });
         return safeTextResult({
           tool: "video_inspect_pipeline",

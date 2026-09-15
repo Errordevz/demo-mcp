@@ -489,46 +489,35 @@ describe("MCP surface: video_ingest and video_inspect_pipeline", () => {
     expect(bad.error?.code ?? bad.result?.isError).toBeTruthy();
   });
 
-  it("gates video_inspect_pipeline behind DEMO_API_KEY (admin-only, fail-closed)", async () => {
+  it("runs video_inspect_pipeline without any key and keeps the existing /mcp auth intact", async () => {
     const bucket = createBucket();
     stubFetch(mp4Bytes(10));
     const provider = new FakeProvider();
     provider.available = false;
     setProviderFactory(() => provider);
 
-    // No key configured at all: fail closed.
+    // No DEMO_API_KEY configured: the diagnostic is open and returns the
+    // stage report (no key required).
     const open = await rpc("tools/call", { name: "video_inspect_pipeline", arguments: { url: PAGE_URL } }, { SCREENSHOTS: bucket, SSRF_DNS_CHECK: "false" });
     const openText = (open.result?.content ?? []).map((entry: { text?: string }) => entry.text ?? "").join("\n");
-    expect(open.result?.isError).toBe(true);
-    expect(JSON.parse(openText).error).toBe("admin_required");
+    expect(open.result?.isError).toBeFalsy();
+    const report = JSON.parse(openText) as Record<string, any>;
+    expect(report.success).toBe(true); // overall is partial, not failed
+    expect(report.overall).toBe("partial");
+    expect(report.first_failure).toBe("browser_access");
+    expect(report.stages.length).toBe(9);
 
-    // Key configured but not presented: the endpoint auth rejects the whole
-    // /mcp request with 401 before any tool runs.
+    // Existing behaviour preserved: when DEMO_API_KEY IS configured, the
+    // /mcp endpoint itself still requires the bearer before any tool runs.
     const rejected = await worker.fetch(
       new Request("https://demo.test/mcp", {
         method: "POST",
         headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "video_inspect_pipeline", arguments: { url: PAGE_URL } } }),
       }),
-      { SCREENSHOTS: bucket, DEMO_API_KEY: "demo-admin-key", SSRF_DNS_CHECK: "false" } as never,
+      { SCREENSHOTS: bucket, DEMO_API_KEY: "demo-endpoint-key", SSRF_DNS_CHECK: "false" } as never,
       CTX,
     );
     expect(rejected.status).toBe(401);
-
-    // Key configured and presented: stage report, without leaking the key.
-    const authorized = await rpc(
-      "tools/call",
-      { name: "video_inspect_pipeline", arguments: { url: PAGE_URL } },
-      { SCREENSHOTS: bucket, DEMO_API_KEY: "demo-admin-key", SSRF_DNS_CHECK: "false" },
-      { authorization: "Bearer demo-admin-key" },
-    );
-    const authText = (authorized.result?.content ?? []).map((entry: { text?: string }) => entry.text ?? "").join("\n");
-    expect(authorized.result?.isError).toBeFalsy();
-    const report = JSON.parse(authText) as Record<string, any>;
-    expect(report.success).toBe(true); // overall is partial, not failed
-    expect(report.overall).toBe("partial");
-    expect(report.first_failure).toBe("browser_access");
-    expect(report.stages.length).toBe(9);
-    expect(authText).not.toContain("demo-admin-key"); // the secret never reaches the client
   }, 30_000);
 });

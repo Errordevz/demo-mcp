@@ -420,7 +420,7 @@ function server(env: Env, requestUrl: string | null = null, authorization: strin
 
   /* ------------------------------------------------------------- video tools */
 
-  registerVideoTools(mcp, { env: env as Env & Record<string, unknown>, requestUrl, authorization });
+  registerVideoTools(mcp, { env: env as Env & Record<string, unknown>, requestUrl });
 
   /* ----------------------------------------------------------- skills tools */
 
@@ -618,12 +618,7 @@ export default {
     if (url.pathname === "/tools") return Response.json({ count: TOOL_COUNT, tools: DEMO_TOOL_NAMES });
     if (url.pathname !== "/mcp") return new Response("Not Found", { status: 404 });
     if (!authorized(request, env)) return Response.json({ error: "Unauthorized" }, { status: 401 });
-    // The Authorization header is forwarded to the server factory (never to a
-    // tool result) so admin-gated tools like video_inspect_pipeline can check
-    // the caller. The MCP handler is stateless, so this is read per request.
-    return createMcpHandler((mcpContext) =>
-      server(env, mcpContext.requestInfo?.url ?? request.url ?? null, mcpContext.requestInfo?.headers?.get("authorization") ?? null),
-    )(request, env, ctx);
+    return createMcpHandler((mcpContext) => server(env, mcpContext.requestInfo?.url ?? request.url ?? null))(request, env, ctx);
   },
 };
 
