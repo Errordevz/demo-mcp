@@ -1,7 +1,7 @@
 import demoWorker, { TOOL_COUNT } from "./index";
 import { demoUi } from "./ui";
 import { SessionManager } from "./src/session/manager.js";
-import { VideoArtifactStore, artifactBaseUrl } from "./src/video/store.js";
+import { VideoArtifactStore, artifactBaseUrl, parseRangeHeader } from "./src/video/store.js";
 import { LIMITS } from "./src/core/limits.js";
 
 // Re-exported so Wrangler can bind the Durable Object class
@@ -134,13 +134,40 @@ async function videoObject(request: Request, env: Env): Promise<Response> {
     artifactBaseUrl(request.url),
     Number(env.VIDEO_ARTIFACT_TTL_SECONDS ?? LIMITS.videoArtifactTtlSeconds),
   );
+  // Report an elapsed TTL as 410 Gone rather than a generic 404: an expired
+  // temporary artifact is a different, actionable fact for a client.
+  const routeStatus = await store.routeStatus(reference);
+  if (routeStatus === "expired") {
+    return Response.json({ error: "ARTIFACT_EXPIRED", reference, message: "This temporary video artifact passed its retention window and was deleted. Re-fetch the original public URL to mint a new one." }, { status: 410, headers: { "Cache-Control": "no-store" } });
+  }
+  if (routeStatus === "missing") return new Response("Video artifact not found", { status: 404 });
+  if (routeStatus === "storage_unavailable") return new Response("Video artifact storage is not configured", { status: 503 });
+
   const object = await store.objectForRoute(reference);
   if (!object) return new Response("Video artifact not found or expired", { status: 404 });
+  const size = Number(object.size ?? 0);
+
   const headers = new Headers();
   object.writeHttpMetadata?.(headers);
   headers.set("Cache-Control", "private, max-age=3600");
   headers.set("X-Content-Type-Options", "nosniff");
   headers.set("Accept-Ranges", "bytes");
+
+  // Honour Range requests so a stored artifact can be seeked by an <video>
+  // element without DEMO buffering the whole file.
+  const range = parseRangeHeader(request.headers.get("Range"), Number.isFinite(size) && size > 0 ? size : null);
+  if (range) {
+    const ranged = await store.objectForRoute(reference, range);
+    if (ranged) {
+      const rangedHeaders = new Headers(headers);
+      const start = range.suffix !== undefined ? Math.max(0, size - range.suffix) : (range.offset ?? 0);
+      const length = range.suffix !== undefined ? Math.min(range.suffix, size) : (range.length ?? size - start);
+      rangedHeaders.set("Content-Range", `bytes ${start}-${start + length - 1}/${size || "*"}`);
+      rangedHeaders.set("Content-Length", String(length));
+      return new Response(ranged.body, { status: 206, headers: rangedHeaders });
+    }
+  }
+  if (Number.isFinite(size) && size > 0) headers.set("Content-Length", String(size));
   return new Response(object.body, { headers });
 }
 

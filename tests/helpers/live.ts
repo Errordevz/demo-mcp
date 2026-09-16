@@ -116,6 +116,8 @@ function parseSse(text: string): JsonRpc | null {
 
 export interface LiveClient {
   call(name: string, args: Record<string, unknown>): Promise<CallResult>;
+  /** Any JSON-RPC method (used for `resources/list` and `resources/read`). */
+  rpc(method: string, params: Record<string, unknown>): Promise<any>;
   close(): Promise<void>;
 }
 
@@ -163,6 +165,18 @@ export function connectLive(baseUrl?: string, apiKey?: string): LiveClient {
           mimeType: String(entry.mimeType ?? ""),
         })),
       };
+    },
+    async rpc(method: string, params: Record<string, unknown>): Promise<any> {
+      const response = await fetch(`${origin}/mcp`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ jsonrpc: "2.0", id: ++id, method, params }),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status} from ${origin}/mcp: ${await response.text()}`);
+      const message = parseSse(await response.text());
+      if (!message) throw new Error(`Unparseable MCP response for ${method}`);
+      if (message.error) throw new Error(`MCP error ${message.error.code}: ${message.error.message}`);
+      return message.result ?? {};
     },
     async close(): Promise<void> {
       /* HTTP transport is stateless per request */

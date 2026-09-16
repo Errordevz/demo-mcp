@@ -33,6 +33,11 @@ const REPLACEMENTS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\+\d{1,3}[\s.-]?\d{2,4}[\s.-]?\d{2,4}[\s.-]?\d{2,6}\b/g, "[phone-redacted]"],
   [/\b\(\d{3}\)\s*\d{3}[-.\s]?\d{4}\b/g, "[phone-redacted]"],
   [/\b\d{3}[-.]\d{3}[-.]\d{4}\b/g, "[phone-redacted]"],
+  // Signed media URL query parameters. CDN signatures (`x-signature`, `hdnts`,
+  // `sig`, `token`, …) are short-lived credentials: they must never be persisted
+  // in a log line or a diagnostic message, even though a tool result may carry
+  // the real URL so `video_fetch` can use it within the same request.
+  [/([?&])(x-signature|signature|sig|hdnts|hdntl|hdnea|token|auth|se|sp|sr|sc)(=[^&#\s"]{6,})/gi, "$1$2=[signed-url-redacted]"],
   // Long opaque hex/base64 blobs (session ids, hashes, signatures).
   [/\b[0-9a-fA-F]{32,}\b/g, "[hex-redacted]"],
 ];

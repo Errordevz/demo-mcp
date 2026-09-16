@@ -109,3 +109,58 @@ export function tiktokSigiPage(): string {
   return `<!doctype html><html><head><title>Legacy creator</title></head><body>
 <script id="SIGI_STATE" type="application/json">${SIGI_PAYLOAD}</script></body></html>`;
 }
+
+/**
+ * A TikTok page carrying the published `webapp.video-detail.statusCode` verdict.
+ *
+ * TikTok answers 200 with an HTML shell for deleted/private/region-restricted/
+ * CAPTCHA-gated items and encodes the real reason in this field, so a
+ * retrieval pipeline must read it rather than trusting the HTTP status.
+ */
+export function tiktokStatusPage(statusCode: number, statusMsg = "", options: { withItem?: boolean; canonical?: string } = {}): string {
+  const detail: Record<string, unknown> = { statusCode, statusMsg };
+  if (options.withItem !== false && statusCode === 0) {
+    detail.itemInfo = { itemStruct: (universalPayload() as any).__DEFAULT_SCOPE__["webapp.video-detail"].itemInfo.itemStruct };
+  }
+  const payload = { __DEFAULT_SCOPE__: { "webapp.video-detail": detail } };
+  const canonical = options.canonical ?? "https://www.tiktok.com/@creator.one/video/7300000000000000001";
+  return `<!doctype html><html lang="en"><head>
+<title>TikTok</title>
+<meta property="og:url" content="${canonical}">
+<meta property="og:title" content="Video unavailable">
+</head><body>
+<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">${JSON.stringify(payload)}</script>
+</body></html>`;
+}
+
+/** A hydration payload with several literal signed stream URLs to rank. */
+export function tiktokMultiStreamPage(options: { expired?: boolean } = {}): string {
+  const signature = options.expired ? "x-expires=1700000000&x-signature=old" : "x-expires=9999999999&x-signature=new";
+  const item = {
+    id: "7300000000000000009",
+    desc: "Multiple bitrates #streams",
+    createTime: 1_700_000_000,
+    author: { id: "9", uniqueId: "multi.creator", nickname: "Multi" },
+    video: {
+      duration: 12,
+      width: 720,
+      height: 1280,
+      playAddr: `https://v16-webapp.tiktokcdn.com/stream-720p.mp4?${signature}`,
+      downloadAddr: `https://v16-webapp.tiktokcdn.com/stream-download.mp4?${signature}`,
+      bitRate: [
+        { gearName: "lower_720_1", qualityType: "HD", bitRate: 900_000, playAddr: `https://v16-webapp.tiktokcdn.com/stream-720p.mp4?${signature}`, format: "mp4" },
+        { gearName: "lowest_540_1", qualityType: "SD", bitRate: 400_000, playAddr: `https://v16-webapp.tiktokcdn.com/stream-540p.mp4?${signature}`, format: "mp4" },
+      ],
+    },
+    stats: { playCount: 5, diggCount: 1, commentCount: 0, shareCount: 0 },
+  };
+  const payload = { __DEFAULT_SCOPE__: { "webapp.video-detail": { statusCode: 0, itemInfo: { itemStruct: item } } } };
+  return `<!doctype html><html lang="en"><head>
+<title>Multi on TikTok</title>
+<meta property="og:url" content="https://www.tiktok.com/@multi.creator/video/7300000000000000009">
+<meta property="og:description" content="Multiple bitrates #streams">
+<meta name="video:duration" content="12">
+</head><body>
+<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">${JSON.stringify(payload)}</script>
+</body></html>`;
+}

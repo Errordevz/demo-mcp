@@ -1,6 +1,6 @@
 /**
  * Offline tests for the high-level automatic video understanding tool
- * (`inspect_video`, DEMO 0.6.1).
+ * (`inspect_video`, DEMO 0.7.0).
  *
  * Proves the acceptance behaviour without a live deployment:
  *   1. a direct MP4 can be inspected;
@@ -552,7 +552,7 @@ describe("MCP surface: inspect_video", () => {
       clientInfo: { name: "test-client", version: "1.0" },
     });
     const instructions = String(response.result?.instructions ?? "");
-    expect(response.result?.serverInfo?.version).toBe("0.6.1");
+    expect(response.result?.serverInfo?.version).toBe("0.7.0");
     expect(instructions).toMatch(/inspect_video/);
     expect(instructions).toMatch(/automatically call/i);
     expect(instructions).toMatch(/React to this/);
@@ -650,11 +650,11 @@ describe("MCP surface: inspect_video", () => {
     expect(bad.error?.code ?? bad.result?.isError).toBeTruthy();
   });
 
-  it("reports the 0.6.1 automatic video inspection capability via demo_ping", async () => {
+  it("reports the 0.7.0 automatic video inspection capability via demo_ping", async () => {
     const response = await rpc("tools/call", { name: "demo_ping", arguments: {} }, {});
     const text = (response.result?.content ?? []).map((entry: { text?: string }) => entry.text ?? "").join("\n");
     const payload = JSON.parse(text) as Record<string, any>;
-    expect(payload.version).toBe("0.6.1");
+    expect(payload.version).toBe("0.7.0");
     expect(payload.automaticVideoInspection).toBe(true);
     expect(payload.toolCount).toBe(TOOL_COUNT);
   });
