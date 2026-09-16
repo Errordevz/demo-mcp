@@ -38,10 +38,13 @@ public URL (page, share/short link or direct media file)
    │
    ├─ URL guard + DNS-over-HTTPS (re-checked at EVERY redirect hop)
    ├─ bounded public GET/HEAD (no cookies, no Authorization, no session)
-   ├─ robust page parsing — six independent candidate sources:
+   ├─ robust page parsing — platform payloads plus generic fallbacks:
    │       TikTok __UNIVERSAL_DATA_FOR_REHYDRATION__ (incl. its published
-   │       item statusCode), SIGI_STATE, schema.org JSON-LD, OpenGraph,
-   │       Twitter cards and literal <video>/<source> elements
+   │       item statusCode) / SIGI_STATE, Instagram shortcode-media JSON,
+   │       YouTube ytInitialPlayerResponse (incl. the playability verdict),
+   │       X __NEXT_DATA__ video_info, Reddit shreddit-player/reddit_video,
+   │       then schema.org JSON-LD, OpenGraph, Twitter cards and literal
+   │       <video>/<source> elements
    ├─ stream ranking + per-candidate probe (HEAD, then a bounded ranged GET)
    │       └─ byte-signature verification: is it really a video container?
    ├─ access classification → access_status (never "unknown" when the page
@@ -277,11 +280,21 @@ Resolution is **not** retrieval and **not** watching:
   are followed as ordinary public redirects, and the SSRF guard re-checks every
   hop. `source_url` (what the user gave) and `canonical_url`
   (`https://www.tiktok.com/@user/video/<id>`) are both reported.
-* Parsing is deliberately redundant: the TikTok hydration payload
-  (`__UNIVERSAL_DATA_FOR_REHYDRATION__`, including its published
-  `webapp.video-detail.statusCode`), the legacy `SIGI_STATE`, schema.org
-  JSON-LD, OpenGraph, Twitter cards and literal `<video>`/`<source>` elements.
-  No single fragile selector decides the outcome.
+* Parsing is deliberately redundant. Each platform gets a dedicated parser
+  over the page's own public payload — TikTok's
+  `__UNIVERSAL_DATA_FOR_REHYDRATION__` (including its published
+  `webapp.video-detail.statusCode`) and legacy `SIGI_STATE`, Instagram's
+  shortcode-media JSON (`video_url`/`playable_url`), YouTube's
+  `ytInitialPlayerResponse` (video id, title, author, duration and the
+  playability verdict), X's `__NEXT_DATA__` (`video_info` MP4 variants), and
+  Reddit's `shreddit-player`/`reddit_video` (`fallback_url`) — followed by the
+  generic fallbacks: schema.org JSON-LD, OpenGraph, Twitter cards and literal
+  `<video>`/`<source>` elements. No single fragile selector decides the
+  outcome. Ciphered YouTube renditions are never deciphered, HLS/DASH manifests
+  are reported but never streamed or assembled, Reddit's fallback is labelled
+  video-only (no audio track), and photo posts, private accounts, login walls
+  and quarantined communities are reported as precise `access_status` values
+  instead of empty resolves.
 * `streams[]` lists every literal URL the page published, each with its own
   probe verdict: `reachable`, `content_type`, `bytes`, `verified_video`,
   `verified_container`, `signed`, `expires_at`, `reason`. A candidate is only
@@ -516,8 +529,23 @@ existing deployment keeps working. A separate `VIDEO_ARTIFACTS` R2 binding can b
 provided through the environment without changing the tool contracts. Objects
 carry `createdAt`, `expiresAt`, content type and a content hash. The route checks
 expiry before serving; `platform-entry.ts` also runs a bounded hourly cron cleanup
-for `video-artifacts/` and `screenshots/` objects. Configure an R2 lifecycle rule
-as an account-level second line of defence.
+for `video-artifacts/` and `screenshots/` objects. As an account-level second
+line of defence, the bucket carries an R2 lifecycle rule that expires everything
+under `video-artifacts/` after 2 days (artifacts live at most 24h by policy, so
+the rule only ever catches strays from failed cleanups):
+
+```bash
+# Apply (needs wrangler login / CLOUDFLARE_API_TOKEN):
+npx wrangler r2 bucket lifecycle add demo-mcp-screenshots \
+  demo-video-artifacts-expiry "video-artifacts/" --expire-days 2
+
+# Verify:
+npx wrangler r2 bucket lifecycle list demo-mcp-screenshots
+```
+
+If a separate `VIDEO_ARTIFACTS` bucket is bound, apply the same rule there. The
+rule is named in the live capability report (`storage.cleanup`) so operators can
+confirm the deployment's expiry story from `demo://capabilities/video` alone.
 
 `AI` is optional. To enable Workers AI, bind an AI service in the deployment and
 keep model configuration server-side. No AI binding or provider key is returned by

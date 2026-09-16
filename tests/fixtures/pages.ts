@@ -164,3 +164,162 @@ export function tiktokMultiStreamPage(options: { expired?: boolean } = {}): stri
 <script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">${JSON.stringify(payload)}</script>
 </body></html>`;
 }
+
+/* -------------------------------------------------------------------------- */
+/* Instagram / YouTube / X / Reddit fixtures                                   */
+/* -------------------------------------------------------------------------- */
+
+/** Instagram reel page with shortcode-media JSON (public, with video). */
+export function instagramReelPage(options: { imagePost?: boolean; privateAccount?: boolean; loginWall?: boolean } = {}): string {
+  if (options.loginWall) {
+    return `<!doctype html><html><head><title>Log in • Instagram</title></head>
+<body><main><h1>Log in to Instagram</h1><p>Log in to see photos and videos from friends and discover other accounts you'll love.</p>
+<form><input name="username"><input type="password" name="password"></form></main></body></html>`;
+  }
+  const shortcode = "C0d3R33lXyZ";
+  const media = options.privateAccount
+    ? { __typename: "GraphVideo", shortcode_media: null, owner: { username: "private.creator", is_private: true } }
+    : options.imagePost
+      ? { __typename: "GraphImage", owner: { username: "photo.creator", is_private: false }, taken_at: 1_700_000_000 }
+      : {
+          __typename: "GraphVideo",
+          video_url: "https://scontent-lax3-2.cdninstagram.com/o1/v/t2/f2/m69/AQO1234567890.mp4?oe=9999999999&_nc_cat=1",
+          playable_url: "https://scontent-lax3-1.cdninstagram.com/o1/v/t2/f2/m69/AQO0987654321.mp4?oe=9999999999&_nc_cat=2",
+          video_duration: 12.5,
+          dimensions: { width: 720, height: 1280 },
+          owner: { username: "reel.creator", is_private: false },
+          taken_at: 1_700_000_000,
+          edge_media_to_caption: { edges: [{ node: { text: "Sunset timelapse over the bay #timelapse" } }] },
+        };
+  const videoMeta = options.privateAccount || options.imagePost ? "" : `<meta property="og:video" content="https://scontent-lax3-2.cdninstagram.com/o1/v/t2/f2/m69/AQO1234567890.mp4?oe=9999999999">`;
+  return `<!doctype html><html lang="en"><head>
+<title>reel.creator on Instagram: "Sunset timelapse"</title>
+<meta property="og:title" content="reel.creator on Instagram">
+<meta property="og:description" content="Sunset timelapse over the bay #timelapse">
+<meta property="og:image" content="https://scontent-lax3-2.cdninstagram.com/o1/v/t2/f2/m69/thumb.jpg?oe=9999999999">
+${videoMeta}
+</head><body>
+<main><article><video poster="https://scontent-lax3-2.cdninstagram.com/thumb.jpg"></video></article></main>
+<script type="text/javascript">window.__additionalDataLoaded('/reel/${shortcode}/', ${JSON.stringify({ shortcode_media: media })});</script>
+</body></html>`;
+}
+
+/** YouTube watch page with a ytInitialPlayerResponse payload. */
+export function youtubeWatchPage(
+  options: { playability?: "OK" | "PRIVATE" | "LOGIN_REQUIRED" | "UNPLAYABLE"; cipheredOnly?: boolean; noStreaming?: boolean } = {},
+): string {
+  const videoId = "dQw4w9WgXcQ";
+  const playability = options.playability ?? "OK";
+  const reason = playability === "PRIVATE" ? "This video is private." : playability === "LOGIN_REQUIRED" ? "Sign in to confirm your age." : playability === "UNPLAYABLE" ? "This video is no longer available." : undefined;
+  const player: Record<string, unknown> = {
+    playabilityStatus: { status: playability, ...(reason ? { reason } : {}) },
+    videoDetails: {
+      videoId,
+      title: playability === "OK" ? "Never Gonna Give You Up (Official Video)" : "Private video",
+      author: "Rick Astley",
+      lengthSeconds: "212",
+      shortDescription: "The official video for Never Gonna Give You Up.",
+      viewCount: "1500000000",
+      thumbnail: { thumbnails: [{ url: `https://i.ytimg.com/vi/${videoId}/default.jpg` }, { url: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg` }] },
+    },
+  };
+  if (!options.noStreaming && playability === "OK") {
+    player.streamingData = {
+      formats: options.cipheredOnly
+        ? [{ itag: 18, signatureCipher: "url=https%3A%2F%2Fexample.com%2Fvideoplayback&s=ABCDEF123456", mimeType: 'video/mp4; codecs="avc1.42001E, mp4a.40.2"', width: 640, height: 360, bitrate: 500_000 }]
+        : [
+            { itag: 18, url: "https://rr1---sn-example.googlevideo.com/videoplayback?expire=9999999999&ip=1.2.3.4", mimeType: 'video/mp4; codecs="avc1.42001E, mp4a.40.2"', width: 640, height: 360, bitrate: 500_000 },
+            { itag: 22, signatureCipher: "url=https%3A%2F%2Fexample.com%2Fvideoplayback&s=ABCDEF123456", mimeType: 'video/mp4; codecs="avc1.64001F, mp4a.40.2"', width: 1280, height: 720, bitrate: 2_000_000 },
+          ],
+      adaptiveFormats: [{ itag: 140, url: "https://rr1---sn-example.googlevideo.com/videoplayback?expire=9999999999&mime=audio", mimeType: 'audio/mp4; codecs="mp4a.40.2"', bitrate: 128_000 }],
+      hlsManifestUrl: "https://manifest.googlevideo.com/api/manifest/hls_playlist/id/dQw4w9WgXcQ",
+      dashManifestUrl: "https://manifest.googlevideo.com/api/manifest/dash/id/dQw4w9WgXcQ",
+    };
+  }
+  return `<!doctype html><html lang="en"><head>
+<title>${playability === "OK" ? "Never Gonna Give You Up (Official Video) - YouTube" : "Private video - YouTube"}</title>
+<meta property="og:title" content="Never Gonna Give You Up (Official Video)">
+<meta property="og:image" content="https://i.ytimg.com/vi/${videoId}/hqdefault.jpg">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"VideoObject","name":"Never Gonna Give You Up","uploadDate":"2009-10-25"}</script>
+</head><body>
+<div id="player"></div>
+<script>var ytInitialPlayerResponse = ${JSON.stringify(player)};</script>
+</body></html>`;
+}
+
+/** X post page with a __NEXT_DATA__ payload carrying video_info variants. */
+export function xPostPage(options: { photoOnly?: boolean; protectedAccount?: boolean } = {}): string {
+  const statusId = "1700000000000000001";
+  const media = options.photoOnly
+    ? [{ type: "photo", media_url_https: "https://pbs.twimg.com/media/photo.jpg" }]
+    : [
+        {
+          type: "video",
+          media_url_https: "https://pbs.twimg.com/ext_tw_video_thumb/poster.jpg",
+          video_info: {
+            duration_millis: 15_000,
+            variants: [
+              { content_type: "video/mp4", bitrate: 832_000, url: "https://video.twimg.com/ext_tw_video/abc/pu/vid/320x180/clip.mp4" },
+              { content_type: "video/mp4", bitrate: 2_176_000, url: "https://video.twimg.com/ext_tw_video/abc/pu/vid/1280x720/clip.mp4" },
+              { content_type: "application/x-mpegURL", url: "https://video.twimg.com/ext_tw_video/abc/pu/pl/playlist.m3u8" },
+            ],
+          },
+        },
+      ];
+  const nextData = {
+    props: {
+      pageProps: {
+        tweetResult: {
+          result: {
+            rest_id: statusId,
+            legacy: {
+              full_text: "Launch day has arrived — watch the full cut here.",
+              created_at: "Tue Nov 14 12:00:00 +0000 2023",
+              user_id_str: "44196397",
+              extended_entities: { media },
+            },
+            core: { user_results: { result: { legacy: { screen_name: "launch_creator" } } } },
+          },
+        },
+      },
+    },
+  };
+  const protectedBanner = options.protectedAccount ? `<div class="protected"><h1>These posts are protected</h1><p>Only approved followers can see @locked_creator's posts.</p></div>` : "";
+  return `<!doctype html><html lang="en"><head>
+<title>launch_creator on X: "Launch day has arrived"</title>
+<meta property="og:description" content="Launch day has arrived — watch the full cut here.">
+<meta property="og:image" content="https://pbs.twimg.com/ext_tw_video_thumb/poster.jpg">
+</head><body>
+<main>${protectedBanner}<article><p>Launch day has arrived — watch the full cut here.</p></article></main>
+<script id="__NEXT_DATA__" type="application/json">${JSON.stringify(nextData)}</script>
+</body></html>`;
+}
+
+/** Reddit post page with shreddit-player attributes + reddit_video JSON. */
+export function redditPostPage(options: { imagePost?: boolean; privateCommunity?: boolean } = {}): string {
+  const postId = "abc123x";
+  if (options.privateCommunity) {
+    return `<!doctype html><html><head><title>r/locked: This community is private</title></head>
+<body><main><h1>This community is private</h1><p>You must be invited to visit this community.</p></main></body></html>`;
+  }
+  const player = options.imagePost
+    ? `<img src="https://preview.redd.it/photo.jpg" alt="post image">`
+    : `<shreddit-player fallback-url="https://v.redd.it/${postId}/DASH_720.mp4" hls-url="https://v.redd.it/${postId}/HLSPlaylist.m3u8" dash-url="https://v.redd.it/${postId}/DASHPlaylist.mpd" poster="https://preview.redd.it/poster.jpg"></shreddit-player>`;
+  const postJson = options.imagePost
+    ? { id: `t3_${postId}`, title: "Look at this view", author: "poster", is_video: false, post_hint: "image" }
+    : {
+        id: `t3_${postId}`,
+        title: "My first successful landing",
+        author: "rocketeer",
+        is_video: true,
+        media: { reddit_video: { fallback_url: `https://v.redd.it/${postId}/DASH_720.mp4`, hls_url: `https://v.redd.it/${postId}/HLSPlaylist.m3u8`, dash_url: `https://v.redd.it/${postId}/DASHPlaylist.mpd`, duration: 15, width: 720, height: 1280 } },
+      };
+  return `<!doctype html><html lang="en"><head>
+<title>${options.imagePost ? "Look at this view" : "My first successful landing"} : r/space</title>
+<meta property="og:title" content="${options.imagePost ? "Look at this view" : "My first successful landing"}">
+<meta property="og:image" content="https://preview.redd.it/poster.jpg">
+</head><body>
+<main>${player}</main>
+<script type="application/json" id="post-data">${JSON.stringify({ post: postJson })}</script>
+</body></html>`;
+}

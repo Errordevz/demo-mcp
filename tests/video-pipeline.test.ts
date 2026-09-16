@@ -976,6 +976,111 @@ describe("video capability discovery", () => {
 });
 
 /* -------------------------------------------------------------------------- */
+/* Workers AI binding: transcription + vision availability, no secret leakage   */
+/* -------------------------------------------------------------------------- */
+
+describe("Workers AI binding (video_transcribe + vision)", () => {
+  const browserOn = { browserAvailable: true, provider: "cloudflare", videoFrames: true, reason: null, screenshots: true };
+
+  it("flips transcription.available and visionAnalysis.available when the AI binding exists", () => {
+    const without = describeVideoCapabilities({ SCREENSHOTS: createBucket() }, browserOn);
+    expect(without.transcription.available).toBe(false);
+    expect(without.transcription.provider).toBeNull();
+    expect(without.visionAnalysis.available).toBe(false);
+
+    const withAi = describeVideoCapabilities({ SCREENSHOTS: createBucket(), AI: { run: async () => ({}) } }, browserOn);
+    expect(withAi.transcription.available).toBe(true);
+    expect(withAi.transcription.provider).toMatch(/workers-ai:/);
+    expect(withAi.transcription.timestamps).toBe(true);
+    expect(withAi.transcription.languageDetection).toBe(true);
+    expect(withAi.visionAnalysis.available).toBe(true);
+    expect(withAi.visionAnalysis.provider).toMatch(/workers-ai:/);
+    expect(videoCapabilityFlags(withAi).videoTranscription).toBe(true);
+    expect(videoCapabilityFlags(withAi).videoVisionAnalysis).toBe(true);
+  });
+
+  it("video_transcribe returns real timestamped segments from Workers AI", async () => {
+    const bucket = createBucket();
+    const store = new VideoArtifactStore(bucket as never, "https://demo.test", 900);
+    const audio = new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 1, 2, 3, 4]);
+    const stored = await store.store(audio, "audio", "audio/webm", { durationSeconds: 2 });
+    const run = vi.fn(async () => ({
+      text: "hello world",
+      language: "en",
+      segments: [
+        { start: 0, end: 1.2, text: "hello" },
+        { start: 1.2, end: 2, text: "world" },
+      ],
+    }));
+    const processor = new VideoProcessor(processorEnv(bucket, { AI: { run } }), "https://demo.test/mcp");
+    const transcript = await processor.transcribe({ videoReference: stored.reference }, {});
+
+    expect(run).toHaveBeenCalled();
+    expect(transcript.status).toBe("transcribed");
+    expect(transcript.provider).toMatch(/cloudflare-ai:/);
+    expect(transcript.language).toBe("en");
+    expect(transcript.text).toContain("hello");
+    expect(transcript.segments).toHaveLength(2);
+    expect(transcript.segments[0]).toEqual({ startSeconds: 0, endSeconds: 1.2, text: "hello" });
+    expect(transcript.segments[1].startSeconds).toBeGreaterThanOrEqual(transcript.segments[0].endSeconds);
+  });
+
+  it("video_transcribe reports no_speech_detected for empty provider output, never invented dialogue", async () => {
+    const bucket = createBucket();
+    const store = new VideoArtifactStore(bucket as never, "https://demo.test", 900);
+    const stored = await store.store(new Uint8Array([1, 2, 3, 4]), "audio", "audio/webm", { durationSeconds: 1 });
+    const processor = new VideoProcessor(processorEnv(bucket, { AI: { run: async () => ({ text: "", segments: [] }) } }), "https://demo.test/mcp");
+    const transcript = await processor.transcribe({ videoReference: stored.reference }, {});
+
+    expect(transcript.status).toBe("no_speech_detected");
+    expect(transcript.text).toBeNull();
+    expect(transcript.segments).toEqual([]);
+  });
+
+  it("video_transcribe without a provider is an explicit PROVIDER_UNAVAILABLE with no key in the payload", async () => {
+    const bucket = createBucket();
+    const response = await rpc(
+      "tools/call",
+      { name: "video_transcribe", arguments: { url: "https://cdn.example.com/clip.mp4" } },
+      { SCREENSHOTS: bucket, SSRF_DNS_CHECK: "false", TRANSCRIPTION_API_KEY: "sk-test-should-never-leak" },
+    );
+    expect(response.result?.isError).toBe(true);
+    const payload = toolPayload(response);
+    expect(payload.tool ?? payload.transcript).toBeTruthy();
+    const serialized = JSON.stringify(payload);
+    expect(serialized).not.toContain("sk-test-should-never-leak");
+    expect(serialized).not.toMatch(/Bearer\s+[A-Za-z0-9]/);
+  });
+
+  it("publishes the AI-backed capability report over MCP with provider names only", async () => {
+    const read = await rpc(
+      "resources/read",
+      { uri: "demo://capabilities/video" },
+      { SCREENSHOTS: createBucket(), SSRF_DNS_CHECK: "false", AI: { run: async () => ({}) }, TRANSCRIPTION_API_KEY: "sk-live-should-never-leak" },
+    );
+    const report = JSON.parse(read.result?.contents?.[0]?.text ?? "null");
+    expect(report?.transcription?.available).toBe(true);
+    expect(report?.visionAnalysis?.available).toBe(true);
+    const serialized = JSON.stringify(report);
+    expect(serialized).not.toContain("sk-live-should-never-leak");
+    expect(serialized).not.toMatch(/Bearer\s+[A-Za-z0-9]/);
+  });
+
+  it("exposes no secret values on /health or /capabilities/video when AI is bound", async () => {
+    const env = { SCREENSHOTS: createBucket(), SSRF_DNS_CHECK: "false", AI: { run: async () => ({}) }, TRANSCRIPTION_API_KEY: "sk-health-should-never-leak", DEMO_API_KEY: "demo-health-key" } as never;
+    const health = await worker.fetch(new Request("https://demo.test/health"), env, CTX);
+    const healthText = await health.text();
+    expect(healthText).not.toContain("sk-health-should-never-leak");
+    expect(healthText).not.toContain("demo-health-key");
+    expect(healthText).toMatch(/videoTranscription/);
+    const capability = await worker.fetch(new Request("https://demo.test/capabilities/video"), env, CTX);
+    const capabilityText = await capability.text();
+    expect(capabilityText).not.toContain("sk-health-should-never-leak");
+    expect(capabilityText).not.toContain("demo-health-key");
+  });
+});
+
+/* -------------------------------------------------------------------------- */
 /* Container probing                                                           */
 /* -------------------------------------------------------------------------- */
 

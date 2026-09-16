@@ -28,6 +28,10 @@
  *      `video_analyze` (real image blocks or an explicit "could not"),
  *      `video_react` (evidence package, never a hardcoded reaction) and the
  *      capability resources.
+ *  10. `video_extract_frames` with `resize: { max_width: 320 }` renders at a
+ *      viewport exactly 320 CSS pixels wide — or reports the documented
+ *      fallback (resize could not be applied, default viewport) instead of
+ *      silently ignoring the request.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -559,6 +563,55 @@ describe.skipIf(!liveEnv().enabled)("public video acceptance (live)", () => {
       }
     },
     240_000,
+  );
+
+  it(
+    "video_extract_frames: max_width=320 renders at exactly 320 CSS pixels wide, or reports the documented fallback",
+    async ({ skip }) => {
+      const url = liveEnv().publicVideoUrl;
+      const client = connectLive(origin);
+      try {
+        const result = await client.call("video_extract_frames", { url, max_frames: 2, resize: { max_width: 320 } });
+        const egressNote = workerEgressSkipNote(result, url);
+        if (egressNote) skip(egressNote);
+        const payload = result.parsed as Record<string, any>;
+        expect(payload?.resize_requested).toEqual({ max_width: 320 });
+        if (!payload?.success) {
+          // An honest block (DRM, access failure, no browser) is an accepted
+          // outcome; silently succeeding without frames is not.
+          expect(ACCEPTABLE_BLOCK_ERRORS).toContain(payload?.error);
+          expect(payload?.frames ?? []).toEqual([]);
+          return;
+        }
+        expect(payload.frames.length, "a successful extraction must deliver frames").toBeGreaterThan(0);
+        const limitations = (payload.limitations ?? []).join(" ");
+        const rendered = /rendered at a (\d+)×(\d+) viewport/.exec(limitations);
+        if (rendered) {
+          // The provider honoured the resize: the public fixture is landscape
+          // and wider than 320px, so max_width is the binding constraint and
+          // the viewport must be exactly 320 CSS pixels wide (never upscaled,
+          // aspect preserved, so height follows).
+          expect(Number(rendered[1])).toBe(320);
+          expect(Number(rendered[2])).toBeGreaterThan(0);
+          // Every frame reports the real pixel size it actually has; none may
+          // claim a width the bound forbids at CSS scale.
+          for (const frame of payload.frames) {
+            expect(typeof frame.width).toBe("number");
+            expect(typeof frame.height).toBe("number");
+            expect(frame.width).toBeGreaterThan(0);
+            expect(frame.timestamp_seconds).toBeGreaterThanOrEqual(0);
+          }
+        } else {
+          // Documented fallback: the provider could not resize, frames were
+          // captured at the default viewport, and the limitation says so
+          // explicitly instead of pretending the resize happened.
+          expect(limitations).toMatch(/resize could not be applied|captured at the default viewport/i);
+        }
+      } finally {
+        await client.close();
+      }
+    },
+    300_000,
   );
 
   it(

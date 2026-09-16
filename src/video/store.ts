@@ -392,6 +392,96 @@ export class VideoArtifactStore {
     });
   }
 
+  /**
+   * Promote a streamed (random-token) artifact to its content-addressed key.
+   *
+   * `storeStream` must choose the R2 key before the digest is known, so it
+   * writes to a random token. The legacy `video_download_public` /
+   * `video_ingest` contract is content-addressed (`video_<sha256>`), so after
+   * the stream's SHA-256 is known the object is copied to the hash key and the
+   * token object is deleted. A live object already at the hash key is reused
+   * (retries/cache hits stay safe) and the token is still cleaned up.
+   *
+   * The copy streams R2 -> R2 without buffering the file in the Worker when the
+   * runtime exposes a readable body; the in-memory fallback only runs in tests.
+   * `extraMetadata` (verified duration/container) is applied to the final
+   * object in the same copy so no second rewrite is needed. Returns the
+   * content-addressed artifact, or `null` when the promotion could not be
+   * performed (caller keeps the token artifact).
+   */
+  async promoteToContentAddress(
+    tokenReference: string,
+    sha256: string,
+    fallback: { bytes: number; contentType: string; durationSeconds: number | null; width: number | null; height: number | null; expiresAt: string },
+    extraMetadata: Record<string, string> = {},
+  ): Promise<VideoArtifact | null> {
+    if (!this.bucket?.get) return null;
+    const parsed = splitReference(tokenReference);
+    if (!parsed || !/^[a-f0-9]{64}$/.test(sha256) || parsed.hash === sha256) return null;
+    const tokenKey = keyFor(parsed.kind, parsed.hash);
+    const hashKey = keyFor(parsed.kind, sha256);
+    const hashReference = referenceFor(parsed.kind, sha256);
+
+    // A live object already at the hash key wins; the token is just garbage.
+    const existing = await this.bucket.head?.(hashKey).catch(() => null);
+    const existingExpiry = existing?.customMetadata?.expiresAt ? Date.parse(existing.customMetadata.expiresAt) : 0;
+    if (existing && existingExpiry > Date.now()) {
+      await this.bucket.delete?.(tokenKey).catch(() => undefined);
+      const meta = existing.customMetadata ?? {};
+      return {
+        reference: hashReference,
+        kind: parsed.kind,
+        url: `${this.baseUrl}/video-assets/${hashReference}`,
+        contentType: existing.httpMetadata?.contentType ?? fallback.contentType,
+        bytes: existing.size ?? fallback.bytes,
+        sha256,
+        expiresAt: meta.expiresAt ?? fallback.expiresAt,
+        durationSeconds: meta.durationSeconds !== undefined ? Number(meta.durationSeconds) : fallback.durationSeconds,
+        width: meta.width !== undefined ? Number(meta.width) : fallback.width,
+        height: meta.height !== undefined ? Number(meta.height) : fallback.height,
+      };
+    }
+
+    const object = await this.bucket.get(tokenKey).catch(() => null);
+    if (!object) return null;
+    const httpMetadata = {
+      contentType: object.httpMetadata?.contentType ?? fallback.contentType,
+      cacheControl: object.httpMetadata?.cacheControl ?? `private, max-age=${Math.min(this.ttlSeconds, 3600)}`,
+    };
+    const customMetadata: Record<string, string> = {
+      ...(object.customMetadata ?? {}),
+      sha256,
+      kind: parsed.kind,
+      ...extraMetadata,
+    };
+    try {
+      const body = (object as VideoObject).body as ReadableStream<Uint8Array> | null | undefined;
+      if (body && typeof (body as ReadableStream<Uint8Array>).getReader === "function") {
+        await this.bucket.put(hashKey, body as ReadableStream<Uint8Array>, { httpMetadata, customMetadata });
+      } else if (object.arrayBuffer) {
+        const buffer = await object.arrayBuffer();
+        await this.bucket.put(hashKey, new Uint8Array(buffer), { httpMetadata, customMetadata });
+      } else {
+        return null;
+      }
+    } catch {
+      return null;
+    }
+    await this.bucket.delete?.(tokenKey).catch(() => undefined);
+    return {
+      reference: hashReference,
+      kind: parsed.kind,
+      url: `${this.baseUrl}/video-assets/${hashReference}`,
+      contentType: httpMetadata.contentType,
+      bytes: object.size ?? fallback.bytes,
+      sha256,
+      expiresAt: customMetadata.expiresAt ?? fallback.expiresAt,
+      durationSeconds: customMetadata.durationSeconds !== undefined ? Number(customMetadata.durationSeconds) : fallback.durationSeconds,
+      width: customMetadata.width !== undefined ? Number(customMetadata.width) : fallback.width,
+      height: customMetadata.height !== undefined ? Number(customMetadata.height) : fallback.height,
+    };
+  }
+
   parse(reference: string): { kind: ArtifactKind; hash: string } | null {
     return splitReference(reference);
   }

@@ -3,6 +3,7 @@ import { LIMITS } from "../core/limits.js";
 import { assertNavigableUrl, createDohResolver } from "../core/url-guard.js";
 import { redactText } from "../core/redact.js";
 import { isTikTokUrl, parseJsonLdVideo, parseTikTok, type JsonLdVideo, type TikTokAccessFlags, type TikTokInfo } from "../browser/tiktok.js";
+import { parsePlatformPage, type PlatformVideoInfo } from "../browser/platforms.js";
 import { classifyAccess, type AccessStatusInfo, type VideoAccessStatus } from "./access.js";
 import { detectMediaSignature, type MediaSignature } from "./probe.js";
 import { pushCandidate, rankStreams, signedUrlExpired, type QualityPreference, type StreamCandidate, type StreamSource } from "./streams.js";
@@ -313,6 +314,7 @@ export interface ParsedPage {
   jsonLd: unknown[];
   jsonLdVideo: JsonLdVideo | null;
   tiktok: TikTokInfo | null;
+  platformInfo: PlatformVideoInfo | null;
   text: string;
 }
 
@@ -345,12 +347,19 @@ export function parsePage(html: string, base: string): ParsedPage {
   const jsonLd = extractJsonLd(html);
   const jsonLdVideo = parseJsonLdVideo(jsonLd);
   const tiktok = isTikTokUrl(base) ? parseTikTok({ url: base, meta, rawStates: { universal: rawUniversal, sigi: rawSigi }, jsonLd }) : null;
+  const platformInfo = tiktok ? null : parsePlatformPage({ url: base, html, meta, jsonLd });
 
   // 1. Platform hydration payload first: it is the richest and most reliable.
   if (tiktok) {
     for (const stream of tiktok.streams) {
       const absoluteUrl = absoluteCandidate(stream.url, base);
       if (absoluteUrl) pushCandidate(candidates, { url: absoluteUrl, source: stream.source, width: stream.width, height: stream.height, bitrate: stream.bitrate });
+    }
+  }
+  if (platformInfo) {
+    for (const stream of platformInfo.streams) {
+      const absoluteUrl = absoluteCandidate(stream.url, base);
+      if (absoluteUrl) pushCandidate(candidates, { url: absoluteUrl, source: stream.source as StreamSource, width: stream.width, height: stream.height, bitrate: stream.bitrate });
     }
   }
 
@@ -388,12 +397,13 @@ export function parsePage(html: string, base: string): ParsedPage {
   const title = first(meta["og:title"], meta["twitter:title"], meta.title, titleTag);
   const description = first(meta["og:description"], meta["twitter:description"], meta.description);
   const thumbnailUrl = absoluteCandidate(first(meta["og:image"], meta["twitter:image"], meta.thumbnailurl, jsonLdVideo?.thumbnailUrl ?? undefined), base);
-  const width = number(first(meta["og:video:width"], meta["video:width"])) ?? jsonLdVideo?.width ?? null;
-  const height = number(first(meta["og:video:height"], meta["video:height"])) ?? jsonLdVideo?.height ?? null;
+  const width = number(first(meta["og:video:width"], meta["video:width"])) ?? jsonLdVideo?.width ?? platformInfo?.width ?? null;
+  const height = number(first(meta["og:video:height"], meta["video:height"])) ?? jsonLdVideo?.height ?? platformInfo?.height ?? null;
   const durationSeconds =
     number(first(meta["video:duration"], meta.duration, meta["og:video:duration"])) ??
     jsonLdVideo?.durationSeconds ??
     tiktok?.durationSeconds ??
+    platformInfo?.durationSeconds ??
     null;
   const text = html
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
@@ -402,7 +412,7 @@ export function parsePage(html: string, base: string): ParsedPage {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 20_000);
-  return { meta, candidates, title, description, thumbnailUrl, width, height, durationSeconds, rawStates: { universal: rawUniversal, sigi: rawSigi }, jsonLd, jsonLdVideo, tiktok, text };
+  return { meta, candidates, title, description, thumbnailUrl: thumbnailUrl ?? platformInfo?.thumbnail ?? null, width, height, durationSeconds, rawStates: { universal: rawUniversal, sigi: rawSigi }, jsonLd, jsonLdVideo, tiktok, platformInfo, text };
 }
 
 function first(...values: Array<string | undefined | null>): string | null {
@@ -514,42 +524,50 @@ function buildDetail(input: {
 }): VideoResolutionDetail {
   const parsed = input.parsed ?? null;
   const tiktok = parsed?.tiktok ?? null;
+  const platformInfo = parsed?.platformInfo ?? null;
   const jsonLdVideo = parsed?.jsonLdVideo ?? null;
-  const caption = tiktok?.description ?? jsonLdVideo?.description ?? parsed?.description ?? null;
+  const platformCaptionSource: VideoResolutionDetail["captionSource"] =
+    platformInfo?.platform === "instagram" ? "instagram_post" : platformInfo?.platform === "youtube" ? "youtube_video" : platformInfo?.platform === "x" ? "x_post" : platformInfo?.platform === "reddit" ? "reddit_post" : null;
+  const caption = tiktok?.description ?? platformInfo?.description ?? jsonLdVideo?.description ?? parsed?.description ?? null;
   const captionSource: VideoResolutionDetail["captionSource"] = tiktok?.description
     ? "tiktok_post"
-    : jsonLdVideo?.description
-      ? "json_ld"
-      : parsed?.description
-        ? "og_description"
-        : parsed?.title
-          ? "page_title"
-          : null;
+    : platformInfo?.description && platformCaptionSource
+      ? platformCaptionSource
+      : jsonLdVideo?.description
+        ? "json_ld"
+        : parsed?.description
+          ? "og_description"
+          : parsed?.title
+            ? "page_title"
+            : null;
   const creator: VideoCreator | null = tiktok?.author
     ? { id: tiktok.author.id ?? null, uniqueId: tiktok.author.uniqueId ?? null, nickname: tiktok.author.nickname ?? null, verified: tiktok.author.verified ?? null }
-    : jsonLdVideo?.authorName
-      ? { id: null, uniqueId: null, nickname: jsonLdVideo.authorName, verified: null }
-      : null;
-  const metadataSource: VideoMetadataSource = input.metadataSource ?? (tiktok ? tiktok.source : jsonLdVideo ? "json_ld" : parsed ? "meta" : "none");
+    : platformInfo?.author
+      ? { id: null, uniqueId: platformInfo.author.uniqueId ?? null, nickname: platformInfo.author.nickname ?? platformInfo.author.uniqueId ?? null, verified: null }
+      : jsonLdVideo?.authorName
+        ? { id: null, uniqueId: null, nickname: jsonLdVideo.authorName, verified: null }
+        : null;
+  const metadataSource: VideoMetadataSource =
+    input.metadataSource ?? (tiktok ? tiktok.source : platformInfo && platformInfo.source !== "none" ? platformInfo.source : jsonLdVideo ? "json_ld" : parsed ? "meta" : "none");
   return {
     access: input.access,
     accessStatus: input.access.status,
-    canonicalUrl: tiktok?.canonicalUrl ?? input.resolvedUrl ?? null,
-    videoId: tiktok?.videoId ?? null,
+    canonicalUrl: tiktok?.canonicalUrl ?? platformInfo?.canonicalUrl ?? input.resolvedUrl ?? null,
+    videoId: tiktok?.videoId ?? platformInfo?.videoId ?? null,
     creator,
     caption: caption ? caption.slice(0, LIMITS.videoMaxCaptionChars) : null,
     captionSource,
     hashtags: tiktok?.hashtags ?? [],
-    createdAt: tiktok?.createdAt ?? jsonLdVideo?.uploadDate ?? null,
+    createdAt: tiktok?.createdAt ?? platformInfo?.createdAt ?? jsonLdVideo?.uploadDate ?? null,
     stats: tiktok?.stats ?? null,
     music: tiktok?.music ?? null,
     accessFlags: tiktok?.accessFlags ?? emptyAccessFlags(),
-    isImagePost: Boolean(tiktok?.isImagePost),
+    isImagePost: Boolean(tiktok?.isImagePost ?? platformInfo?.isImagePost ?? false),
     streams: input.streams,
     streamCount: input.streams.length,
     metadataSource,
     platformStatusCode: tiktok?.statusCode ?? null,
-    platformStatusMessage: tiktok?.statusMessage ?? null,
+    platformStatusMessage: tiktok?.statusMessage ?? platformInfo?.statusMessage ?? null,
     httpStatus: input.httpStatus,
     verification: input.verification,
     signature: input.signature,
@@ -833,6 +851,7 @@ export async function resolvePublicVideo(sourceUrl: string, env: VideoEnv, optio
   // A JSON API response is not a video, and saying so precisely matters.
   const pageSignature = detectMediaSignature(new TextEncoder().encode(text.slice(0, 4_096)), pageType);
   const tiktok = parsed.tiktok;
+  const platformInfo = parsed.platformInfo;
 
   let chosen: StreamCandidate | null = null;
   let chosenFinalUrl: string | null = null;
@@ -858,9 +877,9 @@ export async function resolvePublicVideo(sourceUrl: string, env: VideoEnv, optio
     height: chosen?.height ?? parsed.height,
     contentType: chosen?.contentType ?? null,
     contentLength: chosen?.bytes ?? null,
-    title: parsed.title ?? tiktok?.description?.slice(0, 200) ?? null,
-    description: parsed.description ?? tiktok?.description ?? parsed.jsonLdVideo?.description ?? null,
-    thumbnailUrl: parsed.thumbnailUrl ?? tiktok?.thumbnail ?? null,
+    title: parsed.title ?? tiktok?.description?.slice(0, 200) ?? platformInfo?.description?.slice(0, 200) ?? null,
+    description: parsed.description ?? tiktok?.description ?? platformInfo?.description ?? parsed.jsonLdVideo?.description ?? null,
+    thumbnailUrl: parsed.thumbnailUrl ?? tiktok?.thumbnail ?? platformInfo?.thumbnail ?? null,
   });
 
   if (chosen) {
@@ -868,6 +887,7 @@ export async function resolvePublicVideo(sourceUrl: string, env: VideoEnv, optio
       platform,
       httpStatus: page.response.status,
       platformStatusCode: tiktok?.statusCode,
+      platformHint: platformInfo?.accessHint,
       challenge,
       pageText: parsed.text,
       playableStreamFound: true,
@@ -891,6 +911,8 @@ export async function resolvePublicVideo(sourceUrl: string, env: VideoEnv, optio
         ...(verification === "bytes" ? [] : ["The media server's declared content type was accepted without reading body bytes; video_fetch verifies the actual container signature before storing anything."]),
         ...(chosen.signed ? ["The chosen stream URL is signed and short-lived; it may stop working within minutes and is never persisted."] : []),
         ...(tiktok?.isImagePost ? ["This TikTok post is an image carousel, not a video."] : []),
+        ...(platformInfo?.isImagePost ? [`This ${platformInfo.platform} post is a photo, not a video.`] : []),
+        ...(platformInfo?.limitations ?? []),
       ],
       pageText: parsed.text,
       detail: buildDetail({
@@ -927,11 +949,12 @@ export async function resolvePublicVideo(sourceUrl: string, env: VideoEnv, optio
     platform,
     httpStatus: page.response.status,
     platformStatusCode: tiktok?.statusCode,
+    platformHint: platformInfo?.accessHint,
     challenge,
     errorCode: null,
     pageText: parsed.text,
     playableStreamFound: false,
-    metadataOnly: Boolean(parsed.title || parsed.description || parsed.thumbnailUrl || tiktok),
+    metadataOnly: Boolean(parsed.title || parsed.description || parsed.thumbnailUrl || tiktok || platformInfo),
     artifactExpired: allStreamsExpired || signedStreamsDenied,
     signature: manifestOnly
       ? playlistSignature()
@@ -955,6 +978,7 @@ export async function resolvePublicVideo(sourceUrl: string, env: VideoEnv, optio
       ...(manifestOnly ? ["Every media candidate was an HLS/DASH manifest. DEMO does not assemble segment playlists into a downloadable file; frame extraction through Cloudflare Browser Rendering may still work on the page itself."] : []),
       ...(parsed.thumbnailUrl ? ["A thumbnail was found but is never substituted for video content."] : []),
       ...(tiktok?.limitations ?? []),
+      ...(platformInfo?.limitations ?? []),
     ],
     pageText: parsed.text,
     detail: buildDetail({ parsed, streams: ranked, chosen: null, verification: "none", signature: manifestOnly ? playlistSignature() : pageSignature.isDocument ? pageSignature : null, httpStatus: page.response.status, access, resolvedUrl: page.finalUrl }),

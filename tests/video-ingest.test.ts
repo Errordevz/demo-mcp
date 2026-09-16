@@ -35,6 +35,17 @@ function concat(chunks: Uint8Array[]): Uint8Array {
   return out;
 }
 
+async function readStream(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  for (;;) {
+    const next = await reader.read();
+    if (next.done) break;
+    chunks.push(next.value instanceof Uint8Array ? next.value : new Uint8Array(next.value));
+  }
+  return concat(chunks);
+}
+
 function box(type: string, payload: Uint8Array): Uint8Array {
   const out = new Uint8Array(8 + payload.byteLength);
   const view = new DataView(out.buffer);
@@ -76,9 +87,9 @@ function fakeDecodableVideo(durationSeconds: number, width = 720, height = 1280)
 
 interface FakeBucket {
   objects: Map<string, { bytes: Uint8Array; httpMetadata?: Record<string, string>; customMetadata?: Record<string, string> }>;
-  put(key: string, value: ArrayBuffer | Uint8Array | string, options?: any): Promise<void>;
+  put(key: string, value: ArrayBuffer | Uint8Array | ReadableStream<Uint8Array> | string, options?: any): Promise<void>;
   head(key: string): Promise<any>;
-  get(key: string): Promise<any>;
+  get(key: string, options?: any): Promise<any>;
   delete(key: string): Promise<void>;
 }
 
@@ -86,24 +97,33 @@ function createBucket(): FakeBucket {
   const objects = new Map<FakeBucket["objects"] extends Map<string, infer V> ? string : never, any>();
   const bucket = {
     objects,
-    async put(key: string, value: ArrayBuffer | Uint8Array | string, options?: any) {
-      const bytes = typeof value === "string" ? new TextEncoder().encode(value) : value instanceof Uint8Array ? value : new Uint8Array(value);
+    async put(key: string, value: ArrayBuffer | Uint8Array | ReadableStream<Uint8Array> | string, options?: any) {
+      let bytes: Uint8Array;
+      if (typeof value === "string") bytes = new TextEncoder().encode(value);
+      else if (value instanceof Uint8Array) bytes = value;
+      else if (value instanceof ArrayBuffer) bytes = new Uint8Array(value);
+      else bytes = await readStream(value as ReadableStream<Uint8Array>);
       objects.set(key, { bytes, httpMetadata: options?.httpMetadata, customMetadata: options?.customMetadata });
     },
     async head(key: string) {
       const object = objects.get(key);
       return object ? { size: object.bytes.byteLength, httpMetadata: object.httpMetadata, customMetadata: object.customMetadata } : null;
     },
-    async get(key: string) {
+    async get(key: string, options?: any) {
       const object = objects.get(key);
       if (!object) return null;
+      const range = options?.range as { offset?: number; length?: number; suffix?: number } | undefined;
+      let slice = object.bytes;
+      if (range?.suffix !== undefined) slice = object.bytes.subarray(Math.max(0, object.bytes.byteLength - range.suffix));
+      else if (range?.offset !== undefined) slice = object.bytes.subarray(range.offset, range.length !== undefined ? range.offset + range.length : undefined);
       return {
         body: null,
-        size: object.bytes.byteLength,
+        size: slice.byteLength,
+        range: range ? { offset: range.offset ?? 0, length: slice.byteLength } : undefined,
         httpMetadata: object.httpMetadata,
         customMetadata: object.customMetadata,
         async arrayBuffer() {
-          return object.bytes.buffer.slice(object.bytes.byteOffset, object.bytes.byteOffset + object.bytes.byteLength);
+          return slice.buffer.slice(slice.byteOffset, slice.byteOffset + slice.byteLength);
         },
       };
     },
@@ -283,6 +303,77 @@ describe("video_ingest (processor level)", () => {
     expect(result.challenge.detected).toBe(true);
     expect(result.limitations.join(" ")).toMatch(/CAPTCHA|login|bypass|Browser Run/i);
     expect(bucket.objects.size).toBe(0); // nothing was stored or fabricated
+  });
+
+  it("streams the download and rejects a thumbnail/HTML body with NOT_A_VIDEO, storing nothing", async () => {
+    const bucket = createBucket();
+    // The page promises a video, but the CDN serves an HTML interstitial with
+    // a lying video content type. The streaming path must catch it from the
+    // bytes (not the header) and delete the partial object.
+    const html = new TextEncoder().encode("<html><body>Just a moment...</body></html>");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = String(init?.method ?? "GET").toUpperCase();
+        if (url === PAGE_URL) {
+          if (method === "HEAD") return new Response(null, { status: 200, headers: { "content-type": "text/html" } });
+          return new Response(PAGE_HTML, { status: 200, headers: { "content-type": "text/html" } });
+        }
+        if (url === MEDIA_URL) {
+          if (method === "HEAD") return new Response(null, { status: 200, headers: { "content-type": "video/mp4", "content-length": String(html.byteLength) } });
+          // Ranged probe during resolution sees the same HTML bytes.
+          return new Response(html.slice() as unknown as BodyInit, { status: 200, headers: { "content-type": "video/mp4", "content-length": String(html.byteLength) } });
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      }),
+    );
+    const provider = new FakeProvider();
+    provider.available = false;
+    setProviderFactory(() => provider);
+    const processor = new VideoProcessor(processorEnv(bucket), "https://demo.test/mcp");
+    const resolution = await processor.resolve(PAGE_URL);
+    // Resolution with default (non-byte-verifying) options accepts the declared
+    // type; the download path must still refuse it from the actual bytes.
+    expect(resolution.success).toBe(true);
+    const downloaded = await processor.downloadResolved(resolution);
+    expect(downloaded.artifact).toBeNull();
+    expect(downloaded.error).toBe("NOT_A_VIDEO");
+    expect(downloaded.message).toMatch(/HTML|interstitial|not video/i);
+    expect(bucket.objects.size).toBe(0); // partial object deleted, nothing claimed
+  });
+
+  it("refuses a verifiable container whose duration cannot be read, storing nothing", async () => {
+    const bucket = createBucket();
+    // Valid ISO-BMFF signature (ftyp + mdat) but no moov/mvhd anywhere, and the
+    // page publishes no duration either — the policy must refuse it.
+    const noMoov = concat([box("ftyp", new TextEncoder().encode("isom")), box("mdat", new Uint8Array(512))]);
+    const pageNoDuration = PAGE_HTML.replace('<meta name="video:duration" content="10">', "");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = String(init?.method ?? "GET").toUpperCase();
+        if (url === PAGE_URL) {
+          if (method === "HEAD") return new Response(null, { status: 200, headers: { "content-type": "text/html" } });
+          return new Response(pageNoDuration, { status: 200, headers: { "content-type": "text/html" } });
+        }
+        if (url === MEDIA_URL) {
+          const body = new Uint8Array(noMoov);
+          return new Response(body as unknown as BodyInit, { status: 200, headers: { "content-type": "video/mp4", "content-length": String(noMoov.byteLength) } });
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      }),
+    );
+    const provider = new FakeProvider();
+    provider.available = false;
+    setProviderFactory(() => provider);
+    const processor = new VideoProcessor(processorEnv(bucket), "https://demo.test/mcp");
+    const downloaded = await processor.download(PAGE_URL);
+    expect(downloaded.artifact).toBeNull();
+    expect(downloaded.error).toBe("UNSUPPORTED_MEDIA");
+    expect(downloaded.message).toMatch(/duration could not be verified|no duration/i);
+    expect(bucket.objects.size).toBe(0);
   });
 
   it("never touches blocked URLs: the SSRF guard stops it before any request", async () => {
