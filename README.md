@@ -99,9 +99,11 @@ returning).
 
 ## Public video understanding
 
-DEMO 0.5 adds a separate public-media pipeline, and DEMO 0.6.1 adds
+DEMO 0.5 adds a separate public-media pipeline, DEMO 0.6.1 adds
 **automatic video viewing, understanding and natural reactions** on top of it
-(`inspect_video`). The pipeline is intentionally conservative:
+(`inspect_video`), and DEMO 0.7.0 adds the **real retrieval pipeline**:
+`video_resolve`, `video_fetch`, a unified mode-aware `video_analyze`,
+`video_react` and runtime capability discovery. The pipeline is intentionally conservative:
 it follows normal HTTP redirects, reads public HTML/JSON/OpenGraph metadata, and
 uses a literal media URL only when a normal public request exposes it. It does
 not use platform-private APIs or cookies and never solves CAPTCHAs, bypasses login
@@ -109,6 +111,11 @@ walls, cracks signed URLs, circumvents DRM, or accesses private accounts.
 
 | Tool | Purpose |
 | --- | --- |
+| `video_resolve` | **(0.7.0)** Resolve a public video URL — including TikTok `vt.`/`vm.` short links — into canonical URL, video id, creator, caption, duration and every literal stream URL the page publishes, each with its own byte-signature probe verdict, plus an honest `access_status` (`public`, `deleted`, `private`, `login_required`, `region_restricted`, `challenge_required`, `rate_limited`, `not_found`, `expired`, `blocked_url`, `unsupported`, `unavailable`), guidance and next steps. Downloads nothing; never bypasses a CAPTCHA, login wall, DRM or private account. |
+| `video_fetch` | **(0.7.0)** Retrieve the **actual video bytes**: the body is streamed into expiring R2 (never buffered whole, never on disk), the first 128 KiB must prove a real video container, and the duration policy is verified from page metadata or the container header. HTML/JSON/thumbnail/audio-only/manifest responses fail with `NOT_A_VIDEO` or `UNSUPPORTED_MEDIA` and the partial object is deleted. |
+| `video_analyze` | **(0.7.0, unified)** resolve → retrieve → frames → optional audio/transcript → one structured evidence result. `analysis_mode`: `summary` \| `detailed` \| `reaction` \| `fact_check_visual` \| `transcript` \| `full`. Keeps a real speech-to-text transcript, the creator's post caption and DEMO-generated text strictly separate, and reports exactly what can and cannot be answered. |
+| `video_react` | **(0.7.0)** Grounded evidence package for *the connected model* to react from: real decoded frames as MCP image blocks, transcript when available, style guidance (`casual` \| `funny` \| `serious` \| `detailed`). `reaction` is always `null` and `reaction_author` is `connected_model` — there are no canned reactions anywhere in this repo. |
+| Capability discovery | **(0.7.0)** `demo://capabilities/video` + `demo://video/honesty-contract` MCP resources, `GET /capabilities/video`, and flags in `demo_ping`/`/health`: which platforms are supported, whether real bytes/frames/audio/transcription are available in *this* deployment, which optional providers are configured (names only), the enforced limits and the security policy. |
 | `inspect_video` | **The one high-level tool for "watch this" requests (0.6.1)**: the connected AI calls it automatically when a user sends a video URL and asks "What do you think?", "React to this.", "Is this real?", "What happens at the end?" — or sends only the link. It resolves the platform + actual video, derives reaction mode and analysis focus from the user's message, plans a duration/intent-aware frame budget (first, middle, final + focus-biased moments), decodes real frames in Browser Rendering, and returns them as MCP image content blocks plus structured context (source, detected scenes, on-screen text, honest `audioStatus`, `inspectionStatus`). See below. |
 | `video_ingest` | **One-call ingestion of a public video URL** (incl. TikTok `www`/`vm`/`vt` links): safe redirect resolution, bounded download to an expiring R2 artifact, Browser Run frame decoding, optional audio/transcript, and a single structured result with MCP image blocks + artifact URLs. `output_mode`: `frames` \| `video_artifact` \| `analysis` \| `all`. |
 | `video_inspect_url` | Resolve TikTok, Instagram, YouTube, X, Reddit, generic pages, or direct media URLs; return bounded metadata, representative timestamps, transcript status, and actual MCP image blocks when frames decode. |
@@ -116,7 +123,7 @@ walls, cracks signed URLs, circumvents DRM, or accesses private accounts.
 | `video_extract_frames` | Seek a public non-DRM HTML5 video and return timestamped JPEG image blocks plus short-lived `/screenshots/` references. |
 | `video_extract_audio` | Best-effort browser `captureStream`/`MediaRecorder` extraction of a decoded audio track into an expiring `audio_<sha256>` artifact. |
 | `video_transcribe` | Use an optional server-side Workers AI Whisper binding or configured HTTPS provider and return timestamped segments; no speech is `no_speech_detected`. |
-| `video_analyze` | Return frame-grounded scene/OCR/object/action fields. Without successfully decoded frames and a configured vision model it explicitly reports unavailable instead of guessing. |
+| `video_extract_frames` extras | **(0.7.0)** `interval_seconds` / `max_frames` aliases and an optional `resize` bound (applied by scaling the Browser Rendering viewport — no Worker-side image codec); every frame reports the pixel size it actually has. |
 | `video_get_frame` | Return one actual frame at a requested timestamp as an MCP image content block when it fits the inline cap. |
 | `video_inspect_pipeline` | **Diagnostic**: runs URL validation → redirect resolution → media discovery → browser access → media retrieval (64 KiB sample) → frame extraction → R2 round trip → artifact URL generation → MCP serialization, and reports exactly which stage failed. No separate key required (standard `/mcp` auth still applies if configured). Never returns secrets. |
 

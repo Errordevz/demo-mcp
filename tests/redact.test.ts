@@ -22,6 +22,17 @@ describe("redaction", () => {
     expect(out).toContain("@");
   });
 
+  it("strips signed media URL query parameters from logged text", () => {
+    const out = redactText(
+      "probe failed for https://v16-webapp.tiktokcdn.com/abc.mp4?x-expires=1700000000&x-signature=9f8a7b6c5d4e3f2a1b0c&sig=aVeryLongSignatureValue",
+    );
+    expect(out).not.toContain("9f8a7b6c5d4e3f2a1b0c");
+    expect(out).not.toContain("aVeryLongSignatureValue");
+    expect(out).toContain("[signed-url-redacted]");
+    // The host and path stay readable: only the credential part is removed.
+    expect(out).toContain("v16-webapp.tiktokcdn.com/abc.mp4");
+  });
+
   it("redacts emails and phone numbers", () => {
     expect(redactText("contact me at person@example.com")).not.toContain("person@example.com");
     expect(redactText("call +1 415 555 2671 now")).not.toContain("415 555 2671");

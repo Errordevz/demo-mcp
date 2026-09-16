@@ -9,19 +9,25 @@ import { ScreenshotManager } from "../browser/screenshot.js";
 import { capturePublicAudio, installPublicVideo } from "./page-functions.js";
 import { detectVideoIntent, type IntentFocus } from "./intent.js";
 import { planFrameCount, planFrameTimestamps } from "./frame-plan.js";
+import { accessStatusGuidance, classifyAccess, type AccessStatusInfo, type VideoAccessStatus } from "./access.js";
+import { describeVideoCapabilities, type VideoCapabilityReport } from "./capabilities.js";
+import { detectMediaSignature, durationFromSample, imageDimensions, notAVideoMessage, type MediaSignature } from "./probe.js";
+import { signedUrlExpired, unsignedUrlShape, type QualityPreference } from "./streams.js";
 import {
   contentType,
+  errorCodeForAccess,
   fetchPublic,
   formatBytes,
   isPlaylistContentType,
   isVideoContentType,
   looksLikeMediaUrl,
+  parseLength,
   readBounded,
   resolvePublicVideo,
   videoError,
   videoGuardOptions,
 } from "./http.js";
-import { VideoArtifactStore, artifactBaseUrl } from "./store.js";
+import { VideoArtifactStore, artifactBaseUrl, sha256Hex, type StreamStoreOutcome } from "./store.js";
 import { assertNavigableUrl } from "../core/url-guard.js";
 import type {
   InspectVideoFrame,
@@ -30,8 +36,14 @@ import type {
   InspectVideoScene,
   PipelineStageReport,
   TimestampedTranscriptSegment,
+  VideoAnalysisMode,
+  VideoAnalyzeOptions,
+  VideoAnalyzeResult,
   VideoArtifact,
   VideoEnv,
+  VideoEvidenceSummary,
+  VideoFetchOptions,
+  VideoFetchResult,
   VideoFrameOutput,
   VideoIngestAudio,
   VideoIngestOptions,
@@ -40,11 +52,97 @@ import type {
   VideoMetadata,
   VideoPipelineReport,
   VideoPlatform,
+  VideoReactOptions,
+  VideoReactResult,
+  VideoReactStyle,
   VideoResolution,
+  VideoResolveOptions,
+  VideoResolveResult,
   VideoTranscript,
+  VideoVerification,
 } from "./types.js";
 
 const operationWindows = new Map<string, { startedAt: number; count: number }>();
+
+/**
+ * What each `video_analyze` mode actually does. Frame budgets stay under
+ * `LIMITS.videoFramesMaxCount`, and audio/transcript work is opt-in per mode so
+ * a plain `summary` never spends browser time recording audio.
+ */
+export const ANALYSIS_MODE_PLANS: Record<VideoAnalysisMode, {
+  frames: number | null;
+  includeAudio: boolean;
+  includeTranscript: boolean;
+  reactionMode: boolean | null;
+  analyzeScenes: boolean;
+  analyzeOnScreenText: boolean;
+}> = {
+  summary: { frames: 8, includeAudio: false, includeTranscript: false, reactionMode: false, analyzeScenes: true, analyzeOnScreenText: true },
+  detailed: { frames: 12, includeAudio: true, includeTranscript: true, reactionMode: false, analyzeScenes: true, analyzeOnScreenText: true },
+  reaction: { frames: null, includeAudio: false, includeTranscript: false, reactionMode: true, analyzeScenes: true, analyzeOnScreenText: true },
+  fact_check_visual: { frames: 16, includeAudio: false, includeTranscript: false, reactionMode: false, analyzeScenes: true, analyzeOnScreenText: true },
+  transcript: { frames: 2, includeAudio: true, includeTranscript: true, reactionMode: false, analyzeScenes: false, analyzeOnScreenText: false },
+  full: { frames: 16, includeAudio: true, includeTranscript: true, reactionMode: true, analyzeScenes: true, analyzeOnScreenText: true },
+};
+
+/** Frame budget and register guidance per `video_react` style. */
+export const REACT_STYLE_PLANS: Record<VideoReactStyle, { frames: number; intent: string; guidance: string }> = {
+  casual: {
+    frames: 6,
+    intent: "React to this",
+    guidance: "Casual: one or two short sentences in plain language, like texting a friend. Name the one moment that stands out and how it lands. No headings, no bullet points, no metadata dump.",
+  },
+  funny: {
+    frames: 8,
+    intent: "Is this funny? React to this",
+    guidance: "Funny: lean into the absurd or surprising moment you can actually see, with timing and a light touch. Only joke about what the frames show; if nothing is funny, say that instead of forcing it.",
+  },
+  serious: {
+    frames: 10,
+    intent: "Explain what happens in this video",
+    guidance: "Serious: measured and factual. Describe what happens, flag anything concerning or unsafe, and be explicit about uncertainty and about what sampled frames cannot establish.",
+  },
+  detailed: {
+    frames: 14,
+    intent: "Give a detailed breakdown of this video",
+    guidance: "Detailed: walk the timeline frame by frame with timestamps, note on-screen text, then summarise the overall arc. Keep claims tied to specific frames and separate observation from inference.",
+  },
+};
+
+/** Suggest the next honest step for a given access status. */
+function nextStepsFor(
+  status: VideoAccessStatus,
+  context: { verifiedBytes: boolean; hasStream: boolean; isImagePost: boolean },
+): string[] {
+  if (context.isImagePost) return ["This post has no video stream. Use browser_screenshot or the returned thumbnail reference only if the user explicitly wants the still images — never as video evidence."];
+  switch (status) {
+    case "public":
+      return context.verifiedBytes
+        ? ["video_fetch — stream and store the verified video bytes", "video_extract_frames — decode timestamped frames", "video_analyze / video_react — grounded evidence for the connected model"]
+        : ["video_fetch — verifies the container from real bytes before storing anything", "video_extract_frames — decode timestamped frames"];
+    case "expired":
+      return ["Re-resolve the original public link: signed media URLs expire in minutes.", "If a stored artifact expired, call video_fetch again on the source URL."];
+    case "challenge_required":
+    case "rate_limited":
+      return ["Nothing to retry immediately: DEMO never solves a CAPTCHA or bypasses a bot check.", "Wait and retry later, or ask the user for a direct public media URL."];
+    case "login_required":
+    case "private":
+      return ["Ask the user for a publicly accessible link or the video file itself.", "DEMO never logs in, sends cookies or bypasses privacy settings."];
+    case "region_restricted":
+      return ["Tell the user the video is region-restricted; no content can be described."];
+    case "deleted":
+    case "not_found":
+      return ["Tell the user the video no longer exists at that URL.", "Ask for a corrected or alternative link."];
+    case "blocked_url":
+      return ["The target is private/internal/unsafe. Ask for a public https URL."];
+    case "unsupported":
+      return ["video_extract_frames may still decode frames from the page in Cloudflare Browser Rendering."];
+    default:
+      return context.hasStream
+        ? ["video_fetch — attempt verified retrieval of the actual bytes", "video_extract_frames — attempt frame decoding in Browser Rendering"]
+        : ["video_inspect_pipeline — diagnose exactly which stage fails for this URL"];
+  }
+}
 
 interface BrowserVideoEnv extends VideoEnv {
   BROWSER?: unknown;
@@ -66,6 +164,39 @@ export interface FrameRequest {
   /** `"interval"` (default, backwards compatible) or `"even"` — first, middle
    * and final meaningful frames with even coverage, used by `inspect_video`. */
   strategy?: "interval" | "even";
+  /** Optional output size bound. Applied by scaling the browser viewport, so
+   * Chromium renders (and DEMO screenshots) a smaller frame — no Worker-side
+   * image codec is involved. */
+  resize?: FrameResize | null;
+}
+
+/** Requested maximum frame size in pixels (aspect ratio is preserved). */
+export interface FrameResize {
+  maxWidth?: number | null;
+  maxHeight?: number | null;
+}
+
+/** Compute a viewport that fits `intrinsic` inside `resize`, preserving aspect. */
+export function resizeViewport(
+  intrinsic: { width: number | null; height: number | null },
+  resize: FrameResize | null | undefined,
+): { width: number; height: number } | null {
+  if (!resize) return null;
+  const maxWidth = resize.maxWidth ?? null;
+  const maxHeight = resize.maxHeight ?? null;
+  if (maxWidth === null && maxHeight === null) return null;
+  const boundWidth = maxWidth !== null ? clamp(Math.trunc(maxWidth), LIMITS.videoFrameResizeMinPx, LIMITS.videoFrameResizeMaxPx) : LIMITS.videoFrameResizeMaxPx;
+  const boundHeight = maxHeight !== null ? clamp(Math.trunc(maxHeight), LIMITS.videoFrameResizeMinPx, LIMITS.videoFrameResizeMaxPx) : LIMITS.videoFrameResizeMaxPx;
+  const width = intrinsic.width && intrinsic.width > 0 ? intrinsic.width : 16;
+  const height = intrinsic.height && intrinsic.height > 0 ? intrinsic.height : 9;
+  const scale = Math.min(boundWidth / width, boundHeight / height, 1);
+  const targetWidth = clamp(Math.round(width * scale), LIMITS.videoFrameResizeMinPx, boundWidth);
+  const targetHeight = clamp(Math.round(height * scale), LIMITS.videoFrameResizeMinPx, boundHeight);
+  // Never upscale: a resize request only ever makes frames smaller.
+  if (scale >= 1 && width <= boundWidth && height <= boundHeight) {
+    return { width: clamp(Math.round(width), LIMITS.videoFrameResizeMinPx, boundWidth), height: clamp(Math.round(height), LIMITS.videoFrameResizeMinPx, boundHeight) };
+  }
+  return { width: targetWidth, height: targetHeight };
 }
 
 export interface FrameCaptureResult {
@@ -147,52 +278,16 @@ function frameTimestamps(duration: number | null, request: FrameRequest, maxDura
   return values.slice(0, maxFrames);
 }
 
+/**
+ * Parse a duration out of a bounded byte sample without any media library.
+ *
+ * Delegates to the shared container probe so the download path and the
+ * streaming `video_fetch` path apply exactly the same policy check. This is a
+ * header read, never a decoder.
+ */
 function durationFromBytes(bytes: Uint8Array, contentType: string | null): number | null {
-  // Parse the common ISO Base Media File Format mvhd box without a media
-  // library. This is only a policy check; it is not a decoder.
-  if (!(contentType === "video/mp4" || contentType === "video/quicktime" || contentType === "application/octet-stream" || contentType === null)) return null;
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  let offset = 0;
-  while (offset + 8 <= view.byteLength) {
-    let size = view.getUint32(offset);
-    const type = String.fromCharCode(view.getUint8(offset + 4), view.getUint8(offset + 5), view.getUint8(offset + 6), view.getUint8(offset + 7));
-    let header = 8;
-    if (size === 1 && offset + 16 <= view.byteLength) {
-      const high = view.getUint32(offset + 8);
-      const low = view.getUint32(offset + 12);
-      size = high * 2 ** 32 + low;
-      header = 16;
-    } else if (size === 0) {
-      size = view.byteLength - offset;
-    }
-    if (!Number.isFinite(size) || size < header || offset + size > view.byteLength) break;
-    if (type === "moov") {
-      let child = offset + header;
-      const end = Math.min(offset + size, view.byteLength);
-      while (child + 8 <= end) {
-        const childSize = view.getUint32(child);
-        const childType = String.fromCharCode(view.getUint8(child + 4), view.getUint8(child + 5), view.getUint8(child + 6), view.getUint8(child + 7));
-        if (childType === "mvhd" && child + 24 <= end) {
-          const version = view.getUint8(child + 8);
-          if (version === 0 && child + 28 <= end) {
-            const timescale = view.getUint32(child + 20);
-            const duration = view.getUint32(child + 24);
-            return timescale > 0 ? duration / timescale : null;
-          }
-          if (version === 1 && child + 40 <= end) {
-            const timescale = view.getUint32(child + 28);
-            const durationHigh = view.getUint32(child + 32);
-            const durationLow = view.getUint32(child + 36);
-            return timescale > 0 ? (durationHigh * 2 ** 32 + durationLow) / timescale : null;
-          }
-        }
-        if (!childSize || childSize < 8) break;
-        child += childSize;
-      }
-    }
-    offset += size;
-  }
-  return null;
+  if (!(contentType === "video/mp4" || contentType === "video/quicktime" || contentType === "video/webm" || contentType === "video/x-matroska" || contentType === "application/octet-stream" || contentType === null)) return null;
+  return durationFromSample(bytes);
 }
 
 function normaliseTranscript(raw: any, language: string | null, duration: number | null, provider: string): VideoTranscript {
@@ -576,6 +671,21 @@ export class VideoProcessor {
    * watched a video it did not actually see.
    */
   async inspectVideo(url: string, options: InspectVideoOptions = {}): Promise<InspectVideoResult> {
+    this.charge("inspect_video", url);
+    const resolution = await this.resolve(url);
+    return this.inspectVideoResolved(url, resolution, options);
+  }
+
+  /**
+   * The `inspectVideo` body operating on an already completed resolution, so
+   * `video_analyze` and `video_react` can resolve once (with byte verification
+   * and stream ranking) and reuse the same frame/audio/transcript pipeline.
+   */
+  inspectVideoResolved(url: string, resolution: VideoResolution, options: InspectVideoOptions = {}): Promise<InspectVideoResult> {
+    return this.runInspectVideo(url, resolution, options);
+  }
+
+  private async runInspectVideo(url: string, resolution: VideoResolution, options: InspectVideoOptions = {}): Promise<InspectVideoResult> {
     const intent = detectVideoIntent({
       userIntent: options.userIntent ?? null,
       question: options.question ?? null,
@@ -586,8 +696,6 @@ export class VideoProcessor {
     const analyzeScenes = options.analyzeScenes !== false;
     const analyzeOnScreenText = options.analyzeOnScreenText !== false;
 
-    this.charge("inspect_video", url);
-    const resolution = await this.resolve(url);
     const maxDuration = this.maxDuration();
 
     const buildSource = (decoded: { durationSeconds?: number | null; width?: number | null; height?: number | null; contentType?: string | null } = {}): InspectVideoResult["source"] => ({
@@ -1262,6 +1370,816 @@ export class VideoProcessor {
     };
   }
 
+  /* ------------------------------------------------------------------------ */
+  /* video_resolve — URL resolution with an honest access verdict              */
+  /* ------------------------------------------------------------------------ */
+
+  /**
+   * Resolve a public video URL: follow the short link, identify the platform,
+   * read the canonical video id / creator / caption / duration / dimensions and
+   * collect every literal stream URL the page published, probing the best few
+   * with normal public requests and verifying real bytes.
+   *
+   * The result always states *why* something is not available (`accessStatus`):
+   * deleted, private, region-restricted, login wall, bot challenge, expired
+   * signed URL, rate limit, not found, SSRF-blocked or unsupported container.
+   * A thumbnail or metadata-only page is never reported as a resolved video.
+   */
+  async resolveDetailed(url: string, options: VideoResolveOptions = {}): Promise<VideoResolveResult> {
+    this.charge("resolve", url);
+    const verifyBytes = options.verifyBytes !== false;
+    const includeSignedUrls = options.includeSignedUrls !== false;
+    const resolution = await resolvePublicVideo(url, this.env, {
+      quality: options.quality ?? "auto",
+      probeLimit: LIMITS.videoMaxProbedStreams,
+      verifyBytes,
+    });
+    return this.buildResolveResult(url, resolution, { verifyBytes, includeSignedUrls, platformHint: options.platform ?? "auto" });
+  }
+
+  private buildResolveResult(
+    url: string,
+    resolution: VideoResolution,
+    options: { verifyBytes: boolean; includeSignedUrls: boolean; platformHint?: VideoPlatform | "auto" },
+  ): VideoResolveResult {
+    const detail = resolution.detail;
+    const access = detail.access;
+    const chosen = detail.streams.find((stream) => stream.url === resolution.mediaUrl) ?? detail.streams.find((stream) => stream.verifiedVideo) ?? null;
+    const bestStreamUrl = resolution.mediaUrl;
+    const limitations = [...resolution.limitations];
+    if (options.platformHint && options.platformHint !== "auto" && options.platformHint !== resolution.platform) {
+      limitations.push(`The platform hint "${options.platformHint}" did not match the detected platform "${resolution.platform}"; detection is based on the URL host.`);
+    }
+    if (!options.includeSignedUrls && detail.streams.some((stream) => stream.signed)) {
+      limitations.push("Signed query strings were removed from the returned stream URLs, so those URLs are not directly fetchable; pass include_signed_urls=true when DEMO must retrieve them.");
+    }
+    if (access.status === "public" && detail.verification !== "bytes") {
+      limitations.push("The stream was accepted from its declared content type; pass verify_bytes=true (the default for video_resolve) or call video_fetch to prove the container from real bytes.");
+    }
+    // Signed/expiring query strings are removed at this layer too, so a caller
+    // that asked not to see them cannot receive them by any other path. The
+    // stripped URL keeps `signed: true` and gains a note: it is no longer
+    // directly fetchable, and DEMO says so instead of leaving a broken URL.
+    const includeSignedUrls = options.includeSignedUrls !== false;
+    const streams = includeSignedUrls
+      ? detail.streams
+      : detail.streams.map((stream) =>
+          stream.signed
+            ? { ...stream, url: `${unsignedUrlShape(stream.url)}?signed_query_removed=true`, reason: stream.reason ? `${stream.reason} The signed query string was removed on request, so this URL is not directly fetchable.` : "The signed query string was removed on request, so this URL is not directly fetchable." }
+            : stream,
+        );
+    const reportedBestStreamUrl = bestStreamUrl && !includeSignedUrls ? `${unsignedUrlShape(bestStreamUrl)}?signed_query_removed=true` : bestStreamUrl;
+    if (detail.isImagePost) limitations.push("This is an image/photo carousel post: no video stream exists, and DEMO will not describe motion or audio.");
+    if (detail.streams.some((stream) => stream.signed && signedUrlExpired(stream.url))) {
+      limitations.push("At least one published stream URL had already expired when DEMO resolved the page.");
+    }
+
+    return {
+      success: resolution.success && access.status === "public",
+      accessStatus: access.status,
+      access,
+      platform: resolution.platform,
+      sourceUrl: url,
+      resolvedUrl: resolution.resolvedUrl,
+      canonicalUrl: detail.canonicalUrl ?? resolution.resolvedUrl,
+      videoId: detail.videoId,
+      creator: detail.creator,
+      caption: detail.caption,
+      captionSource: detail.captionSource,
+      hashtags: detail.hashtags,
+      createdAt: detail.createdAt,
+      durationSeconds: resolution.metadata.durationSeconds,
+      width: resolution.metadata.width,
+      height: resolution.metadata.height,
+      contentType: resolution.metadata.contentType,
+      contentLengthBytes: resolution.metadata.contentLength,
+      thumbnailUrl: resolution.metadata.thumbnailUrl,
+      metadataSource: detail.metadataSource,
+      verification: detail.verification,
+      streams,
+      streamCount: detail.streamCount,
+      bestStreamUrl: reportedBestStreamUrl,
+      stats: detail.stats,
+      music: detail.music,
+      accessFlags: detail.accessFlags,
+      isImagePost: detail.isImagePost,
+      platformStatusCode: detail.platformStatusCode,
+      platformStatusMessage: detail.platformStatusMessage,
+      httpStatus: detail.httpStatus,
+      redirectCount: resolution.redirects.length,
+      challenge: resolution.challenge,
+      signature: chosen?.verifiedContainer ? detail.signature : detail.signature,
+      error: resolution.success ? null : resolution.error,
+      message: resolution.success ? null : resolution.message,
+      limitations: [...new Set(limitations)],
+      guidance: accessStatusGuidance(access.status),
+      nextSteps: nextStepsFor(access.status, { verifiedBytes: detail.verification === "bytes", hasStream: Boolean(bestStreamUrl), isImagePost: detail.isImagePost }),
+    };
+  }
+
+  /* ------------------------------------------------------------------------ */
+  /* video_fetch — verified, streamed retrieval of the actual video bytes      */
+  /* ------------------------------------------------------------------------ */
+
+  /**
+   * Retrieve the actual video file.
+   *
+   * The body is *streamed* into expiring R2 storage (never buffered whole,
+   * never written to a local disk), and the first 128 KiB are inspected to
+   * prove the response really is a video container. An HTML interstitial, a
+   * JSON error body, an OpenGraph thumbnail or an HLS manifest is rejected with
+   * `NOT_A_VIDEO`/`UNSUPPORTED_MEDIA` and the partial object is deleted: DEMO
+   * never reports a download that did not produce verified video bytes.
+   */
+  async fetchVideo(input: VideoInput, options: VideoFetchOptions = {}): Promise<VideoFetchResult> {
+    const quality = options.quality ?? "auto";
+    const maxBytes = this.maxDownloadBytes(options.maxSizeMb);
+    const maxDuration = Math.min(options.maxDurationSeconds ?? this.maxDuration(), this.maxDuration());
+
+    // An existing reference: report its true state (ok / expired / missing).
+    if (!input.url && input.videoReference) {
+      return this.fetchExistingReference(input.videoReference, quality, maxDuration);
+    }
+    if (!input.url) {
+      return this.fetchFailure({ url: "", quality, accessStatus: "unknown", error: "invalid_input", message: "Provide either url or video_reference.", limitations: ["No source was supplied."] });
+    }
+
+    this.charge("fetch", input.url);
+    const resolution = options.resolution ?? (await resolvePublicVideo(input.url, this.env, { quality, probeLimit: LIMITS.videoMaxProbedStreams, verifyBytes: true }));
+    const detail = resolution.detail;
+
+    if (!resolution.success || !resolution.mediaUrl) {
+      const expiredStream = detail.streams.some((stream) => stream.signed && signedUrlExpired(stream.url));
+      const access = expiredStream
+        ? { status: "expired" as const, label: "The platform published a signed media URL whose expiry had already passed.", mayDescribeContent: false }
+        : detail.access;
+      return this.fetchFailure({
+        url: input.url,
+        quality,
+        accessStatus: access.status,
+        access,
+        resolution,
+        error: expiredStream ? "ARTIFACT_EXPIRED" : (resolution.error ?? errorCodeForAccess(access.status)),
+        message: resolution.message ?? access.label,
+        limitations: [
+          ...resolution.limitations,
+          "No verified video stream was reachable, so nothing was downloaded and no artifact exists.",
+          ...(detail.streams.length && !expiredStream
+            ? ["Frame extraction through Cloudflare Browser Rendering may still work on the page itself: try video_extract_frames."]
+            : []),
+        ],
+      });
+    }
+
+    // Declared-size policy gate before any bytes are pulled.
+    if (resolution.metadata.contentLength !== null && resolution.metadata.contentLength > maxBytes) {
+      return this.fetchFailure({
+        url: input.url,
+        quality,
+        accessStatus: detail.access.status,
+        access: detail.access,
+        resolution,
+        error: "DOWNLOAD_TOO_LARGE",
+        message: `The stream declares ${formatBytes(resolution.metadata.contentLength)}, above the ${formatBytes(maxBytes)} policy limit.`,
+        limitations: ["The declared size exceeded the deployment limit, so the body was never streamed."],
+      });
+    }
+    if (resolution.metadata.durationSeconds !== null && resolution.metadata.durationSeconds > maxDuration) {
+      return this.fetchFailure({
+        url: input.url,
+        quality,
+        accessStatus: detail.access.status,
+        access: detail.access,
+        resolution,
+        error: "DOWNLOAD_TOO_LARGE",
+        message: `The video duration (${resolution.metadata.durationSeconds.toFixed(1)}s) exceeds the ${maxDuration}s processing limit.`,
+        limitations: ["The duration policy is enforced before the body is streamed."],
+      });
+    }
+
+    let responseResult: Awaited<ReturnType<typeof fetchPublic>>;
+    try {
+      responseResult = await fetchPublic(resolution.mediaUrl, this.env, { method: "GET", headers: { accept: "video/*,application/octet-stream;q=0.8" } }, { timeoutMs: LIMITS.videoDownloadTimeoutMs, referer: resolution.resolvedUrl ?? input.url });
+    } catch (error) {
+      const normal = asBrowserError(error);
+      return this.fetchFailure({ url: input.url, quality, accessStatus: detail.access.status, access: detail.access, resolution, error: normal.code, message: normal.message, limitations: ["The public media request failed, so nothing was downloaded."] });
+    }
+
+    const response = responseResult.response;
+    const type = contentType(response) ?? resolution.metadata.contentType;
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      const expired = signedUrlExpired(responseResult.finalUrl) || response.status === 403 || response.status === 410;
+      const access = expired
+        ? { status: "expired" as const, label: `The media URL returned HTTP ${response.status}; signed platform URLs expire within minutes.`, mayDescribeContent: false }
+        : detail.access;
+      return this.fetchFailure({
+        url: input.url,
+        quality,
+        accessStatus: access.status,
+        access,
+        resolution,
+        error: expired ? "ARTIFACT_EXPIRED" : response.status === 404 ? "VIDEO_NOT_FOUND" : "VIDEO_NOT_PUBLIC",
+        message: `The public media URL returned HTTP ${response.status}.`,
+        limitations: ["The media request did not succeed, so no bytes were stored."],
+      });
+    }
+    // Second size gate: the response's own Content-Length may disagree with the
+    // probe (a signed URL can redirect to a different rendition). Refuse before
+    // a single byte is streamed rather than aborting mid-download.
+    const declaredLength = parseLength(response.headers.get("content-length"));
+    if (declaredLength !== null && declaredLength > maxBytes) {
+      await response.body?.cancel().catch(() => undefined);
+      return this.fetchFailure({
+        url: input.url,
+        quality,
+        accessStatus: detail.access.status,
+        access: detail.access,
+        resolution,
+        error: "DOWNLOAD_TOO_LARGE",
+        message: `The media response declares ${formatBytes(declaredLength)}, above the ${formatBytes(maxBytes)} policy limit, so the body was never streamed.`,
+        limitations: ["The declared size exceeded the deployment limit; no bytes were stored and no artifact exists."],
+      });
+    }
+    if (isPlaylistContentType(type, responseResult.finalUrl)) {
+      await response.body?.cancel().catch(() => undefined);
+      return this.fetchFailure({
+        url: input.url,
+        quality,
+        accessStatus: "unsupported",
+        access: { status: "unsupported", label: "The public URL is an HLS/DASH manifest, not a bounded video file.", mayDescribeContent: false },
+        resolution,
+        error: "UNSUPPORTED_MEDIA",
+        message: "The public URL is a streaming manifest, not a bounded downloadable video file. DEMO does not assemble segment playlists.",
+        limitations: ["Browser Rendering may still decode frames from the page: try video_extract_frames."],
+      });
+    }
+    if (!this.artifacts.available) {
+      await response.body?.cancel().catch(() => undefined);
+      return this.fetchFailure({
+        url: input.url,
+        quality,
+        accessStatus: detail.access.status,
+        access: detail.access,
+        resolution,
+        error: "capability_unavailable",
+        message: this.artifacts.unavailableReason(),
+        limitations: ["Temporary R2 storage is required to hold retrieved video bytes; Workers have no local disk."],
+      });
+    }
+
+    const artifactType = isVideoContentType(type) ? (type as string) : "video/mp4";
+    const storeMetadata = { durationSeconds: resolution.metadata.durationSeconds, width: resolution.metadata.width, height: resolution.metadata.height, source: input.url };
+
+    // Stream when the runtime gives us a body; fall back to a bounded buffered
+    // read only when there is no stream to pipe (e.g. an empty mock body).
+    let outcome: StreamStoreOutcome;
+    let delivery: VideoFetchResult["delivery"] = "streamed";
+    if (response.body) {
+      try {
+        outcome = await this.artifacts.storeStream(response.body, "video", artifactType, storeMetadata, {
+          maxBytes,
+          headBytes: LIMITS.videoHeadProbeBytes,
+          digestBufferBytes: LIMITS.videoDigestBufferBytes,
+          timeoutMs: LIMITS.videoDownloadTimeoutMs,
+        });
+      } catch (error) {
+        const normal = asBrowserError(error);
+        return this.fetchFailure({ url: input.url, quality, accessStatus: detail.access.status, access: detail.access, resolution, error: normal.code, message: normal.message, limitations: ["The streamed upload into R2 failed."] });
+      }
+    } else {
+      delivery = "buffered";
+      let bytes: Uint8Array;
+      try {
+        bytes = await readBounded(response, maxBytes, LIMITS.videoDownloadTimeoutMs);
+      } catch (error) {
+        const normal = asBrowserError(error);
+        return this.fetchFailure({
+          url: input.url,
+          quality,
+          accessStatus: detail.access.status,
+          access: detail.access,
+          resolution,
+          error: normal.code,
+          message: normal.message,
+          limitations: ["The bounded read of the media body failed, so nothing was stored and no download is claimed."],
+        });
+      }
+      const hash = await sha256Hex(bytes);
+      const artifact = await this.artifacts.store(bytes, "video", artifactType, storeMetadata).catch(() => null);
+      outcome = { artifact, head: bytes.subarray(0, LIMITS.videoHeadProbeBytes), bytes: bytes.byteLength, sha256: artifact ? hash : null, contentAddressed: Boolean(artifact), aborted: artifact ? null : { code: "PROCESSING_TIMEOUT", message: "The artifact could not be stored." }, timedOut: false };
+    }
+
+    if (outcome.aborted || !outcome.artifact) {
+      return this.fetchFailure({
+        url: input.url,
+        quality,
+        accessStatus: detail.access.status,
+        access: detail.access,
+        resolution,
+        error: outcome.aborted?.code ?? "PROCESSING_TIMEOUT",
+        message: outcome.aborted?.message ?? "The video body could not be stored.",
+        limitations: ["The partial object was deleted; DEMO does not report a download that did not complete."],
+      });
+    }
+
+    // ── Prove the bytes are really a video ─────────────────────────────────
+    const signature = detectMediaSignature(outcome.head, type);
+    if (!signature.isVideo) {
+      await this.artifacts.delete(outcome.artifact.reference);
+      return this.fetchFailure({
+        url: input.url,
+        quality,
+        accessStatus: classifyAccess({ platform: resolution.platform, signature, playableStreamFound: false, metadataOnly: true }).status,
+        resolution,
+        error: "NOT_A_VIDEO",
+        message: notAVideoMessage(signature),
+        signature,
+        limitations: [
+          `The response body was ${signature.detectedAs}; the stored object was deleted and nothing is claimed as downloaded.`,
+          "A thumbnail, HTML page or JSON body is never substituted for video content.",
+        ],
+      });
+    }
+
+    // ── Verify the duration policy from real container data ────────────────
+    let duration = resolution.metadata.durationSeconds;
+    let durationSource: VideoFetchResult["durationSource"] = duration !== null ? "page_metadata" : null;
+    if (duration === null) {
+      const fromHead = durationFromSample(outcome.head, signature);
+      if (fromHead !== null) {
+        duration = fromHead;
+        durationSource = "head_sample";
+      }
+    }
+    if (duration === null) {
+      const tail = await this.artifacts.getRange(outcome.artifact.reference, Math.max(0, outcome.bytes - LIMITS.videoTailProbeBytes), LIMITS.videoTailProbeBytes);
+      const fromTail = tail ? durationFromSample(tail.bytes, signature) : null;
+      if (fromTail !== null) {
+        duration = fromTail;
+        durationSource = "artifact_tail";
+      }
+    }
+    if (duration === null) {
+      await this.artifacts.delete(outcome.artifact.reference);
+      return this.fetchFailure({
+        url: input.url,
+        quality,
+        accessStatus: "unsupported",
+        access: { status: "unsupported", label: "The video duration could not be verified.", mayDescribeContent: false },
+        resolution,
+        error: "UNSUPPORTED_MEDIA",
+        message: `The container signature verified as ${signature.container ?? signature.detectedAs}, but no duration could be read from page metadata or the ISO-BMFF/EBML headers of the streamed bytes, so DEMO refused to persist it.`,
+        signature,
+        limitations: ["The stored object was deleted: refusing unverifiable durations keeps the duration policy enforceable."],
+      });
+    }
+    if (duration > maxDuration) {
+      await this.artifacts.delete(outcome.artifact.reference);
+      return this.fetchFailure({
+        url: input.url,
+        quality,
+        accessStatus: "unsupported",
+        access: { status: "unsupported", label: `The video is ${duration.toFixed(1)}s long, above the ${maxDuration}s limit.`, mayDescribeContent: false },
+        resolution,
+        error: "DOWNLOAD_TOO_LARGE",
+        message: `The verified video duration (${duration.toFixed(1)}s) exceeds the ${maxDuration}s processing limit.`,
+        signature,
+        limitations: ["The stored object was deleted after the duration was verified from the container."],
+      });
+    }
+
+    await this.artifacts.patchMetadata(outcome.artifact.reference, { durationSeconds: String(duration), ...(durationSource ? { durationSource } : {}), verifiedContainer: signature.container ?? signature.detectedAs });
+    const limitations = [
+      ...resolution.limitations,
+      ...(outcome.sha256 ? [] : ["The runtime could not digest the stream incrementally, so sha256 is null; the artifact reference is a random token rather than a content hash."]),
+      "The artifact is temporary: it expires with the R2 TTL and the route refuses expired references.",
+      ...(signature.container === signature.detectedAs ? [] : []),
+    ];
+
+    return {
+      success: true,
+      accessStatus: "public",
+      sourceUrl: input.url,
+      resolvedUrl: resolution.resolvedUrl,
+      canonicalUrl: detail.canonicalUrl ?? resolution.resolvedUrl,
+      mediaUrl: responseResult.finalUrl,
+      platform: resolution.platform,
+      artifact: { ...outcome.artifact, durationSeconds: duration, sha256: outcome.sha256 ?? outcome.artifact.sha256 },
+      sha256: outcome.sha256,
+      contentAddressed: outcome.contentAddressed,
+      delivery,
+      contentType: artifactType,
+      detectedContainer: signature.container ?? signature.detectedAs,
+      signature,
+      verification: "bytes",
+      bytes: outcome.bytes,
+      durationSeconds: duration,
+      durationSource,
+      durationVerified: true,
+      width: resolution.metadata.width,
+      height: resolution.metadata.height,
+      quality,
+      error: null,
+      message: null,
+      challenge: resolution.challenge,
+      limitations: [...new Set(limitations)],
+    };
+  }
+
+  /** Report the true state of an artifact reference without re-downloading. */
+  private async fetchExistingReference(reference: string, quality: QualityPreference, maxDuration: number): Promise<VideoFetchResult> {
+    const status = await this.artifacts.referenceStatus(reference);
+    const base = { url: reference, quality, resolvedUrl: null, canonicalUrl: null, mediaUrl: null, platform: "generic" as VideoPlatform, contentType: null, detectedContainer: null, signature: null, verification: "none" as VideoVerification, bytes: null, durationSeconds: null, durationSource: null, durationVerified: false, width: null, height: null, challenge: { detected: false, kind: null, reason: null } };
+    if (status === "expired") {
+      return this.fetchFailure({ ...base, accessStatus: "expired", error: "ARTIFACT_EXPIRED", message: "That video artifact reference has expired. Temporary artifacts live only for the configured TTL.", limitations: ["Call video_fetch or video_resolve again on the original public URL to mint a fresh artifact."] });
+    }
+    if (status === "invalid") {
+      return this.fetchFailure({ ...base, accessStatus: "unknown", error: "invalid_input", message: "video_reference must look like video_<64 hex characters> or audio_<64 hex characters>.", limitations: [] });
+    }
+    if (status === "storage_unavailable") {
+      return this.fetchFailure({ ...base, accessStatus: "unknown", error: "capability_unavailable", message: this.artifacts.unavailableReason(), limitations: [] });
+    }
+    if (status === "missing") {
+      return this.fetchFailure({ ...base, accessStatus: "not_found", error: "VIDEO_NOT_FOUND", message: "No artifact exists for that reference (it was never stored or has already been cleaned up).", limitations: [] });
+    }
+    const object = await this.artifacts.objectForRoute(reference);
+    if (!object) {
+      return this.fetchFailure({ ...base, accessStatus: "not_found", error: "VIDEO_NOT_FOUND", message: "The artifact could not be read back from storage.", limitations: [] });
+    }
+    const metadata = object.customMetadata ?? {};
+    const duration = finiteOrNull(metadata.durationSeconds);
+    if (duration !== null && duration > maxDuration) {
+      return this.fetchFailure({ ...base, accessStatus: "unsupported", error: "DOWNLOAD_TOO_LARGE", message: `The stored artifact is ${duration.toFixed(1)}s long, above the ${maxDuration}s limit.`, limitations: [] });
+    }
+    return {
+      success: true,
+      accessStatus: "public",
+      sourceUrl: metadata.source ?? "",
+      resolvedUrl: null,
+      canonicalUrl: null,
+      mediaUrl: `${this.artifacts.baseUrl}/video-assets/${reference}`,
+      platform: "generic",
+      artifact: {
+        reference,
+        kind: this.artifacts.parse(reference)?.kind ?? "video",
+        url: `${this.artifacts.baseUrl}/video-assets/${reference}`,
+        contentType: object.httpMetadata?.contentType ?? "video/mp4",
+        bytes: object.size ?? finiteOrNull(String(object.size ?? "")) ?? 0,
+        sha256: metadata.sha256 ?? reference.replace(/^(?:video|audio)_/, ""),
+        expiresAt: metadata.expiresAt ?? new Date(Date.now() + this.artifacts.ttlSeconds * 1000).toISOString(),
+        durationSeconds: duration,
+        width: finiteOrNull(metadata.width),
+        height: finiteOrNull(metadata.height),
+      },
+      sha256: metadata.sha256 ?? null,
+      contentAddressed: Boolean(metadata.sha256),
+      delivery: "streamed",
+      contentType: object.httpMetadata?.contentType ?? "video/mp4",
+      detectedContainer: metadata.verifiedContainer ?? null,
+      signature: null,
+      verification: metadata.verifiedContainer ? "bytes" : "content_type",
+      bytes: object.size ?? null,
+      durationSeconds: duration,
+      durationSource: (metadata.durationSource as VideoFetchResult["durationSource"]) ?? (duration !== null ? "page_metadata" : null),
+      durationVerified: duration !== null,
+      width: finiteOrNull(metadata.width),
+      height: finiteOrNull(metadata.height),
+      quality,
+      error: null,
+      message: null,
+      challenge: { detected: false, kind: null, reason: null },
+      limitations: ["This is a previously stored temporary artifact; its bytes were verified when it was first fetched."],
+    };
+  }
+
+  private fetchFailure(input: {
+    url: string;
+    quality: QualityPreference;
+    accessStatus: VideoAccessStatus;
+    access?: AccessStatusInfo;
+    resolution?: VideoResolution;
+    error: string;
+    message: string;
+    signature?: MediaSignature | null;
+    limitations: string[];
+  }): VideoFetchResult {
+    const resolution = input.resolution ?? null;
+    const detail = resolution?.detail ?? null;
+    const access = input.access ?? detail?.access ?? { status: input.accessStatus, label: input.message, mayDescribeContent: false };
+    return {
+      success: false,
+      accessStatus: input.accessStatus,
+      sourceUrl: input.url,
+      resolvedUrl: resolution?.resolvedUrl ?? null,
+      canonicalUrl: detail?.canonicalUrl ?? resolution?.resolvedUrl ?? null,
+      mediaUrl: resolution?.mediaUrl ?? null,
+      platform: resolution?.platform ?? "generic",
+      artifact: null,
+      sha256: null,
+      contentAddressed: false,
+      delivery: "streamed",
+      contentType: resolution?.metadata.contentType ?? null,
+      detectedContainer: input.signature?.container ?? input.signature?.detectedAs ?? null,
+      signature: input.signature ?? null,
+      verification: "none",
+      bytes: null,
+      durationSeconds: resolution?.metadata.durationSeconds ?? null,
+      durationSource: null,
+      durationVerified: false,
+      width: resolution?.metadata.width ?? null,
+      height: resolution?.metadata.height ?? null,
+      quality: input.quality,
+      error: input.error,
+      message: input.message,
+      challenge: resolution?.challenge ?? { detected: false, kind: null, reason: null },
+      limitations: input.limitations,
+    };
+  }
+
+  /** What DEMO can do with the video it holds, for capability reporting. */
+  videoCapabilities(): VideoCapabilityReport {
+    const sessions = new SessionManager(this.env as never, this.requestUrl);
+    const capabilities = sessions.capabilities();
+    return describeVideoCapabilities(this.env as never, {
+      browserAvailable: capabilities.browserAvailable,
+      provider: capabilities.provider,
+      videoFrames: capabilities.videoFrames,
+      reason: capabilities.reason ?? null,
+      screenshots: capabilities.screenshots,
+    });
+  }
+
+  /* ------------------------------------------------------------------------ */
+  /* video_analyze — one unified, mode-aware analysis call                     */
+  /* ------------------------------------------------------------------------ */
+
+  /**
+   * The unified high-level tool: resolve → retrieve → frames → audio/transcript
+   * → a structured evidence result the connected AI can actually reason over.
+   *
+   * `analysis_mode` decides the frame budget and whether audio/transcript work
+   * is requested. The result always separates a real speech-to-text transcript
+   * from the platform post caption, and always states which evidence exists;
+   * when no frames and no transcript were obtained the response says so instead
+   * of describing content.
+   */
+  async analyzeUnified(url: string, options: VideoAnalyzeOptions = {}): Promise<VideoAnalyzeResult> {
+    const mode = options.analysisMode ?? "summary";
+    const plan = ANALYSIS_MODE_PLANS[mode] ?? ANALYSIS_MODE_PLANS.summary;
+    const includeAudio = options.includeAudio ?? plan.includeAudio;
+    const includeTranscript = options.includeTranscript ?? (includeAudio || plan.includeTranscript);
+    const question = options.question?.trim() ? options.question.trim().slice(0, 2_000) : null;
+    const userIntent = options.userIntent?.trim() ? options.userIntent.trim().slice(0, 2_000) : null;
+
+    this.charge("analyze", url);
+    const resolution = await resolvePublicVideo(url, this.env, { quality: "auto", probeLimit: LIMITS.videoMaxProbedStreams, verifyBytes: true });
+    const inspected = await this.runInspectVideo(url, resolution, {
+      userIntent,
+      question,
+      reactionMode: plan.reactionMode,
+      frameCount: options.maxFrames ?? plan.frames,
+      includeMetadata: true,
+      includeAudio,
+      analyzeScenes: plan.analyzeScenes,
+      analyzeOnScreenText: plan.analyzeOnScreenText,
+    });
+
+    let transcript = inspected.transcript;
+    if (includeTranscript && !transcript) {
+      if (includeAudio && inspected.audioStatus !== "available") {
+        // Audio capture already failed, so there is nothing to transcribe. Say
+        // exactly that: an unavailable transcript is reported, never invented.
+        transcript = {
+          status: "unavailable",
+          language: null,
+          text: null,
+          segments: [],
+          provider: null,
+          message: `TRANSCRIPTION_UNAVAILABLE: no audio track could be captured (${inspected.audioStatus}), so no speech-to-text was produced. DEMO never writes dialogue it did not hear.`,
+        };
+      } else {
+        // `runInspectVideo` only transcribes when audio extraction succeeded;
+        // when the caller asked for a transcript explicitly, try the audio path
+        // once so an unavailable provider is reported rather than skipped.
+        transcript = await this.transcribe({ url }, { autoExtract: true, durationSeconds: inspected.source.durationSeconds });
+      }
+    }
+
+    const detail = resolution.detail;
+    const framesDelivered = inspected.framesDelivered;
+    const transcriptAvailable = transcript?.status === "transcribed";
+    const audioStatus: VideoAnalyzeResult["audioStatus"] = includeAudio ? (inspected.audioStatus ?? "failed") : "not_requested";
+    const evidence: VideoEvidenceSummary = {
+      videoBytesRetrieved: framesDelivered > 0 || detail.verification === "bytes",
+      framesDecoded: framesDelivered,
+      framesDeliveredInline: inspected.imageBlocksDelivered,
+      transcriptAvailable,
+      transcriptKind: transcriptAvailable ? "speech_to_text" : "none",
+      audioAvailable: audioStatus === "available",
+      metadataOnly: framesDelivered === 0 && !transcriptAvailable,
+      thumbnailUsedAsFrame: false,
+      visualEvidence: framesDelivered > 0,
+    };
+
+    const limitations = [...new Set([...resolution.limitations, ...inspected.limitations])];
+    if (transcript && transcript.status === "unavailable" && !limitations.some((entry) => entry.includes("Speech-to-text"))) {
+      limitations.push(transcript.message ?? "Speech-to-text was not available.");
+    }
+    if (!transcriptAvailable && detail.caption) {
+      limitations.push("A platform post caption is available but it is NOT a transcript: it was written by the creator, and DEMO never presents it as spoken audio.");
+    }
+
+    const intent = detectVideoIntent({ userIntent, question, reactionMode: plan.reactionMode });
+    const can: string[] = [];
+    const cannot: string[] = [];
+    if (framesDelivered > 0) {
+      can.push(`Describe what is visible in ${framesDelivered} real decoded frame(s) at ${inspected.frames.map((frame) => `${frame.timestamp}s`).join(", ")}.`);
+      cannot.push("Describe continuous motion or events between the sampled frames — they are samples, not playback.");
+    } else {
+      cannot.push("Describe any visual content: no frames were decoded, so nothing was seen.");
+    }
+    if (transcriptAvailable) can.push(`Quote the transcribed speech (${transcript?.segments.length ?? 0} timestamped segment(s)).`);
+    else cannot.push("Quote or infer dialogue: no transcript was produced.");
+    if (audioStatus !== "available") cannot.push("Describe sound effects, music or tone of voice: no verified audio track.");
+    if (detail.caption) can.push(`Mention the creator's post caption as caption text (source: ${detail.captionSource}).`);
+    can.push("Report platform metadata that was actually published (duration, dimensions, creator handle, publish date, public stats).");
+    cannot.push("Identify real people by name from pixels alone.");
+    cannot.push("Verify claims that depend on context outside the sampled frames.");
+
+    return {
+      success: framesDelivered > 0 || transcriptAvailable,
+      analysisMode: mode,
+      accessStatus: framesDelivered > 0 || transcriptAvailable ? "public" : detail.access.status,
+      access: framesDelivered > 0 ? { status: "public", label: "A normal public request reached decodable video media.", mayDescribeContent: true } : detail.access,
+      sourceUrl: url,
+      resolvedUrl: resolution.resolvedUrl,
+      canonicalUrl: detail.canonicalUrl ?? resolution.resolvedUrl,
+      videoId: detail.videoId,
+      platform: resolution.platform,
+      durationSeconds: inspected.source.durationSeconds,
+      width: inspected.source.width,
+      height: inspected.source.height,
+      metadata: {
+        ...resolution.metadata,
+        durationSeconds: inspected.source.durationSeconds,
+        width: inspected.source.width,
+        height: inspected.source.height,
+        contentType: inspected.source.contentType,
+        creator: detail.creator,
+        caption: detail.caption,
+        captionSource: detail.captionSource,
+        hashtags: detail.hashtags,
+        createdAt: detail.createdAt,
+        stats: detail.stats,
+        music: detail.music,
+      },
+      frames: inspected.frames,
+      framesDelivered,
+      imageBlocksDelivered: inspected.imageBlocksDelivered,
+      visualEvidenceDelivered: inspected.visualEvidenceDelivered,
+      transcript: transcript ?? null,
+      textSources: {
+        transcript: {
+          available: transcriptAvailable,
+          text: transcriptAvailable ? (transcript?.text ?? null) : null,
+          kind: transcriptAvailable ? "speech_to_text" : "none",
+          provider: transcriptAvailable ? (transcript?.provider ?? null) : null,
+        },
+        platformCaption: { available: Boolean(detail.caption), text: detail.caption, source: detail.captionSource },
+        generatedCaption: {
+          available: false,
+          text: null,
+          note: "DEMO never generates caption text. Anything in `transcript` came from a speech-to-text provider; anything in `platformCaption` was written by the creator.",
+        },
+        onScreenText: {
+          available: Boolean(inspected.extractedText?.length),
+          text: inspected.extractedText,
+          source: inspected.extractedText?.length ? "vision_model" : "none",
+        },
+      },
+      audioStatus,
+      detectedScenes: inspected.detectedScenes,
+      evidence,
+      analysisContext: {
+        question,
+        userIntent,
+        focus: intent.focus,
+        reactionMode: intent.reactionMode,
+        whatCanBeAnswered: can,
+        whatCannotBeAnswered: cannot,
+        factCheck: {
+          requested: mode === "fact_check_visual",
+          visualClaimsAssessable: framesDelivered > 0,
+          note:
+            mode !== "fact_check_visual"
+              ? "Visual fact-checking was not requested; use analysis_mode=fact_check_visual for denser sampling focused on staging/editing evidence."
+              : framesDelivered > 0
+                ? "Assess a claim only against what these frames show. State explicitly when the frames neither support nor refute it — sampled frames cannot prove a negative, and audio/context claims need a transcript."
+                : "The claim cannot be assessed: no frames were decoded. Say so instead of reasoning from the caption or metadata.",
+        },
+        honestyNote: inspected.honestyNote,
+        responseGuidance: inspected.responseGuidance,
+      },
+      error: inspected.error ?? (resolution.success ? null : resolution.error),
+      message: inspected.message ?? (resolution.success ? null : resolution.message),
+      challenge: resolution.challenge,
+      limitations,
+    };
+  }
+
+  /* ------------------------------------------------------------------------ */
+  /* video_react — grounded evidence package for the connected model           */
+  /* ------------------------------------------------------------------------ */
+
+  /**
+   * Prepare a grounded evidence package so the connected AI can genuinely react.
+   *
+   * DEMO deliberately does **not** author the reaction: `reaction` is always
+   * `null` and `reactionAuthor` is `"connected_model"`. There is no canned text
+   * and no caption-derived guess — the package contains the real decoded frames
+   * (as MCP image blocks), a transcript when one exists, and style-specific
+   * guidance. Without frames the call fails honestly.
+   */
+  async react(url: string, options: VideoReactOptions = {}): Promise<VideoReactResult> {
+    const style = options.style ?? "casual";
+    const stylePlan = REACT_STYLE_PLANS[style] ?? REACT_STYLE_PLANS.casual;
+    const question = options.question?.trim() ? options.question.trim().slice(0, 2_000) : null;
+    const includeAudio = options.includeAudio ?? false;
+
+    this.charge("react", url);
+    const resolution = await resolvePublicVideo(url, this.env, { quality: "auto", probeLimit: LIMITS.videoMaxProbedStreams, verifyBytes: true });
+    const inspected = await this.runInspectVideo(url, resolution, {
+      userIntent: question ?? stylePlan.intent,
+      question,
+      reactionMode: true,
+      frameCount: options.maxFrames ?? stylePlan.frames,
+      includeMetadata: true,
+      includeAudio,
+      analyzeScenes: true,
+      analyzeOnScreenText: true,
+    });
+
+    const detail = resolution.detail;
+    const evidence: VideoEvidenceSummary = {
+      videoBytesRetrieved: inspected.framesDelivered > 0 || detail.verification === "bytes",
+      framesDecoded: inspected.framesDelivered,
+      framesDeliveredInline: inspected.imageBlocksDelivered,
+      transcriptAvailable: inspected.transcript?.status === "transcribed",
+      transcriptKind: inspected.transcript?.status === "transcribed" ? "speech_to_text" : "none",
+      audioAvailable: inspected.audioStatus === "available",
+      metadataOnly: inspected.framesDelivered === 0 && inspected.transcript?.status !== "transcribed",
+      thumbnailUsedAsFrame: false,
+      visualEvidence: inspected.framesDelivered > 0,
+    };
+
+    const observations = [
+      ...(inspected.detectedScenes ?? []).map((scene) => `${scene.start}s${scene.end !== null ? `–${scene.end}s` : ""}: ${scene.significance}`),
+      ...(inspected.extractedText ?? []).map((text) => `on-screen text: "${text}"`),
+      ...inspected.frames.filter((frame) => frame.sceneDescriptionHint).map((frame) => `${frame.timestamp}s: ${frame.sceneDescriptionHint}`),
+    ].slice(0, 40);
+
+    const visionProvider = this.aiBinding() ? (this.env.VIDEO_VISION_MODEL ?? "@cf/llava-hf/llava-1.5-7b-hf") : null;
+    const limitations = [...new Set([...resolution.limitations, ...inspected.limitations])];
+    if (!observations.length && inspected.framesDelivered > 0) {
+      limitations.push("No server-side vision model produced frame labels; the frames themselves are the evidence — read them directly.");
+    }
+
+    return {
+      success: inspected.framesDelivered > 0,
+      style,
+      accessStatus: inspected.framesDelivered > 0 ? "public" : detail.access.status,
+      sourceUrl: url,
+      canonicalUrl: detail.canonicalUrl ?? resolution.resolvedUrl,
+      platform: resolution.platform,
+      durationSeconds: inspected.source.durationSeconds,
+      caption: detail.caption,
+      captionIsNotTranscript: true,
+      frames: inspected.frames,
+      framesDelivered: inspected.framesDelivered,
+      imageBlocksDelivered: inspected.imageBlocksDelivered,
+      visualEvidenceDelivered: inspected.visualEvidenceDelivered,
+      transcript: inspected.transcript,
+      audioStatus: includeAudio ? (inspected.audioStatus ?? "failed") : "not_requested",
+      evidence,
+      visionSummary: observations.length
+        ? { available: true, provider: visionProvider, observations, groundedInFrames: true }
+        : null,
+      reaction: null,
+      reactionAuthor: "connected_model",
+      reactionGuidance:
+        inspected.framesDelivered > 0
+          ? `Examine the ${inspected.framesDelivered} decoded frame image(s) now, then react in a ${style} register. Anchor every claim to a specific timestamp you can actually see, and say what the sampled frames cannot establish (audio, off-screen context, whether something is staged).`
+          : "No frames were decoded, so there is nothing to react to. Tell the user honestly that DEMO could not retrieve the video, name the reason from error/limitations, and do not invent a reaction.",
+      styleGuidance: stylePlan.guidance,
+      honestyNote: inspected.honestyNote,
+      error: inspected.framesDelivered > 0 ? null : (inspected.error ?? resolution.error ?? "FRAMES_UNAVAILABLE"),
+      message: inspected.framesDelivered > 0 ? null : (inspected.message ?? resolution.message ?? "No decoded frames could be extracted from the public video."),
+      challenge: resolution.challenge,
+      limitations,
+    };
+  }
+
   private async loadFrameReferences(references: string[]): Promise<FrameCaptureResult> {
     const bucket = this.env.SCREENSHOTS as {
       get?: (key: string) => Promise<any>;
@@ -1308,9 +2226,15 @@ export class VideoProcessor {
   private async resolveInput(input: VideoInput): Promise<{ success: boolean; sourceUrl: string | null; error: string | null; message: string | null; metadata: VideoMetadata; limitations: string[] }> {
     if (input.videoReference) {
       const parsed = this.artifacts.parse(input.videoReference);
-      if (!parsed || parsed.kind !== "video") return { success: false, sourceUrl: null, error: "VIDEO_NOT_FOUND", message: "video_reference must be an expiring video artifact reference such as video_<sha256>.", metadata: emptyMetadata(), limitations: [] };
+      if (!parsed || parsed.kind !== "video") return { success: false, sourceUrl: null, error: "VIDEO_NOT_FOUND", message: "video_reference must be an expiring video artifact reference such as video_<64 hex characters>.", metadata: emptyMetadata(), limitations: [] };
+      // Distinguish an expired artifact from one that never existed: an expired
+      // signed URL/reference must be reported as expired, never as "not found".
+      const referenceState = await this.artifacts.referenceStatus(input.videoReference);
+      if (referenceState === "expired") {
+        return { success: false, sourceUrl: null, error: "ARTIFACT_EXPIRED", message: "The video artifact reference has expired.", metadata: emptyMetadata(), limitations: ["Temporary artifacts live only for the configured TTL; call video_fetch on the original public URL to mint a fresh one."] };
+      }
       const object = await this.artifacts.objectForRoute(input.videoReference);
-      if (!object) return { success: false, sourceUrl: null, error: "VIDEO_NOT_FOUND", message: "The video artifact was not found or has expired.", metadata: emptyMetadata(), limitations: ["Video artifacts expire automatically; download or inspect the public URL again."] };
+      if (!object) return { success: false, sourceUrl: null, error: referenceState === "missing" ? "VIDEO_NOT_FOUND" : "ARTIFACT_EXPIRED", message: referenceState === "missing" ? "No artifact exists for that reference." : "The video artifact could not be read back (it expired or was cleaned up).", metadata: emptyMetadata(), limitations: ["Video artifacts expire automatically; download or inspect the public URL again."] };
       const referenceUrl = `${this.artifacts.baseUrl}/video-assets/${input.videoReference}`;
       const metadata = object.customMetadata ?? {};
       return { success: true, sourceUrl: referenceUrl, error: null, message: null, metadata: { durationSeconds: finiteOrNull(metadata.durationSeconds), width: finiteOrNull(metadata.width), height: finiteOrNull(metadata.height), contentType: object.httpMetadata?.contentType ?? "video/mp4", contentLength: object.size ?? null, title: null, description: null, thumbnailUrl: null }, limitations: [] };
@@ -1327,6 +2251,7 @@ export class VideoProcessor {
    */
   async extractFramesFromSource(sourceUrl: string, request: FrameRequest, directMedia = true): Promise<FrameCaptureResult> {
     const maxDuration = this.maxDuration();
+    let resizeFailure: string | null = null;
     try {
       const sessions = new SessionManager(this.env as never, this.requestUrl);
       const captured = await sessions.withRawPage(async (raw: any) => {
@@ -1342,6 +2267,22 @@ export class VideoProcessor {
         }
         if (!info.media.videos.length) throw videoError("FRAMES_UNAVAILABLE", "The public page did not expose an HTML5 video element to Browser Run.");
         const duration = info.media.videos[0]?.durationSeconds ?? null;
+        // Optional resize: scale the viewport so Chromium renders the video at
+        // the requested size and the screenshot is smaller. No Worker-side
+        // image codec is involved, which keeps this Cloudflare-compatible.
+        let resizeApplied: { requested: FrameResize; viewport: { width: number; height: number } } | null = null;
+        if (request.resize) {
+          const viewport = resizeViewport({ width: info.media.videos[0]?.intrinsicWidth ?? null, height: info.media.videos[0]?.intrinsicHeight ?? null }, request.resize);
+          if (viewport) {
+            try {
+              await page.setViewport(viewport);
+              await page.waitForTimeout(400);
+              resizeApplied = { requested: request.resize, viewport };
+            } catch (error) {
+              resizeFailure = error instanceof Error ? error.message : String(error);
+            }
+          }
+        }
         const times = (request.timestamps?.length ? request.timestamps : frameTimestamps(duration, request, maxDuration)).slice(0, LIMITS.videoFramesMaxCount);
         const report = await this.media.sampleFrames(page, {
           timestamps: times,
@@ -1351,16 +2292,27 @@ export class VideoProcessor {
           inline: request.inline !== false,
           maxFrames: LIMITS.videoFramesMaxCount,
         });
-        return { info, report };
+        return { info, report, resizeApplied };
       });
-      const frames: VideoFrameOutput[] = captured.report.frames.map((frame) => ({
-        timestamp: frame.timeSeconds,
-        contentType: contentTypeForFrame(frame.mimeType),
-        imageReference: frame.url,
-        bytes: frame.bytes,
-        ...(frame.inlineData ? { inlineData: frame.inlineData } : {}),
-        inspected: frame.ok,
-      }));
+      const frames: VideoFrameOutput[] = captured.report.frames.map((frame) => {
+        const dimensions = frame.inlineData ? imageDimensions(base64ToBytes(frame.inlineData)) : null;
+        return {
+          timestamp: frame.timeSeconds,
+          contentType: contentTypeForFrame(frame.mimeType),
+          imageReference: frame.url,
+          bytes: frame.bytes,
+          width: dimensions?.width ?? null,
+          height: dimensions?.height ?? null,
+          ...(frame.inlineData ? { inlineData: frame.inlineData } : {}),
+          inspected: frame.ok,
+        };
+      });
+      const limitations = [...captured.report.limitations];
+      if (captured.resizeApplied) {
+        limitations.push(`Frames were rendered at a ${captured.resizeApplied.viewport.width}×${captured.resizeApplied.viewport.height} viewport to honour the requested resize; the pixel size of each delivered image is reported per frame.`);
+      } else if (request.resize && resizeFailure) {
+        limitations.push(`The requested resize could not be applied (${redactText(resizeFailure, 160)}); frames were captured at the default viewport size.`);
+      }
       return {
         success: captured.report.available,
         error: captured.report.available ? undefined : "FRAMES_UNAVAILABLE",
@@ -1370,7 +2322,7 @@ export class VideoProcessor {
         width: captured.report.intrinsicSize?.width ?? captured.info.media.videos[0]?.intrinsicWidth ?? null,
         height: captured.report.intrinsicSize?.height ?? captured.info.media.videos[0]?.intrinsicHeight ?? null,
         frames,
-        limitations: captured.report.limitations,
+        limitations,
       };
     } catch (error) {
       const normal = asBrowserError(error);

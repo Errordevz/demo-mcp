@@ -1,14 +1,26 @@
 # DEMO public video pipeline
 
-This document describes the public-video contract added in DEMO 0.5 and the
+This document describes the public-video contract added in DEMO 0.5, the
 high-level automatic video understanding tool (`inspect_video`) added in DEMO
-0.6.1. The pipeline is designed for Cloudflare Workers and Cloudflare Browser
-Rendering, not for a VPS with FFmpeg.
+0.6.1, and the **real retrieval pipeline added in DEMO 0.7.0**: `video_resolve`,
+`video_fetch`, the unified `video_analyze`, `video_react` and runtime capability
+discovery. The pipeline is designed for Cloudflare Workers, R2 and Cloudflare
+Browser Rendering — not for a VPS with FFmpeg, not for Docker, and not for any
+persistent local disk.
+
+**The acceptance rule this whole document exists to enforce:** a video link must
+yield *actual inspectable frames and/or an actual transcript*, or an explicit
+machine-readable "could not" with a reason. Metadata, a thumbnail, a post
+caption, a stream URL or a successful download are never presented as watching.
 
 ## Tools
 
 | Tool | Purpose |
 | --- | --- |
+| `video_resolve` | **(0.7.0)** Resolve a public video URL — including TikTok `vt.`/`vm.` short links — into its real identity and the literal stream URLs the page publishes, *without* downloading anything. Returns `access_status` (`public`, `deleted`, `private`, `login_required`, `region_restricted`, `challenge_required`, `rate_limited`, `not_found`, `expired`, `blocked_url`, `unsupported`, `unavailable`, `unknown`), canonical URL, video id, creator, caption (never a transcript), duration, per-stream byte-signature probes, guidance and next steps. |
+| `video_fetch` | **(0.7.0)** Retrieve the **actual video file**. The body is streamed into expiring R2 storage, the first 128 KiB must prove a real video container, and the duration policy is verified from page metadata or the container header. An HTML wall, a JSON error, a thumbnail, an audio-only file or a manifest is rejected (`NOT_A_VIDEO` / `UNSUPPORTED_MEDIA`) and the partial object is deleted. |
+| `video_analyze` | **(0.7.0, unified)** resolve → retrieve → frames → optional audio/transcript → one structured evidence result with `analysis_mode` (`summary`, `detailed`, `reaction`, `fact_check_visual`, `transcript`, `full`), strictly separated text sources, an evidence summary and `analysis_context` saying what can and cannot be answered. |
+| `video_react` | **(0.7.0)** Grounded evidence package for *the connected model* to react from: real decoded frames as MCP image blocks, a transcript when one exists, style guidance (`casual`, `funny`, `serious`, `detailed`) and optional frame-grounded vision observations. `reaction` is always `null` and `reaction_author` is always `connected_model` — DEMO has no canned reactions. |
 | `inspect_video` | **One high-level tool for automatic video viewing, understanding and reactions (0.6.1)**: intent detection, dynamic frame planning, real decoded frames as MCP image blocks, scene/OCR/audio context, and an explicit honesty contract. This is the tool a connected AI should call when a user sends a video link. |
 | `video_ingest` | **One-call ingestion**: resolve → download to R2 → decode frames → optional audio/transcript/analysis. The primary tool for "give me this public video so I can see it". |
 | `video_inspect_url` | Metadata + frames for a public page/media URL (the acceptance path used by the live TikTok test). |
@@ -16,23 +28,37 @@ Rendering, not for a VPS with FFmpeg.
 | `video_extract_frames` / `video_get_frame` | Decoded frames (or one frame at a timestamp) as MCP image blocks + R2 references. |
 | `video_extract_audio` | Best-effort `captureStream`/`MediaRecorder` audio artifact. |
 | `video_transcribe` | Server-side speech-to-text (Workers AI Whisper or configured HTTPS provider). |
-| `video_analyze` | Frame-grounded scene/OCR/object/action fields (vision model optional). |
+| Capability resources | **(0.7.0)** `demo://capabilities/video` (live per-deployment capability report) and `demo://video/honesty-contract` (the evidence rules). Also exposed as `GET /capabilities/video` and inside `demo_ping` / `/health`. |
 | `video_inspect_pipeline` | **Diagnostic**: runs every stage and reports where it fails (see below). No separate key required; standard `/mcp` auth still applies if configured. |
 
 ## Processing flow
 
 ```text
-public URL
+public URL (page, share/short link or direct media file)
    │
-   ├─ URL guard + DNS-over-HTTPS (every redirect hop)
-   ├─ bounded public GET/HEAD (no cookies or Authorization)
-   ├─ HTML/OpenGraph/JSON-LD/platform-literal media extraction
-   │       └─ TikTok hydration data when the page exposes it
-   ├─ optional Browser Run navigation to a public HTML5 video
-   │       └─ seek + rendered screenshot at bounded timestamps
+   ├─ URL guard + DNS-over-HTTPS (re-checked at EVERY redirect hop)
+   ├─ bounded public GET/HEAD (no cookies, no Authorization, no session)
+   ├─ robust page parsing — six independent candidate sources:
+   │       TikTok __UNIVERSAL_DATA_FOR_REHYDRATION__ (incl. its published
+   │       item statusCode), SIGI_STATE, schema.org JSON-LD, OpenGraph,
+   │       Twitter cards and literal <video>/<source> elements
+   ├─ stream ranking + per-candidate probe (HEAD, then a bounded ranged GET)
+   │       └─ byte-signature verification: is it really a video container?
+   ├─ access classification → access_status (never "unknown" when the page
+   │       itself said deleted / private / region-locked / CAPTCHA)
+   │
+   ├─ video_fetch: STREAM the body into expiring R2 (bounded transform,
+   │       incremental DigestStream SHA-256, no whole-file buffer, no disk)
+   │       ├─ head sample → container signature (mp4/mov/webm/mkv/ogg/ts/flv)
+   │       ├─ duration policy from page metadata → head mvhd → artifact tail
+   │       └─ anything not video ⇒ delete the partial object and fail honestly
+   │
+   ├─ optional Browser Rendering navigation to the public HTML5 video
+   │       └─ seek + rendered screenshot at bounded timestamps (real frames;
+   │          optional viewport resize; a thumbnail is never substituted)
    ├─ optional captureStream + MediaRecorder audio extraction
    ├─ optional server-side Workers AI Whisper / vision model
-   └─ expiring R2 artifacts and native MCP image content
+   └─ expiring R2 artifacts and native MCP image content blocks
 ```
 
 The resolver is deliberately not a downloader disguised as a platform API. It
@@ -240,6 +266,171 @@ requests get HTTP 401 before any tool runs. The report never contains
 credentials, cookies or page bodies — only validated public URLs, counts,
 sizes, durations and redacted error text.
 
+### `video_resolve` (DEMO 0.7.0)
+
+Input: `url` (required), optional `platform`, `quality`, `probe_limit`,
+`verify_bytes` (default `true`), `include_signed_urls` (default `true`).
+
+Resolution is **not** retrieval and **not** watching:
+
+* TikTok short links (`vt.tiktok.com`, `vm.tiktok.com`, `m.tiktok.com/v/<id>`)
+  are followed as ordinary public redirects, and the SSRF guard re-checks every
+  hop. `source_url` (what the user gave) and `canonical_url`
+  (`https://www.tiktok.com/@user/video/<id>`) are both reported.
+* Parsing is deliberately redundant: the TikTok hydration payload
+  (`__UNIVERSAL_DATA_FOR_REHYDRATION__`, including its published
+  `webapp.video-detail.statusCode`), the legacy `SIGI_STATE`, schema.org
+  JSON-LD, OpenGraph, Twitter cards and literal `<video>`/`<source>` elements.
+  No single fragile selector decides the outcome.
+* `streams[]` lists every literal URL the page published, each with its own
+  probe verdict: `reachable`, `content_type`, `bytes`, `verified_video`,
+  `verified_container`, `signed`, `expires_at`, `reason`. A candidate is only
+  `verified_video: true` after real bytes proved a video container.
+* `may_describe_content` is always `false` here. Resolution is metadata;
+  `content_is_publicly_reachable` tells you whether retrieval is worth trying.
+* Signed/expiring query strings are stripped when `include_signed_urls=false`
+  (at the processor layer, not only at serialization), and the response says
+  those URLs are then not directly fetchable. Signed URLs are never logged and
+  never persisted beyond the request.
+* CAPTCHAs, login walls, DRM, private accounts and region locks are **reported,
+  never bypassed**. `challenge.detected` plus `access_status`
+  `challenge_required` / `login_required` / `private` / `region_restricted` is
+  the honest outcome.
+
+#### `access_status` taxonomy
+
+| `access_status` | Meaning | What the model may say |
+| --- | --- | --- |
+| `public` | A normal public request reached playable media. | Still nothing about *content* until frames/transcript exist. |
+| `deleted` | The item (or its account) was removed. | "This video was deleted." |
+| `private` | Private / followers-only / hidden by the creator. | "It is private; I cannot access it." |
+| `login_required` | An authenticated session is needed; DEMO never uses one. | "It needs a login DEMO will not perform." |
+| `region_restricted` | Not available to this requester's region. | "Region-restricted." |
+| `challenge_required` | A CAPTCHA/bot check or access denial blocked retrieval. | "Blocked by a bot check; not bypassed." |
+| `rate_limited` | The platform throttled the request. | "Rate limited; retry later." |
+| `not_found` | No such item exists at that URL. | "Not found." |
+| `expired` | A signed media URL or temporary artifact passed its expiry. | "The link expired; re-resolve the original." |
+| `blocked_url` | Rejected by the SSRF guard before any request. | "That target is not permitted." |
+| `unsupported` | Reachable, but not a decodable bounded video (manifest, audio-only, still image). | "Not a format DEMO can download; frames may still work." |
+| `unavailable` | Page reachable, no playable public media exposed. | "Could not retrieve it." |
+| `unknown` | Not enough signal. | Never presented as success. |
+
+Every status ships with `guidance` (what may be said) and `next_steps`
+(concrete tool calls or an honest "tell the user X").
+
+### `video_fetch` (DEMO 0.7.0)
+
+Input: `url` **or** `video_reference`, optional `max_duration`, `max_size_mb`,
+`quality`.
+
+* **Streaming, not buffering.** The response body is piped through a bounded
+  transform straight into R2 (`storeStream`). A Worker never holds the whole
+  file in memory and never touches a local filesystem. A `DigestStream` computes
+  SHA-256 incrementally; the first `VIDEO_HEAD_PROBE_BYTES` (128 KiB) are kept
+  for signature inspection.
+* **Byte-signature verification is mandatory.** `detectMediaSignature` must find
+  a real video container (ISO-BMFF `ftyp`/`moov`/`mdat` with a video brand,
+  Matroska/WebM, Ogg, MPEG-TS, FLV, AVI). A `video/mp4` header over PNG, JPEG,
+  HTML or JSON bytes is *not* trusted: the header lies, the bytes decide.
+* **Honest failure deletes the artifact.** `NOT_A_VIDEO` (with `detected_as` and
+  `why_not_a_video`), `UNSUPPORTED_MEDIA`, `DOWNLOAD_TOO_LARGE`,
+  `ARTIFACT_EXPIRED` and `PROCESSING_TIMEOUT` all remove the partial object, so
+  nothing half-downloaded can later be served or mistaken for a video.
+* **Duration policy.** Verified from page metadata, else the head `mvhd`/EBML
+  sample, else a bounded tail range read of the stored object. A container whose
+  duration cannot be read is refused rather than persisted.
+* **Two size gates**: the declared size at resolution, and the response's own
+  `Content-Length` immediately before streaming (a signed URL can redirect to a
+  different rendition).
+* **References are stateful and honest.** `video_reference` reports `ok`,
+  `expired` (`ARTIFACT_EXPIRED`, TTL elapsed, object cleaned up), `missing`
+  (`VIDEO_NOT_FOUND`) or `invalid` (`invalid_input`) — an expired artifact is
+  never reported as "not found".
+* The artifact is served at `/video-assets/<reference>` with `Accept-Ranges:
+  bytes` (real 206 partial responses), `X-Content-Type-Options: nosniff`,
+  `Cache-Control: private`, and **410 Gone + `ARTIFACT_EXPIRED`** once the TTL
+  elapses.
+
+### `video_analyze` (DEMO 0.7.0, unified)
+
+Input: `url` (required, or `frame_references` to re-analyse stored frames),
+optional `question`, `analysis_mode`, `max_frames`, `include_audio`,
+`include_transcript`.
+
+| `analysis_mode` | Frames | Audio | Transcript | Notes |
+| --- | --- | --- | --- | --- |
+| `summary` (default) | ~8 | no | no | Fast visual overview. |
+| `detailed` | ~12 | yes | yes | Scenes + OCR labels when a vision model is bound. |
+| `reaction` | plan-based | no | no | Intent-biased sampling for a natural reaction. |
+| `fact_check_visual` | up to 16 (dense) | no | no | Focused on staging/editing evidence; states that sampled frames cannot prove a negative. |
+| `transcript` | ~2 | yes | forced | Speech-first; never invents dialogue. |
+| `full` | up to 16 | yes | yes | Everything, plus vision analysis. |
+
+The result separates text sources absolutely:
+
+* `text_sources.transcript` — real speech-to-text only (`kind:
+  "speech_to_text"`, `is_transcript: true`), from a configured provider.
+* `text_sources.platform_caption` — the creator's post caption
+  (`is_not_transcript: true`).
+* `text_sources.generated_caption` — **always unavailable**: DEMO generates no
+  caption text.
+* `text_sources.on_screen_text` — present only when a vision model actually read
+  decoded frames (`source: "vision_model"`).
+
+`evidence` reports `video_bytes_retrieved`, `frames_decoded`,
+`frames_delivered_inline`, `transcript_available`, `audio_available`,
+`metadata_only`, `thumbnail_used_as_frame` (always `false`) and
+`visual_evidence`. `analysis_context.what_can_be_answered` /
+`what_cannot_be_answered` are computed from what actually exists, and
+`may_describe_content` is true only when frames or a transcript were delivered.
+
+### `video_react` (DEMO 0.7.0)
+
+Input: `url` (required), optional `style` (`casual` | `funny` | `serious` |
+`detailed`), `question`, `max_frames`, `include_audio`.
+
+DEMO prepares the evidence; **the connected model writes the reaction**. There
+is no hardcoded reaction text anywhere in this repository:
+
+* `reaction: null`, `reaction_author: "connected_model"`.
+* `frames[]` are real decoded frames returned as MCP image content blocks
+  (`mcp_image_block_N`), covering the beginning, middle and end.
+* `style_guidance` and `reaction_guidance` tell the model how to anchor claims
+  to timestamps it can actually see.
+* `vision_summary` appears only when a server-side vision model labelled the
+  frames (`grounded_in_frames: true`); it is never derived from the caption.
+* With zero decoded frames the call fails (`success: false`, `frames: []`) and
+  `reaction_guidance` explicitly instructs the model to say it could not
+  retrieve the video instead of inventing a reaction.
+
+### Capability discovery (DEMO 0.7.0)
+
+`demo://capabilities/video` (MCP resource), `GET /capabilities/video`,
+`demo_ping` and `/health` all read one report:
+
+```json
+{
+  "schema": "demo.video-capabilities/1",
+  "supportedPlatforms": [{ "platform": "tiktok", "shortLinks": true, "directStreamDiscovery": true, "frameDecoding": true, "notes": "…" }],
+  "actualVideoBytes": { "available": true, "mechanism": "…", "requires": ["R2"], "limitations": ["…"] },
+  "frames": { "available": true, "mechanism": "cloudflare-browser-rendering", "requires": ["BROWSER"], "maxFrames": 16 },
+  "audio": { "available": true },
+  "transcription": { "available": false, "provider": null, "requires": ["AI or TRANSCRIPTION_ENDPOINT"] },
+  "visionAnalysis": { "available": false, "provider": null },
+  "storage": { "available": true, "kind": "cloudflare-r2", "ttlSeconds": 3600, "route": "/video-assets/:reference" },
+  "browser": { "available": true, "provider": "cloudflare" },
+  "providers": [{ "id": "workers-ai:whisper", "configured": false, "enables": "…", "configureWith": "AI binding" }],
+  "limits": { "maxDownloadMb": 50, "maxDurationSeconds": 600, "maxFrames": 16 },
+  "security": { "ssrfGuard": "…", "dnsVerification": true, "neverBypassed": ["captcha", "login", "drm", "private accounts"], "signedUrlPolicy": "…" },
+  "worksWithoutProviders": ["video_resolve: …", "video_fetch: …"],
+  "requiresExternalProvider": ["video_transcribe … requires Workers AI or TRANSCRIPTION_ENDPOINT"]
+}
+```
+
+Only provider **names and presence** are published. No key, token, account id or
+binding value ever appears in the report, in `/health`, in tool results or in
+logs.
+
 ### `video_inspect_url`
 
 Input: `url`, optional `max_duration`, `frame_interval`, `include_transcript`.
@@ -310,6 +501,9 @@ did not inspect.
 | `PROCESSING_TIMEOUT` | Public request or bounded processing time expired. |
 | `FRAMES_UNAVAILABLE` | No browser-decodable frame could be exposed. |
 | `TRANSCRIPTION_UNAVAILABLE` | No audio/provider or the configured provider failed. |
+| `NOT_A_VIDEO` | **(0.7.0)** The response body was not a video container (HTML page, JSON error, JPEG/PNG thumbnail, audio-only file). Includes `detected_as` and `why_not_a_video`; the partial artifact is deleted. |
+| `ARTIFACT_EXPIRED` | **(0.7.0)** A temporary R2 artifact or a signed platform media URL passed its expiry. Re-resolve/re-fetch the original public link. |
+| `PROVIDER_UNAVAILABLE` | **(0.7.0)** A step needs an optional provider (Workers AI, `TRANSCRIPTION_ENDPOINT`) that is not configured. DEMO reports it instead of inventing output. |
 
 These codes are returned in the MCP text payload and, for hard failures, in the
 MCP `isError` result. `no_speech_detected` is a normal transcript status.
@@ -330,8 +524,53 @@ keep model configuration server-side. No AI binding or provider key is returned 
 `/health`, `/tools`, MCP results, logs or the browser-facing UI.
 
 The implementation uses no local filesystem, Docker daemon, permanently running
-process, or FFmpeg binary. Browser Run and R2 are the only heavy Cloudflare
+process, or FFmpeg binary. Browser Rendering and R2 are the only heavy Cloudflare
 services required for actual decoded frames/artifacts.
+
+### Bindings and variables
+
+| Binding / variable | Required | Purpose |
+| --- | --- | --- |
+| `BROWSER` (Browser Rendering) | **Yes** for frames | Real decoded frames, audio capture. Without it, resolution and byte retrieval still work and every frame result says why it could not decode. |
+| `SCREENSHOTS` (R2) | **Yes** for artifacts | Default bucket for frames, audio and `video-artifacts/`. |
+| `VIDEO_ARTIFACTS` (R2) | Optional | Separate bucket for video/audio artifacts. |
+| `BROWSER_SESSIONS` (Durable Object) | Optional | Persistent browser sessions across calls. |
+| `AI` (Workers AI) | Optional | Speech-to-text (`VIDEO_TRANSCRIPTION_MODEL`, default `@cf/openai/whisper`) and frame-grounded vision labels (`VIDEO_VISION_MODEL`, default `@cf/llava-hf/llava-1.5-7b-hf`). |
+| `TRANSCRIPTION_ENDPOINT` + `TRANSCRIPTION_API_KEY` | Optional (secrets) | Alternative HTTPS speech-to-text provider. Read only inside the Worker; never returned by any tool, route or log. |
+| `VIDEO_MAX_DOWNLOAD_MB` | Optional (`50`) | Hard download cap. Tool arguments may only lower it. |
+| `VIDEO_MAX_DURATION_SECONDS` | Optional (`600`) | Hard duration cap, enforced before *and* after streaming. |
+| `VIDEO_ARTIFACT_TTL_SECONDS` | Optional (`3600`) | Artifact lifetime; the route refuses expired references. |
+| `VIDEO_RATE_LIMIT_PER_MINUTE` | Optional (`12`) | Per-session pipeline rate limit. |
+| `SSRF_DNS_CHECK` / `SSRF_DNS_FAIL_OPEN` | Optional (`true`/`true`) | DNS-over-HTTPS verification of every host and redirect hop. |
+| `DEMO_API_KEY` | Optional (secret) | `Authorization: Bearer` protection for `/mcp`. |
+
+There is **no** external ffmpeg/decoder provider and no hidden hard requirement:
+frame decoding always happens in Cloudflare Browser Rendering, and every optional
+provider degrades to an explicit, structured "unavailable".
+
+### Deploy
+
+```bash
+npm install
+npx wrangler r2 bucket create demo-mcp-screenshots   # once
+# optional: npx wrangler r2 bucket create demo-mcp-video-artifacts
+npx wrangler deploy                                  # main: platform-entry.ts
+# optional providers (secrets, never in wrangler.jsonc):
+npx wrangler secret put TRANSCRIPTION_ENDPOINT
+npx wrangler secret put TRANSCRIPTION_API_KEY
+npx wrangler secret put DEMO_API_KEY
+```
+
+Verify after deploying:
+
+```bash
+curl -s https://<your-worker>.workers.dev/health | jq '.publicVideo, .videoBytesRetrieval, .videoFrames, .videoTranscription'
+curl -s https://<your-worker>.workers.dev/capabilities/video | jq '.frames, .transcription, .worksWithoutProviders'
+```
+
+To enable Workers AI, uncomment `"ai": { "binding": "AI" }` in `wrangler.jsonc`
+and redeploy; `demo://capabilities/video` then reports
+`transcription.available: true` and `visionAnalysis.available: true`.
 
 ## Live acceptance tests
 

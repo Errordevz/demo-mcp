@@ -10,10 +10,12 @@ import { LIMITS } from "./src/core/limits.js";
 import { ScreenshotManager } from "./src/browser/screenshot.js";
 import { resolveScreenshotBase } from "./src/session/factory.js";
 import { registerVideoTools } from "./src/mcp/video-tools.js";
+import { VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI, registerVideoResources, videoStatusFlags } from "./src/mcp/video-resources.js";
+import { describeVideoCapabilities } from "./src/video/capabilities.js";
 import type { VideoEnv } from "./src/video/types.js";
 
 type Env = SessionManagerEnv & VideoEnv & { DEMO_API_KEY?: string; SSRF_GUARD_HTTP_FETCH?: string };
-const VERSION = "0.6.1";
+const VERSION = "0.7.0";
 const SKILLS_API = "https://skills.sh/api/v1";
 
 /**
@@ -23,6 +25,10 @@ const SKILLS_API = "https://skills.sh/api/v1";
  */
 const SERVER_INSTRUCTIONS = `DEMO is an execution layer with a real persistent browser (Cloudflare Browser Rendering), skills.sh integration and a public video understanding pipeline.
 
+VIDEO CAPABILITY DISCOVERY — Read the MCP resource demo://capabilities/video (or call demo_ping) to see, for THIS deployment: which platforms are supported, whether actual video bytes can be retrieved, whether frames can be decoded, whether audio/transcription is available, and which optional providers are configured. demo://video/honesty-contract states the evidence rules. Never promise a user that DEMO can watch a video before checking.
+
+CHOOSING A VIDEO TOOL — inspect_video is the default one-call tool for "the user sent a link". Use video_resolve first when you need to know whether a video is actually retrievable (it reports access_status: public, deleted, private, login_required, region_restricted, challenge_required, rate_limited, not_found, expired, blocked_url, unsupported, unavailable) without downloading anything. Use video_fetch to obtain the verified actual video bytes as an expiring R2 artifact. Use video_analyze with analysis_mode (summary | detailed | reaction | fact_check_visual | transcript | full) for a structured evidence result, and video_react with style (casual | funny | serious | detailed) when the user wants your genuine reaction.
+
 AUTOMATIC VIDEO VIEWING — When a user provides a public video URL (a direct .mp4/.webm file, a public video page, or a TikTok/Instagram/X/Reddit/YouTube link including vt./vm. short links), automatically call the inspect_video tool — without the user having to ask for frame extraction — whenever they:
   - ask about the video's contents ("What happens?", "Is this real?", "Is this funny?", "Explain this video.", "What does the text say?", "What game is this?", "Who is in this?"),
   - ask for a reaction ("React to this.", "What do you think of this?", "Look at this", "Watch this.", "Rate the vibe."), or
@@ -31,9 +37,24 @@ Pass the user's original message as userIntent and their explicit question as qu
 
 USING THE RESULT — inspect_video returns the actual decoded video frames as MCP image content blocks plus structured context (source, scenes, on-screen text, audio status). Examine those frames, then answer the user's intent naturally: for reaction requests give a genuine, context-aware reaction that matches the user's tone instead of a robotic metadata summary; for questions answer from what is visible and identify the tone (funny, scary, wholesome, impressive, confusing, absurd, suspicious…) when it is reasonably clear.
 
-HONESTY — Never claim to have seen or watched the video unless inspect_video actually returned image content blocks (visualEvidenceDelivered=true) and you examined them. The frames are samples: do not claim to have watched continuous playback, never invent audio, dialogue, or events the frames do not show, and state uncertainty explicitly. If audioStatus is not "available", say the audio could not be verified. If inspection failed or only metadata/a thumbnail is available, say visual inspection was not completed and report the error instead of describing content.
+HONESTY — Never claim to have seen or watched the video unless a tool actually returned image content blocks (visualEvidenceDelivered=true) or a real transcript, and you examined them. The frames are samples: do not claim to have watched continuous playback, never invent audio, dialogue, or events the frames do not show, and state uncertainty explicitly. If audioStatus is not "available", say the audio could not be verified. A successful video_fetch proves retrieval only, not understanding. A post caption is NOT a transcript and a thumbnail is NOT a frame. When access_status is anything other than "public", say why the video could not be retrieved (deleted, private, region-restricted, login wall, CAPTCHA, expired link, rate limit) instead of describing content. If inspection failed or only metadata/a thumbnail is available, say visual inspection was not completed and report the error instead of describing content.
 
 For everything else (browsing, screenshots, sessions, utilities, skills) the individual tool descriptions define the behaviour.`;
+
+/**
+ * Live browser/storage capability reader shared by the MCP resources, the
+ * status endpoints and `demo_ping`, so every surface reports the same facts.
+ */
+function browserCapabilitiesFor(env: unknown, requestUrl: string | null) {
+  const capabilities = new SessionManager(env as SessionManagerEnv, requestUrl).capabilities();
+  return {
+    browserAvailable: capabilities.browserAvailable,
+    provider: capabilities.provider,
+    videoFrames: capabilities.videoFrames,
+    reason: capabilities.reason ?? null,
+    screenshots: capabilities.screenshots,
+  };
+}
 
 function authorized(request: Request, env: Env) {
   if (!env.DEMO_API_KEY) return true;
@@ -168,9 +189,14 @@ async function applyBrowserAction(page: any, action: any) {
 }
 
 function server(env: Env, requestUrl: string | null = null, authorization: string | null = null) {
-  const mcp = new McpServer({ name: "DEMO", version: VERSION }, { capabilities: { tools: {} }, instructions: SERVER_INSTRUCTIONS });
+  const mcp = new McpServer({ name: "DEMO", version: VERSION }, { capabilities: { tools: {}, resources: {} }, instructions: SERVER_INSTRUCTIONS });
   const sessions = new SessionManager(env, requestUrl);
   const capabilities = sessions.capabilities();
+  const videoFlags = videoStatusFlags({ env: env as Env & Record<string, unknown>, requestUrl }, browserCapabilitiesFor);
+
+  /* -------------------------------------------------- video capability resources */
+
+  registerVideoResources(mcp, { env: env as Env & Record<string, unknown>, requestUrl }, browserCapabilitiesFor);
 
   mcp.registerTool(
     "demo_ping",
@@ -189,14 +215,13 @@ function server(env: Env, requestUrl: string | null = null, authorization: strin
         browserSessions: capabilities.sessionStorage === "durable-object",
         liveView: capabilities.liveView,
         humanHandoff: capabilities.handoff,
-        videoFrames: capabilities.videoFrames,
-        publicVideo: true,
-        automaticVideoInspection: true,
-        videoArtifacts: Boolean(env.VIDEO_ARTIFACTS ?? env.SCREENSHOTS),
-        videoTranscription: Boolean(env.AI || env.TRANSCRIPTION_ENDPOINT),
         accessibilitySnapshot: capabilities.accessibilitySnapshot,
         provider: capabilities.provider,
         toolCount: DEMO_TOOL_NAMES.length,
+        // Flattened for existing clients, plus the nested report for new ones.
+        ...videoFlags,
+        video: videoFlags,
+        videoResources: [VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI],
         ...(capabilities.reason ? { browserReason: capabilities.reason } : {}),
       }),
   );
@@ -591,6 +616,9 @@ export const DEMO_TOOL_NAMES = [
   "browser_capabilities",
   // Public video understanding
   "inspect_video",
+  "video_resolve",
+  "video_fetch",
+  "video_react",
   "video_inspect_url",
   "video_ingest",
   "video_download_public",
@@ -617,6 +645,7 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const capabilities = new SessionManager(env, request.url).capabilities();
+    const video = videoStatusFlags({ env: env as Env & Record<string, unknown>, requestUrl: request.url }, browserCapabilitiesFor);
     const status = {
       name: "DEMO",
       version: VERSION,
@@ -628,16 +657,18 @@ export default {
       screenshots: capabilities.screenshots,
       screenshotLinks: capabilities.screenshots,
       liveView: capabilities.liveView,
-      publicVideo: true,
-      automaticVideoInspection: true,
-      videoArtifacts: Boolean(env.VIDEO_ARTIFACTS ?? env.SCREENSHOTS),
+      ...video,
       skillsSh: true,
       composio: false,
       toolCount: TOOL_COUNT,
+      resources: [VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI],
     };
     if (url.pathname === "/") return Response.json({ ...status, capabilities });
     if (url.pathname === "/health") return Response.json({ ok: true, ...status });
-    if (url.pathname === "/tools") return Response.json({ count: TOOL_COUNT, tools: DEMO_TOOL_NAMES });
+    if (url.pathname === "/tools") return Response.json({ count: TOOL_COUNT, tools: DEMO_TOOL_NAMES, resources: [VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI] });
+    if (url.pathname === "/capabilities/video") {
+      return Response.json(describeVideoCapabilities(env as Env & Record<string, unknown>, browserCapabilitiesFor(env, request.url)));
+    }
     if (url.pathname !== "/mcp") return new Response("Not Found", { status: 404 });
     if (!authorized(request, env)) return Response.json({ error: "Unauthorized" }, { status: 401 });
     return createMcpHandler((mcpContext) => server(env, mcpContext.requestInfo?.url ?? request.url ?? null))(request, env, ctx);

@@ -32,7 +32,13 @@ export type BrowserErrorCode =
   | "DOWNLOAD_TOO_LARGE"
   | "PROCESSING_TIMEOUT"
   | "FRAMES_UNAVAILABLE"
-  | "TRANSCRIPTION_UNAVAILABLE";
+  | "TRANSCRIPTION_UNAVAILABLE"
+  /** The response was not video bytes at all (HTML page, JSON, thumbnail…). */
+  | "NOT_A_VIDEO"
+  /** A temporary R2 artifact or signed media URL passed its expiry. */
+  | "ARTIFACT_EXPIRED"
+  /** A required external provider (decoding/transcription/vision) is absent. */
+  | "PROVIDER_UNAVAILABLE";
 
 export interface BrowserErrorDetails {
   code: BrowserErrorCode;
@@ -153,6 +159,14 @@ function hintFor(code: BrowserErrorCode, message: string): string | undefined {
       return "The operation exceeded its time budget. Increase the timeout, or wait for a specific selector with browser_wait before inspecting the page.";
     case "navigation_failed":
       return "The page could not be loaded. Some sites block Cloudflare Browser Run traffic, which is always identified as bot traffic.";
+    case "VIDEO_NOT_FOUND":
+      return "No playable public video was found at that URL. It may be deleted, private, region-restricted, behind a login/CAPTCHA, or simply a page without a video. video_resolve reports the exact access_status and next steps.";
+    case "NOT_A_VIDEO":
+      return "The URL did not return video bytes. Re-resolve the page with video_resolve to find a real stream URL, or check whether the link points at a thumbnail, an HTML player page or a JSON API response.";
+    case "ARTIFACT_EXPIRED":
+      return "Temporary video artifacts and signed platform media URLs expire. Call video_resolve/video_fetch again on the original public link to mint a fresh artifact.";
+    case "PROVIDER_UNAVAILABLE":
+      return "This step needs an optional external provider (Workers AI, a transcription endpoint, or a video-decoding backend). Configure the binding/secret, or use the capability report to see what works without it.";
     default:
       return undefined;
   }

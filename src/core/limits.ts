@@ -82,6 +82,24 @@ export const LIMITS = {
   videoArtifactTtlSeconds: 60 * 60,
   videoMaxVisionFrames: 4,
 
+  /** Stream discovery, verification and retrieval (`video_resolve`/`video_fetch`). */
+  /** Literal media URLs collected from one page before ranking. */
+  videoMaxStreamCandidates: 16,
+  /** How many ranked candidates are actually probed with public requests. */
+  videoMaxProbedStreams: 4,
+  /** Leading sample read to prove the response really is a video container. */
+  videoHeadProbeBytes: 128 * 1024,
+  /** Trailing sample read to verify a duration when `moov` sits at the end. */
+  videoTailProbeBytes: 512 * 1024,
+  /** Maximum bytes accumulated in-memory to compute a SHA-256 when the runtime
+   * has no incremental digest stream (Workers have `crypto.DigestStream`). */
+  videoDigestBufferBytes: 8 * 1024 * 1024,
+  /** Frame resize bounds (rendered by Chromium, never by a Worker-side codec). */
+  videoFrameResizeMinPx: 64,
+  videoFrameResizeMaxPx: 1_920,
+  /** Caption/text fields returned to the model. */
+  videoMaxCaptionChars: 2_000,
+
   /** Workflows (legacy `browser_run` / `browser_watch`). */
   maxWorkflowActions: 40,
 } as const;

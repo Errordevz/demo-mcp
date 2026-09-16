@@ -6,7 +6,24 @@
  * always an expiring R2 reference, never an opaque Worker filesystem path.
  */
 
+import type { AccessStatusInfo, VideoAccessStatus } from "./access.js";
+import type { MediaSignature } from "./probe.js";
+import type { QualityPreference, StreamCandidate } from "./streams.js";
+import type { TikTokAccessFlags, TikTokMusic, TikTokStats } from "../browser/tiktok.js";
+
 export type VideoPlatform = "tiktok" | "instagram" | "youtube" | "x" | "reddit" | "generic";
+
+/** Where the reported metadata actually came from. */
+export type VideoMetadataSource = "direct_url" | "http_headers" | "universal" | "sigi" | "json_ld" | "meta" | "none";
+
+/** How strongly the chosen media URL was verified. */
+export type VideoVerification =
+  /** Real bytes were read and proved a video container signature. */
+  | "bytes"
+  /** Only the declared content type / literal extension supported it. */
+  | "content_type"
+  /** Nothing verified it. */
+  | "none";
 
 export type VideoProcessingStatus =
   | "resolved"
@@ -29,6 +46,48 @@ export interface VideoMetadata {
   thumbnailUrl: string | null;
 }
 
+/** Creator/account information published by the page. */
+export interface VideoCreator {
+  id: string | null;
+  uniqueId: string | null;
+  nickname: string | null;
+  verified: boolean | null;
+}
+
+/**
+ * Everything `video_resolve` reports beyond the bare URL/metadata contract:
+ * the honest access verdict, canonical identity, the caption (which is *not* a
+ * transcript), every literal stream URL the page published, and how strongly
+ * each one was verified.
+ */
+export interface VideoResolutionDetail {
+  access: AccessStatusInfo;
+  accessStatus: VideoAccessStatus;
+  canonicalUrl: string | null;
+  videoId: string | null;
+  creator: VideoCreator | null;
+  /** The post caption. Never a transcript and never generated text. */
+  caption: string | null;
+  captionSource: "tiktok_post" | "og_description" | "page_title" | "json_ld" | null;
+  hashtags: string[];
+  createdAt: string | null;
+  stats: TikTokStats | null;
+  music: TikTokMusic | null;
+  accessFlags: TikTokAccessFlags;
+  isImagePost: boolean;
+  /** Ranked stream candidates with probe results. */
+  streams: StreamCandidate[];
+  streamCount: number;
+  metadataSource: VideoMetadataSource;
+  platformStatusCode: number | null;
+  platformStatusMessage: string | null;
+  httpStatus: number | null;
+  /** How strongly `mediaUrl` was verified. */
+  verification: VideoVerification;
+  /** Byte-signature of the probed sample, when one was readable. */
+  signature: MediaSignature | null;
+}
+
 export interface VideoResolution {
   success: boolean;
   sourceUrl: string;
@@ -46,6 +105,8 @@ export interface VideoResolution {
   candidateCount: number;
   /** Bounded page metadata used internally and never returned wholesale. */
   pageText?: string;
+  /** Rich resolution detail (access verdict, streams, creator, caption). */
+  detail: VideoResolutionDetail;
 }
 
 export interface VideoArtifact {
@@ -66,6 +127,9 @@ export interface VideoFrameOutput {
   contentType: "image/jpeg" | "image/png" | "image/webp";
   imageReference: string | null;
   bytes: number;
+  /** Pixel size of the actual delivered image, read from its header. */
+  width?: number | null;
+  height?: number | null;
   /** Base64 without a data: prefix, suitable for an MCP image content block. */
   inlineData?: string;
   inspected: boolean;
@@ -285,4 +349,231 @@ export interface InspectVideoResult {
   honestyNote: string;
   /** How to answer the user naturally, given the detected intent. */
   responseGuidance: string;
+}
+
+/* -------------------------------------------------------------------------- */
+/* `video_resolve` — URL resolution with an honest access verdict              */
+/* -------------------------------------------------------------------------- */
+
+export interface VideoResolveOptions {
+  /** Preferred stream quality when several literal URLs are published. */
+  quality?: QualityPreference;
+  /** How many ranked candidates to probe with real public requests. */
+  probeLimit?: number;
+  /** Verify the chosen stream by reading real bytes (default true). */
+  verifyBytes?: boolean;
+  /** Omit signed query strings from returned stream URLs (default false). */
+  includeSignedUrls?: boolean;
+  /** Platform hint; auto-detected when omitted. */
+  platform?: VideoPlatform | "auto";
+}
+
+export interface VideoResolveResult {
+  success: boolean;
+  accessStatus: VideoAccessStatus;
+  access: AccessStatusInfo;
+  platform: VideoPlatform;
+  sourceUrl: string;
+  resolvedUrl: string | null;
+  canonicalUrl: string | null;
+  videoId: string | null;
+  creator: VideoCreator | null;
+  caption: string | null;
+  captionSource: VideoResolutionDetail["captionSource"];
+  hashtags: string[];
+  createdAt: string | null;
+  durationSeconds: number | null;
+  width: number | null;
+  height: number | null;
+  contentType: string | null;
+  contentLengthBytes: number | null;
+  thumbnailUrl: string | null;
+  metadataSource: VideoMetadataSource;
+  verification: VideoVerification;
+  streams: StreamCandidate[];
+  streamCount: number;
+  bestStreamUrl: string | null;
+  stats: TikTokStats | null;
+  music: TikTokMusic | null;
+  accessFlags: TikTokAccessFlags;
+  isImagePost: boolean;
+  platformStatusCode: number | null;
+  platformStatusMessage: string | null;
+  httpStatus: number | null;
+  redirectCount: number;
+  challenge: { detected: boolean; kind: string | null; reason: string | null };
+  signature: MediaSignature | null;
+  error: string | null;
+  message: string | null;
+  limitations: string[];
+  /** What the connected AI may say about this URL. */
+  guidance: string;
+  nextSteps: string[];
+}
+
+/* -------------------------------------------------------------------------- */
+/* `video_fetch` — verified, streamed retrieval of the actual video bytes       */
+/* -------------------------------------------------------------------------- */
+
+export interface VideoFetchOptions {
+  maxDurationSeconds?: number;
+  maxSizeMb?: number;
+  quality?: QualityPreference;
+  /** Reuse an already completed resolution instead of resolving again. */
+  resolution?: VideoResolution;
+}
+
+export interface VideoFetchResult {
+  success: boolean;
+  accessStatus: VideoAccessStatus;
+  sourceUrl: string;
+  resolvedUrl: string | null;
+  canonicalUrl: string | null;
+  mediaUrl: string | null;
+  platform: VideoPlatform;
+  artifact: VideoArtifact | null;
+  /** Real SHA-256 of the stored bytes, or null when the runtime could not digest. */
+  sha256: string | null;
+  contentAddressed: boolean;
+  /** How the bytes reached R2: streamed (bounded memory) or buffered. */
+  delivery: "streamed" | "buffered";
+  contentType: string | null;
+  detectedContainer: string | null;
+  signature: MediaSignature | null;
+  verification: VideoVerification;
+  bytes: number | null;
+  durationSeconds: number | null;
+  durationSource: "page_metadata" | "head_sample" | "tail_sample" | "artifact_tail" | null;
+  durationVerified: boolean;
+  width: number | null;
+  height: number | null;
+  quality: QualityPreference;
+  error: string | null;
+  message: string | null;
+  challenge: { detected: boolean; kind: string | null; reason: string | null };
+  limitations: string[];
+}
+
+/* -------------------------------------------------------------------------- */
+/* `video_analyze` (unified) and `video_react`                                 */
+/* -------------------------------------------------------------------------- */
+
+export type VideoAnalysisMode = "summary" | "detailed" | "reaction" | "fact_check_visual" | "transcript" | "full";
+
+export const VIDEO_ANALYSIS_MODES: VideoAnalysisMode[] = ["summary", "detailed", "reaction", "fact_check_visual", "transcript", "full"];
+
+export interface VideoAnalyzeOptions {
+  question?: string | null;
+  analysisMode?: VideoAnalysisMode;
+  maxFrames?: number | null;
+  includeAudio?: boolean | null;
+  includeTranscript?: boolean | null;
+  userIntent?: string | null;
+}
+
+/** What evidence actually exists — the core of the honesty contract. */
+export interface VideoEvidenceSummary {
+  videoBytesRetrieved: boolean;
+  framesDecoded: number;
+  framesDeliveredInline: number;
+  transcriptAvailable: boolean;
+  transcriptKind: "speech_to_text" | "none";
+  audioAvailable: boolean;
+  metadataOnly: boolean;
+  thumbnailUsedAsFrame: boolean;
+  visualEvidence: boolean;
+}
+
+export interface VideoAnalyzeResult {
+  success: boolean;
+  analysisMode: VideoAnalysisMode;
+  accessStatus: VideoAccessStatus;
+  access: AccessStatusInfo;
+  sourceUrl: string;
+  resolvedUrl: string | null;
+  canonicalUrl: string | null;
+  videoId: string | null;
+  platform: VideoPlatform;
+  durationSeconds: number | null;
+  width: number | null;
+  height: number | null;
+  metadata: VideoMetadata & { creator: VideoCreator | null; caption: string | null; captionSource: VideoResolutionDetail["captionSource"]; hashtags: string[]; createdAt: string | null; stats: TikTokStats | null; music: TikTokMusic | null };
+  frames: InspectVideoFrame[];
+  framesDelivered: number;
+  imageBlocksDelivered: number;
+  visualEvidenceDelivered: boolean;
+  transcript: VideoTranscript | null;
+  /** Clearly separated text sources, so a caption is never presented as speech. */
+  textSources: {
+    transcript: { available: boolean; text: string | null; kind: "speech_to_text" | "none"; provider: string | null };
+    platformCaption: { available: boolean; text: string | null; source: VideoResolutionDetail["captionSource"] };
+    generatedCaption: { available: false; text: null; note: string };
+    onScreenText: { available: boolean; text: string[] | null; source: "vision_model" | "none" };
+  };
+  audioStatus: "available" | "unavailable" | "failed" | "not_requested";
+  detectedScenes: InspectVideoScene[] | null;
+  evidence: VideoEvidenceSummary;
+  analysisContext: {
+    question: string | null;
+    userIntent: string | null;
+    focus: string;
+    reactionMode: boolean;
+    whatCanBeAnswered: string[];
+    whatCannotBeAnswered: string[];
+    factCheck: { requested: boolean; visualClaimsAssessable: boolean; note: string };
+    honestyNote: string;
+    responseGuidance: string;
+  };
+  error: string | null;
+  message: string | null;
+  challenge: { detected: boolean; kind: string | null; reason: string | null };
+  limitations: string[];
+}
+
+export type VideoReactStyle = "casual" | "funny" | "serious" | "detailed";
+
+export const VIDEO_REACT_STYLES: VideoReactStyle[] = ["casual", "funny", "serious", "detailed"];
+
+export interface VideoReactOptions {
+  style?: VideoReactStyle;
+  question?: string | null;
+  maxFrames?: number | null;
+  includeAudio?: boolean | null;
+}
+
+/**
+ * The grounded evidence package a connected model reacts to. DEMO deliberately
+ * does not author the natural-language reaction: `reaction` is always null and
+ * `reactionAuthor` names who must produce it, so no fake reaction can ever be
+ * returned as if it came from watching the video.
+ */
+export interface VideoReactResult {
+  success: boolean;
+  style: VideoReactStyle;
+  accessStatus: VideoAccessStatus;
+  sourceUrl: string;
+  canonicalUrl: string | null;
+  platform: VideoPlatform;
+  durationSeconds: number | null;
+  caption: string | null;
+  captionIsNotTranscript: true;
+  frames: InspectVideoFrame[];
+  framesDelivered: number;
+  imageBlocksDelivered: number;
+  visualEvidenceDelivered: boolean;
+  transcript: VideoTranscript | null;
+  audioStatus: "available" | "unavailable" | "failed" | "not_requested";
+  evidence: VideoEvidenceSummary;
+  /** Frame-grounded observations from a configured server-side vision model. */
+  visionSummary: { available: boolean; provider: string | null; observations: string[]; groundedInFrames: boolean } | null;
+  /** Always null: DEMO never authors the reaction. */
+  reaction: null;
+  reactionAuthor: "connected_model";
+  reactionGuidance: string;
+  styleGuidance: string;
+  honestyNote: string;
+  error: string | null;
+  message: string | null;
+  challenge: { detected: boolean; kind: string | null; reason: string | null };
+  limitations: string[];
 }

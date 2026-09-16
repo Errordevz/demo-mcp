@@ -18,9 +18,16 @@
  *   6. Failure cases return honest, structured errors.
  *   7. A restricted sandbox (test host without egress) is reported as such,
  *      not as a pipeline failure.
- *   8. `inspect_video` (DEMO 0.6.1) performs the whole automatic flow in one
+ *   8. `inspect_video` (DEMO 0.7.0) performs the whole automatic flow in one
  *      call — intent detection, dynamic frame plan, real frames as MCP image
  *      blocks — and never lets the AI claim it saw a video without frames.
+ *   9. The 0.7.0 retrieval pipeline: `video_resolve` (byte-verified stream
+ *      discovery + access verdict, no signed-URL leakage), `video_fetch`
+ *      (streamed R2 storage, artifact fetched back over HTTPS and verified from
+ *      its own bytes, Range support, NOT_A_VIDEO rejection), unified
+ *      `video_analyze` (real image blocks or an explicit "could not"),
+ *      `video_react` (evidence package, never a hardcoded reaction) and the
+ *      capability resources.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -332,6 +339,248 @@ describe.skipIf(!liveEnv().enabled)("public video acceptance (live)", () => {
         expect(ACCEPTABLE_BLOCK_ERRORS).toContain(missingPayload?.error);
         expect(missingPayload?.frames ?? []).toEqual([]);
         expect(missingPayload?.analysis_ready).toBe(false);
+      } finally {
+        await client.close();
+      }
+    },
+    240_000,
+  );
+
+  /* ── DEMO 0.7.0: the real retrieval pipeline ───────────────────────────── */
+
+  it(
+    "video_resolve: a stable public MP4 resolves with a byte-verified stream and no signed-URL leakage on request",
+    async ({ skip }) => {
+      const url = liveEnv().publicVideoUrl;
+      const client = connectLive(origin);
+      try {
+        const result = await client.call("video_resolve", { url, verify_bytes: true, include_signed_urls: false });
+        const egressNote = workerEgressSkipNote(result, url);
+        if (egressNote) skip(egressNote);
+        const payload = result.parsed as Record<string, any>;
+        expect(payload?.tool).toBe("video_resolve");
+        expect(payload?.access_status).toBe("public");
+        expect(payload?.source_url).toBe(url);
+        expect(payload?.may_describe_content).toBe(false); // resolution is metadata, never evidence
+        expect(payload?.verification).toBe("bytes");
+        expect(payload?.stream_count ?? 0).toBeGreaterThan(0);
+        expect(payload?.next_steps?.length ?? 0).toBeGreaterThan(0);
+        expect(result.text).not.toMatch(/x-signature=[A-Za-z0-9]/);
+        expect(result.imageCount).toBe(0); // resolve downloads and renders nothing
+      } finally {
+        await client.close();
+      }
+    },
+    240_000,
+  );
+
+  it(
+    "video_fetch: retrieves the ACTUAL bytes, streams them into R2 and the artifact is retrievable over HTTPS",
+    async ({ skip }) => {
+      const url = liveEnv().publicVideoUrl;
+      const client = connectLive(origin);
+      try {
+        const result = await client.call("video_fetch", { url });
+        const egressNote = workerEgressSkipNote(result, url);
+        if (egressNote) skip(egressNote);
+        const payload = result.parsed as Record<string, any>;
+        expect(payload?.tool).toBe("video_fetch");
+        expect(payload?.success, payload?.message ?? payload?.error).toBe(true);
+        expect(payload?.delivery).toBe("streamed");
+        expect(payload?.verification).toBe("bytes");
+        expect(payload?.detected_container).toMatch(/mp4|webm|matroska|quicktime|iso-base-media/i);
+        expect(payload?.duration_verified).toBe(true);
+        expect(payload?.bytes).toBeGreaterThan(1_024);
+        expect(payload?.honesty_note).toMatch(/not visual understanding/i);
+
+        // Real R2 round trip: fetch the artifact back and verify the container
+        // from its own bytes, not from a claim in the JSON.
+        const artifactUrl = payload?.artifact?.url as string;
+        expect(artifactUrl).toMatch(/^https:\/\//);
+        const fetched = await fetch(artifactUrl, { headers: { range: "bytes=0-1023" } });
+        expect([200, 206]).toContain(fetched.status);
+        const head = new Uint8Array(await fetched.arrayBuffer());
+        expect(head.byteLength).toBeGreaterThan(8);
+        // ISO-BMFF: bytes 4..8 spell a box type; WebM starts with the EBML header.
+        const fourcc = String.fromCharCode(head[4], head[5], head[6], head[7]);
+        const isIso = ["ftyp", "moov", "mdat", "free", "wide", "skip"].includes(fourcc);
+        const isWebm = head[0] === 0x1a && head[1] === 0x45 && head[2] === 0xdf && head[3] === 0xa3;
+        expect(isIso || isWebm, `unexpected container bytes: ${fourcc}`).toBe(true);
+
+        // A Range request must be honoured so the artifact can be seeked.
+        expect(fetched.headers.get("Accept-Ranges")).toBe("bytes");
+      } finally {
+        await client.close();
+      }
+    },
+    240_000,
+  );
+
+  it(
+    "video_fetch: a URL that is not a video is rejected with NOT_A_VIDEO/UNSUPPORTED_MEDIA and stores nothing",
+    async () => {
+      const client = connectLive(origin);
+      try {
+        const result = await client.call("video_fetch", { url: "https://example.com/" });
+        const payload = result.parsed as Record<string, any>;
+        expect(result.isError).toBe(true);
+        expect(payload?.success).toBe(false);
+        expect(["NOT_A_VIDEO", "UNSUPPORTED_MEDIA", ...ACCEPTABLE_BLOCK_ERRORS]).toContain(payload?.error);
+        expect(payload?.artifact).toBeNull();
+        expect(payload?.bytes ?? null).toBeNull();
+        expect(payload?.honesty_note).toMatch(/Nothing was retrieved/i);
+      } finally {
+        await client.close();
+      }
+    },
+    240_000,
+  );
+
+  it(
+    "video_analyze: summary mode returns real decoded frame image blocks or an explicit, structured 'could not'",
+    async ({ skip }) => {
+      const url = liveEnv().publicVideoUrl;
+      const client = connectLive(origin);
+      try {
+        const result = await client.call("video_analyze", { url, analysis_mode: "summary", question: "What happens in this video?" });
+        const egressNote = workerEgressSkipNote(result, url);
+        if (egressNote) skip(egressNote);
+        const payload = result.parsed as Record<string, any>;
+        expect(payload?.tool).toBe("video_analyze");
+        expect(payload?.analysis_mode).toBe("summary");
+
+        if (payload?.success) {
+          // Real evidence: image blocks that decode as JPEG/PNG, matching frames.
+          expect(result.imageCount).toBe(payload.image_blocks_delivered);
+          expect(result.imageCount).toBeGreaterThan(0);
+          expect(payload.frames.length).toBe(result.imageCount);
+          expect(payload.visual_evidence_delivered).toBe(true);
+          expect(payload.evidence.thumbnail_used_as_frame).toBe(false);
+          expect(payload.text_sources.generated_caption.available).toBe(false);
+          expect(payload.text_sources.platform_caption.is_not_transcript).toBe(true);
+          expect(payload.analysis_context.what_can_be_answered.join(" ")).toMatch(/frame/i);
+          for (const block of result.imageBlocks) {
+            const bytes = Buffer.from(block.data, "base64");
+            const jpeg = bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+            const png = bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47;
+            expect(jpeg || png, `image block is not a real image (${block.mimeType})`).toBe(true);
+          }
+        } else {
+          // Honest failure: a stable code, zero frames, and no claim of watching.
+          expect(ACCEPTABLE_BLOCK_ERRORS).toContain(payload?.error);
+          expect(payload?.frames ?? []).toEqual([]);
+          expect(payload?.visual_evidence_delivered).toBe(false);
+          expect(payload?.may_describe_content).toBe(false);
+          expect(result.isError).toBe(true);
+        }
+      } finally {
+        await client.close();
+      }
+    },
+    300_000,
+  );
+
+  it(
+    "video_react: returns a grounded evidence package and never a hardcoded reaction",
+    async ({ skip }) => {
+      const url = liveEnv().publicVideoUrl;
+      const client = connectLive(origin);
+      try {
+        const result = await client.call("video_react", { url, style: "casual" });
+        const egressNote = workerEgressSkipNote(result, url);
+        if (egressNote) skip(egressNote);
+        const payload = result.parsed as Record<string, any>;
+        expect(payload?.tool).toBe("video_react");
+        expect(payload?.reaction).toBeNull();
+        expect(payload?.reaction_author).toBe("connected_model");
+        expect(payload?.style).toBe("casual");
+        expect(payload?.caption_is_not_transcript).toBe(true);
+        expect(payload?.honesty_note).toBeTruthy();
+        if (payload?.success) {
+          expect(result.imageCount).toBeGreaterThan(0);
+          expect(payload.visual_evidence_delivered).toBe(true);
+          expect(payload.reaction_guidance).toMatch(/decoded frame/i);
+        } else {
+          expect(payload?.frames ?? []).toEqual([]);
+          expect(payload?.reaction_guidance).toMatch(/nothing to react to/i);
+          expect(result.isError).toBe(true);
+        }
+      } finally {
+        await client.close();
+      }
+    },
+    300_000,
+  );
+
+  it(
+    "video_resolve: a public TikTok link yields streams and an access verdict, or an explicit 'could not'",
+    async ({ skip }) => {
+      const url = liveEnv().tiktokUrl;
+      const client = connectLive(origin);
+      try {
+        const result = await client.call("video_resolve", { url, verify_bytes: true });
+        const egressNote = workerEgressSkipNote(result, url);
+        if (egressNote) skip(egressNote);
+        const payload = result.parsed as Record<string, any>;
+        expect(payload?.tool).toBe("video_resolve");
+        expect(payload?.platform).toBe("tiktok");
+        expect(payload?.source_url).toBe(url);
+        expect(payload?.may_describe_content).toBe(false);
+        expect(payload?.guidance).toBeTruthy();
+        expect(payload?.next_steps?.length ?? 0).toBeGreaterThan(0);
+
+        if (payload?.access_status === "public") {
+          expect(payload?.success).toBe(true);
+          expect(payload?.canonical_url).toMatch(/tiktok\.com\/@[\w.]+\/video\/\d+/);
+          expect(payload?.stream_count ?? 0).toBeGreaterThan(0);
+          // Signed URLs are short-lived; the response must not pretend otherwise.
+          expect(payload?.limitations?.join(" ") ?? "").toBeTruthy();
+        } else {
+          // A blocked/private/deleted/region-locked/CAPTCHA-gated item is an
+          // accepted outcome ONLY when the response says so explicitly.
+          expect(payload?.success).toBe(false);
+          expect([
+            "deleted",
+            "private",
+            "login_required",
+            "region_restricted",
+            "challenge_required",
+            "rate_limited",
+            "not_found",
+            "expired",
+            "unsupported",
+            "unavailable",
+            "unknown",
+          ]).toContain(payload?.access_status);
+          expect(payload?.streams ?? []).toEqual([]);
+        }
+      } finally {
+        await client.close();
+      }
+    },
+    240_000,
+  );
+
+  it(
+    "capability discovery: the live deployment publishes an honest video capability report",
+    async () => {
+      const client = connectLive(origin);
+      try {
+        const listed = await client.rpc("resources/list", {});
+        const uris: string[] = (listed.resources ?? []).map((entry: any) => entry.uri);
+        expect(uris).toContain("demo://capabilities/video");
+        expect(uris).toContain("demo://video/honesty-contract");
+
+        const read = await client.rpc("resources/read", { uri: "demo://capabilities/video" });
+        const report = JSON.parse(read.contents?.[0]?.text ?? "null");
+        expect(report?.schema).toBe("demo.video-capabilities/1");
+        expect(report?.supportedPlatforms?.length).toBeGreaterThan(0);
+        expect(typeof report?.frames?.available).toBe("boolean");
+        expect(typeof report?.transcription?.available).toBe("boolean");
+        expect(report?.security?.neverBypassed?.join(" ")).toMatch(/captcha|drm|login/i);
+        expect(report?.limits?.maxFrames).toBeGreaterThan(0);
+        // Provider names only — never a secret value.
+        expect(JSON.stringify(report)).not.toMatch(/sk-[A-Za-z0-9]{8}|Bearer\s+[A-Za-z0-9]/);
       } finally {
         await client.close();
       }
