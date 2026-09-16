@@ -1,0 +1,77 @@
+# Deploy the worker and run the live video suite against it.
+#
+# Trigger: Actions tab → "Deploy + live video tests" → Run workflow.
+# (Works from a phone: no terminal needed.)
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   CLOUDFLARE_API_TOKEN   (Dashboard → My Profile → API Tokens → Create Token,
+#                           "Edit Cloudflare Workers" template + R2 Storage Edit)
+#   CLOUDFLARE_ACCOUNT_ID  (Dashboard → Workers & Pages → Account ID)
+name: Deploy + live video tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      skip_live:
+        description: "Deploy only, skip the live test suite"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+
+jobs:
+  deploy-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Offline suite (gate the deploy on it)
+        run: npm test
+
+      - name: Ensure R2 bucket exists
+        run: npx wrangler r2 bucket create demo-mcp-screenshots || echo "bucket already exists (continuing)"
+
+      - name: Deploy to Cloudflare
+        id: deploy
+        run: |
+          npx wrangler deploy 2>&1 | tee deploy.log
+          URL=$(grep -oE 'https://[a-z0-9-]+\.[a-z0-9-]+\.workers\.dev' deploy.log | head -n 1)
+          if [ -z "$URL" ]; then echo "Could not find the workers.dev URL in deploy output"; exit 1; fi
+          echo "worker_url=$URL" >> "$GITHUB_OUTPUT"
+          echo "Deployed to $URL"
+
+      - name: Apply video-artifacts lifecycle rule
+        run: >
+          npx wrangler r2 bucket lifecycle add demo-mcp-screenshots
+          demo-video-artifacts-expiry "video-artifacts/" --expire-days 2
+          || echo "rule already exists (continuing)"
+
+      - name: Live video suite (15 tests)
+        if: inputs.skip_live != 'true'
+        run: DEMO_MCP_LIVE=1 LIVE_WORKER_URL='${{ steps.deploy.outputs.worker_url }}' npm run test:live:video
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Deploy + live video tests" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Worker: ${{ steps.deploy.outputs.worker_url }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Capabilities: ${{ steps.deploy.outputs.worker_url }}/capabilities/video" >> "$GITHUB_STEP_SUMMARY"
+          echo "Health: ${{ steps.deploy.outputs.worker_url }}/health" >> "$GITHUB_STEP_SUMMARY"
