@@ -18,7 +18,9 @@ type Env = {
   VIDEO_ARTIFACT_TTL_SECONDS?: string | number;
 };
 
-const VERSION = "0.6.1";
+// Kept in lockstep with the `index.ts` VERSION so /platform/stats, /health and
+// the MCP `serverInfo` all report the same deployed version.
+const VERSION = "0.7.1.5";
 const DEFAULT_PLATFORM_ORIGIN = "https://demo-platform.pages.dev";
 const LOCAL_ORIGINS = new Set(["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:3000", "http://127.0.0.1:5173"]);
 const startedAt = Date.now();

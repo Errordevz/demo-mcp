@@ -78,7 +78,12 @@ Requirements for a meaningful run:
 
 * `BROWSER` (Browser Run) binding — **Workers Paid** for more than 3 concurrent
   sessions / 10 browser-minutes per day.
-* `SCREENSHOTS` (R2) binding, otherwise screenshots are reported as unavailable.
+* `SCREENSHOTS` (R2) binding — **optional**. Since DEMO 0.7.1.5 the shipped
+  `wrangler.jsonc` binds no bucket at all (enabling R2 needs a credit card), so
+  screenshots are reported as unavailable, `/video-assets/…` returns `503` and
+  the R2 round-trip video tests cannot run. The Worker, the browser tools and
+  `/health` + `/capabilities/video` are unaffected. See README →
+  "Running without R2 (no credit card)".
 * `BROWSER_SESSIONS` (Durable Object) binding, otherwise sessions live only in
   the isolate that handled the request.
 * `LIVE_TIKTOK_URL` can point the TikTok test at a specific video; the default

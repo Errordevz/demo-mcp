@@ -11,12 +11,21 @@
   "browser": {
     "binding": "BROWSER"
   },
-  "r2_buckets": [
-    {
-      "binding": "SCREENSHOTS",
-      "bucket_name": "demo-mcp-screenshots"
-    }
-  ],
+  // ── R2 is OPTIONAL (R2-free deployment) ───────────────────────────────────
+  // No `r2_buckets` binding is declared on purpose: Cloudflare requires a credit
+  // card on file to enable R2 (even for the $0 free tier), so this Worker must
+  // deploy and run on an account where R2 was never enabled. Every R2-dependent
+  // path degrades to an explicit structured "unavailable" (a
+  // `capability_unavailable` tool error, or HTTP 503 on /screenshots/:id and
+  // /video-assets/:ref) — never a crash and never a fabricated success:
+  //   • screenshots / stored frame URLs ……… unavailable (inline frames still work)
+  //   • video_fetch artifacts ………………………… unavailable
+  //   • everything else (browser, DO, AI) …… unaffected
+  // To re-enable later (card on file → R2 enabled), restore this block and
+  // redeploy — no code change is needed:
+  //   "r2_buckets": [
+  //     { "binding": "SCREENSHOTS", "bucket_name": "demo-mcp-screenshots" }
+  //   ],
   "durable_objects": {
     "bindings": [
       {

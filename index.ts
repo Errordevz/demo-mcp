@@ -15,7 +15,7 @@ import { describeVideoCapabilities } from "./src/video/capabilities.js";
 import type { VideoEnv } from "./src/video/types.js";
 
 type Env = SessionManagerEnv & VideoEnv & { DEMO_API_KEY?: string; SSRF_GUARD_HTTP_FETCH?: string };
-const VERSION = "0.7.0";
+const VERSION = "0.7.1.5";
 const SKILLS_API = "https://skills.sh/api/v1";
 
 /**

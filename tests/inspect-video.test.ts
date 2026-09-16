@@ -552,7 +552,7 @@ describe("MCP surface: inspect_video", () => {
       clientInfo: { name: "test-client", version: "1.0" },
     });
     const instructions = String(response.result?.instructions ?? "");
-    expect(response.result?.serverInfo?.version).toBe("0.7.0");
+    expect(response.result?.serverInfo?.version).toBe("0.7.1.5");
     expect(instructions).toMatch(/inspect_video/);
     expect(instructions).toMatch(/automatically call/i);
     expect(instructions).toMatch(/React to this/);
@@ -654,7 +654,7 @@ describe("MCP surface: inspect_video", () => {
     const response = await rpc("tools/call", { name: "demo_ping", arguments: {} }, {});
     const text = (response.result?.content ?? []).map((entry: { text?: string }) => entry.text ?? "").join("\n");
     const payload = JSON.parse(text) as Record<string, any>;
-    expect(payload.version).toBe("0.7.0");
+    expect(payload.version).toBe("0.7.1.5");
     expect(payload.automaticVideoInspection).toBe(true);
     expect(payload.toolCount).toBe(TOOL_COUNT);
   });

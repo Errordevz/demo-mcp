@@ -523,16 +523,25 @@ MCP `isError` result. `no_speech_detected` is a normal transcript status.
 
 ## Cloudflare deployment
 
-The current deployment already binds `SCREENSHOTS` to R2. DEMO stores temporary
-video/audio objects in that bucket under `video-artifacts/` by default so the
-existing deployment keeps working. A separate `VIDEO_ARTIFACTS` R2 binding can be
-provided through the environment without changing the tool contracts. Objects
-carry `createdAt`, `expiresAt`, content type and a content hash. The route checks
-expiry before serving; `platform-entry.ts` also runs a bounded hourly cron cleanup
-for `video-artifacts/` and `screenshots/` objects. As an account-level second
-line of defence, the bucket carries an R2 lifecycle rule that expires everything
-under `video-artifacts/` after 2 days (artifacts live at most 24h by policy, so
-the rule only ever catches strays from failed cleanups):
+**R2 is optional (DEMO 0.7.1.5).** The shipped `wrangler.jsonc` binds no R2
+bucket at all: enabling R2 requires a credit card on file, even for the $0 tier.
+Without a bucket, `video_fetch` / `video_ingest` return a structured
+`capability_unavailable` naming the missing binding, `/video-assets/…` returns
+`503`, and frames that do not fit the inline MCP budget report
+`FRAMES_UNAVAILABLE`. Resolution, probing, capability discovery and inline
+frames keep working. See README → "Running without R2 (no credit card)".
+
+When a bucket **is** bound, DEMO stores temporary video/audio objects in
+`SCREENSHOTS` under `video-artifacts/` by default, so no extra binding is
+required. A separate `VIDEO_ARTIFACTS` R2 binding can be provided through the
+environment without changing the tool contracts. Objects carry `createdAt`,
+`expiresAt`, content type and a content hash. The route checks expiry before
+serving; `platform-entry.ts` also runs a bounded hourly cron cleanup for
+`video-artifacts/` and `screenshots/` objects (and exits quietly when no bucket
+is bound). As an account-level second line of defence, the bucket can carry an
+R2 lifecycle rule that expires everything under `video-artifacts/` after 2 days
+(artifacts live at most 24h by policy, so the rule only ever catches strays from
+failed cleanups):
 
 ```bash
 # Apply (needs wrangler login / CLOUDFLARE_API_TOKEN):
@@ -560,7 +569,7 @@ services required for actual decoded frames/artifacts.
 | Binding / variable | Required | Purpose |
 | --- | --- | --- |
 | `BROWSER` (Browser Rendering) | **Yes** for frames | Real decoded frames, audio capture. Without it, resolution and byte retrieval still work and every frame result says why it could not decode. |
-| `SCREENSHOTS` (R2) | **Yes** for artifacts | Default bucket for frames, audio and `video-artifacts/`. |
+| `SCREENSHOTS` (R2) | Optional (**unbound by default**) | Bucket for frames, audio and `video-artifacts/`. Without it, retrieval/stored frames report `capability_unavailable` and `/video-assets/…` returns `503`. |
 | `VIDEO_ARTIFACTS` (R2) | Optional | Separate bucket for video/audio artifacts. |
 | `BROWSER_SESSIONS` (Durable Object) | Optional | Persistent browser sessions across calls. |
 | `AI` (Workers AI) | Optional | Speech-to-text (`VIDEO_TRANSCRIPTION_MODEL`, default `@cf/openai/whisper`) and frame-grounded vision labels (`VIDEO_VISION_MODEL`, default `@cf/llava-hf/llava-1.5-7b-hf`). |
@@ -580,8 +589,9 @@ provider degrades to an explicit, structured "unavailable".
 
 ```bash
 npm install
-npx wrangler r2 bucket create demo-mcp-screenshots   # once
-# optional: npx wrangler r2 bucket create demo-mcp-video-artifacts
+# optional, only if R2 is enabled on the account (it needs a card on file):
+# npx wrangler r2 bucket create demo-mcp-screenshots
+# npx wrangler r2 bucket create demo-mcp-video-artifacts
 npx wrangler deploy                                  # main: platform-entry.ts
 # optional providers (secrets, never in wrangler.jsonc):
 npx wrangler secret put TRANSCRIPTION_ENDPOINT

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import worker, { DEMO_TOOL_NAMES, TOOL_COUNT } from "../index.js";
 import platform from "../platform-entry.js";
 import { BROWSER_TOOL_NAMES } from "../src/mcp/browser-tools.js";
+import { ScreenshotManager } from "../src/browser/screenshot.js";
 
 const ENV = {} as never;
 const CTX = { waitUntil: () => undefined, passThroughOnException: () => undefined } as unknown as ExecutionContext;
@@ -63,7 +64,7 @@ describe("MCP surface", () => {
     const { parsed, isError } = await callTool("demo_ping", {});
     expect(isError).toBeFalsy();
     expect(parsed?.name).toBe("DEMO");
-    expect(parsed?.version).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(parsed?.version).toMatch(/^\d+\.\d+\.\d+(?:\.\d+)?$/);
     expect(parsed?.toolCount).toBe(TOOL_COUNT);
     expect(parsed).toHaveProperty("browser");
     expect(parsed).toHaveProperty("browserSessions");
@@ -180,5 +181,65 @@ describe("authentication", () => {
       CTX,
     );
     expect(authorized.status).toBe(200);
+  });
+});
+
+/**
+ * R2-free deployment (DEMO 0.7.1.5).
+ *
+ * Cloudflare needs a credit card on file to enable R2 (even for the $0 tier),
+ * so the shipped `wrangler.jsonc` binds no bucket at all. These tests pin the
+ * contract for that mode: every R2-dependent path answers with an explicit,
+ * structured "unavailable" — never a crash, and never fabricated success.
+ */
+describe("R2-free deployment (no SCREENSHOTS binding)", () => {
+  const SCREENSHOT_ID = "a1b2c3d4e5f60718293a4b5c6d7e8f90";
+  const VIDEO_REFERENCE = `video_${"a".repeat(64)}`;
+
+  it("answers /screenshots/:id with 503 instead of crashing", async () => {
+    const response = await platform.fetch(new Request(`https://demo.test/screenshots/${SCREENSHOT_ID}`), {} as never, CTX);
+    expect(response.status).toBe(503);
+    expect(await response.text()).toMatch(/not configured/i);
+  });
+
+  it("answers /video-assets/:reference with 503 instead of crashing", async () => {
+    const response = await platform.fetch(new Request(`https://demo.test/video-assets/${VIDEO_REFERENCE}`), {} as never, CTX);
+    expect(response.status).toBe(503);
+    expect(await response.text()).toMatch(/not configured/i);
+  });
+
+  it("reports the storage-dependent capabilities as false on /health", async () => {
+    const response = await worker.fetch(new Request("https://demo.test/health"), {} as never, CTX);
+    const body = (await response.json()) as Record<string, any>;
+    expect(body.ok).toBe(true);
+    expect(body.screenshots).toBe(false);
+    expect(body.screenshotLinks).toBe(false);
+    expect(body.videoBytesRetrieval).toBe(false);
+    expect(body.videoArtifacts).toBe(false);
+  });
+
+  it("names the missing binding in /capabilities/video instead of inventing capability", async () => {
+    const response = await worker.fetch(new Request("https://demo.test/capabilities/video"), {} as never, CTX);
+    const report = (await response.json()) as Record<string, any>;
+    expect(report.storage.available).toBe(false);
+    expect(report.actualVideoBytes.available).toBe(false);
+    expect(String(report.actualVideoBytes.requires.join(" "))).toMatch(/SCREENSHOTS|VIDEO_ARTIFACTS/);
+  });
+
+  it("keeps demo_ping honest about the missing storage", async () => {
+    const { parsed, isError } = await callTool("demo_ping", {});
+    expect(isError).toBeFalsy();
+    expect(parsed?.screenshots).toBe(false);
+    expect(parsed?.videoBytesRetrieval).toBe(false);
+    expect(parsed?.videoArtifacts).toBe(false);
+  });
+
+  it("fails screenshot storage with a structured capability_unavailable error", async () => {
+    const manager = new ScreenshotManager(undefined, "https://demo.test/screenshots");
+    expect(manager.available).toBe(false);
+    expect(manager.unavailableReason()).toMatch(/SCREENSHOTS/);
+    await expect(manager.store(new Uint8Array([1, 2, 3]), "png", {})).rejects.toMatchObject({
+      code: "capability_unavailable",
+    });
   });
 });

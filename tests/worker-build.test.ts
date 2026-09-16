@@ -29,9 +29,30 @@ describe("Cloudflare Worker build", () => {
       expect(output).toMatch(/Total Upload/);
       // Every declared binding must be present in the deploy plan.
       expect(output).toMatch(/BROWSER_SESSIONS/);
-      expect(output).toMatch(/SCREENSHOTS/);
       expect(output).toMatch(/env\.AI/);
       expect(output).not.toMatch(/Error:|ERROR:/);
+    },
+    300_000,
+  );
+
+  /**
+   * The deployment is R2-free on purpose (DEMO 0.7.1.5): enabling R2 needs a
+   * credit card on file, so `wrangler.jsonc` declares no `r2_buckets` binding
+   * and the deploy plan must not reference one. A stray binding here is what
+   * previously failed `wrangler deploy` with error 10013/10042.
+   */
+  it(
+    "declares no R2 binding, so the deploy works with R2 never enabled",
+    async () => {
+      const { stdout, stderr } = await build();
+      const output = `${stdout}\n${stderr}`;
+      expect(output).not.toMatch(/R2 Bucket/);
+      expect(output).not.toMatch(/env\.SCREENSHOTS/);
+      expect(output).not.toMatch(/env\.VIDEO_ARTIFACTS/);
+      expect(output).not.toMatch(/demo-mcp-screenshots/);
+      // The rest of the stack is still bound.
+      expect(output).toMatch(/env\.BROWSER\b/);
+      expect(output).toMatch(/BROWSER_SESSIONS/);
     },
     300_000,
   );

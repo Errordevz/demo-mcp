@@ -1,0 +1,220 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# COPY-PASTE SOURCE for `.github/workflows/live-deploy.yml` (DEMO 0.7.1.5)
+#
+# The bot that prepared this change cannot write `.github/workflows/*` — a
+# GitHub App needs the extra `workflows` permission for that — so the R2-free
+# version of the deploy workflow is staged here instead.
+#
+# Apply it from your phone (about a minute):
+#   1. Repo → `.github/workflows/live-deploy.yml` → pencil icon (Edit this file).
+#   2. Select all → delete → paste everything BELOW this header, starting at the
+#      "# Deploy the Worker to Cloudflare and (optionally) run…" line.
+#   3. Commit directly to `main`: "Update live deploy workflow for R2-free mode".
+#   4. Actions tab → "Deploy + live video tests" → Run workflow (skip_live=false).
+#
+# Nothing in the build reads this file; delete it once the workflow is updated
+# if you prefer to keep a single copy.
+# ─────────────────────────────────────────────────────────────────────────────
+# Deploy the Worker to Cloudflare and (optionally) run the live video suite.
+#
+# R2-FREE MODE (DEMO 0.7.1.5)
+# ---------------------------
+# This deployment binds NO R2 bucket. Cloudflare requires a credit card on file
+# to enable R2 — even for the $0 free tier — so `wrangler.jsonc` declares no
+# `r2_buckets` binding and this workflow never calls `wrangler r2 …`. Nothing
+# here can fail because R2 is not enabled.
+#
+#   Works without R2 : the Worker itself, browser automation (inside the free
+#                      Browser Run limits: 10 browser-minutes/day, 3 concurrent
+#                      browsers), /health, /capabilities/video, /platform/stats
+#                      and small inline video frames (base64 in the MCP result).
+#   Needs R2         : browser_screenshot URLs, video_fetch /video-assets
+#                      artifacts, and the R2 round-trip live tests. Those live
+#                      tests CANNOT pass in R2-free mode, so the live step
+#                      skips itself with an explicit reason — it never reports a
+#                      pass it did not run, and it never fakes success.
+#   Re-enable R2     : add a card → enable R2 → restore the `r2_buckets`
+#                      binding in wrangler.jsonc (the commented block is there)
+#                      → re-add the bucket/lifecycle steps below → run this
+#                      workflow with skip_live=false.
+#
+# Trigger: Actions tab → "Deploy + live video tests" → Run workflow.
+# (Works from a phone: no terminal needed.)
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   CLOUDFLARE_API_TOKEN   (Dashboard → My Profile → API Tokens → Create Token,
+#                           "Edit Cloudflare Workers" template is enough —
+#                           NO R2 permission is required in R2-free mode)
+#   CLOUDFLARE_ACCOUNT_ID  (Dashboard → Workers & Pages → Account ID)
+name: Deploy + live video tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      skip_live:
+        description: "Deploy only, skip the live test suite"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Offline suite (gate the deploy on it)
+        run: npm test
+
+      - name: Deploy to Cloudflare
+        id: deploy
+        run: |
+          set -euo pipefail
+          if ! npx wrangler deploy 2>&1 | tee deploy.log; then
+            echo ""
+            echo "===================== wrangler deploy FAILED ====================="
+            echo "----- last 60 lines of deploy.log -----"
+            if [ -f deploy.log ]; then tail -n 60 deploy.log; else echo "(wrangler produced no deploy.log)"; fi
+            echo ""
+            echo "----- likely causes (check in this order) -----"
+            cat <<'CHECKLIST'
+          1. CLOUDFLARE_API_TOKEN is missing, expired or revoked. Recreate it
+             from the "Edit Cloudflare Workers" template (R2 permissions are
+             NOT needed for this deployment).
+          2. CLOUDFLARE_ACCOUNT_ID is missing, or belongs to a different
+             account than the token. It must be the account that owns the
+             Worker (Dashboard → Workers & Pages → Account ID).
+          3. The token lacks "Workers Scripts: Edit" (and "Workers KV/Routes:
+             Edit" only if you use custom domains) for that account.
+          4. wrangler.jsonc declares a binding the account cannot use. R2 is the
+             classic case (error 10042 "R2 not enabled" / 10013 on deploy).
+             This deployment intentionally declares NO r2_buckets binding — if
+             you restored one, enable R2 (needs a card) and create the bucket
+             first: npx wrangler r2 bucket create demo-mcp-screenshots
+          5. Durable Objects mismatch: the BrowserSession class must be exported
+             from platform-entry.ts and match the migrations tag (v1).
+          6. Browser Run ("browser": {"binding":"BROWSER"}) not available on the
+             account's plan, or not enabled for the account.
+          7. Bundle limits: Worker larger than the plan's upload cap, or a
+             Node-only import pulled into the graph (npm test gates this).
+          8. Worker name / workers.dev subdomain conflict, or the account hit
+             its Workers limit.
+          9. Runner egress problem (DNS/proxy) reaching api.cloudflare.com —
+             re-run once to rule out a transient network failure.
+          CHECKLIST
+            echo "=================================================================="
+            exit 1
+          fi
+          URL=$(grep -oE 'https://[a-z0-9-]+\.[a-z0-9-]+\.workers\.dev' deploy.log | head -n 1)
+          if [ -z "$URL" ]; then
+            echo "Could not find the workers.dev URL in deploy output:"
+            tail -n 60 deploy.log
+            exit 1
+          fi
+          echo "worker_url=$URL" >> "$GITHUB_OUTPUT"
+          echo "Deployed to $URL"
+
+      # Real verification of the R2-free deployment: the Worker must answer
+      # /health and /capabilities/video, and must report its R2-dependent
+      # capabilities as unavailable (not as silently present).
+      - name: Smoke-check the deployed worker
+        id: caps
+        run: |
+          set -euo pipefail
+          URL="${{ steps.deploy.outputs.worker_url }}"
+          curl --fail --silent --show-error --max-time 60 "$URL/health" -o health.json
+          curl --fail --silent --show-error --max-time 60 "$URL/capabilities/video" -o capabilities.json
+          node -e '
+            const fs = require("node:fs");
+            const health = JSON.parse(fs.readFileSync("health.json", "utf8"));
+            const caps = JSON.parse(fs.readFileSync("capabilities.json", "utf8"));
+            if (health.ok !== true) {
+              console.error("/health did not report ok:true -> " + JSON.stringify(health).slice(0, 400));
+              process.exit(1);
+            }
+            const storage = Boolean(caps?.storage?.available);
+            const bytes = Boolean(caps?.actualVideoBytes?.available);
+            const flags = {
+              browser: Boolean(health.browser),
+              browserSessions: Boolean(health.browserSessions),
+              screenshots: Boolean(health.screenshots),
+              videoFrames: Boolean(health.videoFrames),
+              videoBytesRetrieval: Boolean(health.videoBytesRetrieval),
+              videoTranscription: Boolean(health.videoTranscription),
+              r2Storage: storage && bytes,
+            };
+            console.log("Worker " + health.name + " v" + health.version + " is online (" + health.toolCount + " tools).");
+            console.log("Capabilities: " + JSON.stringify(flags));
+            if (flags.r2Storage || flags.screenshots || flags.videoBytesRetrieval) {
+              console.log("R2 storage is bound on this deployment: screenshot URLs, video artifacts and the live suite are available.");
+            } else {
+              console.log("R2-free mode confirmed: screenshot URLs and video_fetch artifacts are unavailable by design.");
+            }
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, "r2_storage=" + (flags.r2Storage ? "true" : "false") + "\n");
+          '
+
+      - name: Live video suite (needs R2)
+        if: inputs.skip_live != 'true' && steps.caps.outputs.r2_storage == 'true'
+        run: DEMO_MCP_LIVE=1 LIVE_WORKER_URL='${{ steps.deploy.outputs.worker_url }}' npm run test:live:video
+
+      # Not a fallback and not a fake pass: the R2 round-trip tests assert
+      # uploaded artifacts fetched back over HTTPS, which cannot happen on a
+      # deployment with no R2 binding. Say so explicitly instead of failing the
+      # run for a capability this deployment deliberately does not have.
+      - name: Live video suite skipped (R2-free deployment)
+        if: inputs.skip_live != 'true' && steps.caps.outputs.r2_storage != 'true'
+        run: |
+          echo "The live video suite was NOT run: this deployment has no R2 binding."
+          echo "Skipped checks: video_fetch artifact round-trip, screenshot/frame URLs, R2 retrieval hash checks."
+          echo "To run them: enable R2 (requires a card on file), restore the r2_buckets"
+          echo "binding in wrangler.jsonc, redeploy, then run with skip_live=false."
+
+      - name: Live video suite skipped (skip_live=true)
+        if: inputs.skip_live == 'true'
+        run: |
+          echo "The live video suite was NOT run: skip_live=true was selected."
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Deploy + live video tests"
+            echo ""
+            echo "Worker: ${{ steps.deploy.outputs.worker_url }}"
+            echo "Capabilities: ${{ steps.deploy.outputs.worker_url }}/capabilities/video"
+            echo "Health: ${{ steps.deploy.outputs.worker_url }}/health"
+            echo ""
+            if [ "${{ inputs.skip_live }}" = "true" ]; then
+              echo "**Live suite:** not run (skip_live=true)."
+            elif [ -z "${{ steps.caps.outputs.r2_storage }}" ]; then
+              echo "**Live suite:** not run — the deploy or smoke check did not complete."
+            elif [ "${{ steps.caps.outputs.r2_storage }}" = "true" ]; then
+              echo "**Live suite:** ran against the deployed worker (R2 bound)."
+            else
+              echo "**Live suite:** not run — R2-free deployment, so the R2 round-trip"
+              echo "tests (video artifacts, screenshot/frame URLs) cannot execute."
+              echo "Worker, browser automation, /health and /capabilities/video were"
+              echo "verified by the smoke check above."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -56,11 +56,18 @@ crash.
 ```bash
 npm install
 
-npx wrangler r2 bucket create demo-mcp-screenshots   # once
-
 npm run typecheck     # tsc --noEmit
 npm test              # vitest (incl. the wrangler build gate)
 npm run deploy        # wrangler deploy
+```
+
+No R2 bucket is required — see
+[Running without R2 (no credit card)](#running-without-r2-no-credit-card). If
+you *do* have R2 enabled, create the bucket once and restore the commented
+`r2_buckets` binding in `wrangler.jsonc` before deploying:
+
+```bash
+npx wrangler r2 bucket create demo-mcp-screenshots   # optional (needs R2 enabled)
 ```
 
 Then point ChatGPT (or any MCP client) at:
@@ -441,8 +448,9 @@ Bindings (`wrangler.jsonc`):
 | Binding | Type | Purpose |
 | --- | --- | --- |
 | `BROWSER` | Browser Rendering (Browser Run) | The real browser. **Required** for any browser tool. |
-| `SCREENSHOTS` | R2 bucket (`demo-mcp-screenshots`) | Screenshot + frame storage. |
 | `BROWSER_SESSIONS` | Durable Object (`BrowserSession`) | Session/tab state across requests. |
+| `AI` | Workers AI | Optional speech-to-text + frame-grounded vision labels. |
+| `SCREENSHOTS` | R2 bucket (`demo-mcp-screenshots`) | **Optional — not bound by default.** Screenshot + frame storage, and the bucket video artifacts fall back to. |
 
 Variables (all optional):
 
@@ -464,11 +472,80 @@ Variables (all optional):
 | `VIDEO_VISION_MODEL` | `@cf/llava-hf/llava-1.5-7b-hf` | Optional Workers AI vision model for `video_analyze`. |
 | `TRANSCRIPTION_ENDPOINT` | *(unset)* | Optional HTTPS speech-to-text endpoint; API key stays in the Worker secret `TRANSCRIPTION_API_KEY`. |
 
-`AI` and `VIDEO_ARTIFACTS` are optional bindings. The current deployment reuses
-`SCREENSHOTS` for temporary video artifacts so adding these bindings is not
-required. If `AI` is not bound, frame extraction still works, while transcription
-and model-based OCR/object/action labels return `TRANSCRIPTION_UNAVAILABLE` or
-an explicit analysis limitation.
+`AI`, `VIDEO_ARTIFACTS` and `SCREENSHOTS` are all optional bindings, and the
+shipped `wrangler.jsonc` binds only `BROWSER`, `BROWSER_SESSIONS` and `AI`.
+If `AI` is not bound, frame extraction still works, while transcription and
+model-based OCR/object/action labels return `TRANSCRIPTION_UNAVAILABLE` or an
+explicit analysis limitation. If no R2 bucket is bound, screenshot/frame URLs
+and `video_fetch` artifacts return a structured `capability_unavailable` (HTTP
+`503` on their routes) — see the next section.
+
+## Running without R2 (no credit card)
+
+Cloudflare requires a credit card on file to enable R2, even for the $0 free
+tier. Since DEMO 0.7.1.5 the deployment therefore ships **R2-free**: no
+`r2_buckets` binding, no `wrangler r2` step in CI, and an API token that only
+needs **"Edit Cloudflare Workers"**.
+
+Deploy from your phone: Actions tab → **Deploy + live video tests** → *Run
+workflow*. The run does typecheck → full offline suite → `wrangler deploy` →
+a smoke check of `/health` and `/capabilities/video`.
+
+> **One-time step:** the CI bot cannot write `.github/workflows/*` (GitHub Apps
+> need an extra `workflows` permission), so if the repository still runs the
+> pre-0.7.1.5 workflow — the one that calls `wrangler r2 bucket create` and
+> fails with error 10042 — paste
+> [`docs/live-deploy.workflow.yml`](docs/live-deploy.workflow.yml) into
+> `.github/workflows/live-deploy.yml` from the web editor first. That copy is
+> the R2-free workflow described below.
+
+**Works without R2**
+
+* The Worker itself: deploy, `/mcp`, `/health`, `/tools`, `/platform/stats`,
+  `/capabilities/video` and the inspector UI.
+* Browser automation on Browser Run, inside the free limits (10 browser-minutes
+  per day, 3 concurrent browsers, 1 new session per 20 s): `browser_open`,
+  `browser_read`, `browser_snapshot`, `browser_click`, `browser_type`,
+  `browser_wait`, `browser_tabs`, `browser_media_info`, `browser_session` and
+  the rest of the session tools.
+* Small **inline** video frames: decoded frames are returned as base64 MCP image
+  blocks when they fit the inline budget (`LIMITS.inlineImageMaxBytes` per
+  image, `LIMITS.videoInlineMaxTotalBytes` per result), so `inspect_video`,
+  `video_extract_frames` and `video_analyze` can still deliver real pixels.
+* Video URL resolution and metadata (`video_resolve`, `video_inspect_url`),
+  container probing, the capability resources and every non-visual utility tool.
+
+**Does not work without R2**
+
+* `browser_screenshot` URLs and stored frame URLs →
+  `capability_unavailable` ("Screenshot storage is not configured…"), and
+  `/screenshots/:id` returns `503`.
+* `video_fetch` / `video_ingest` artifacts and `/video-assets/:reference` →
+  `capability_unavailable` / `503` (retrieving bytes needs somewhere to put
+  them; DEMO never buffers a whole file in memory or fakes an artifact).
+* The R2 round-trip live tests (`tests/video-live.test.ts`, which fetch an
+  uploaded artifact back over HTTPS and hash-check it). The deploy workflow
+  detects the R2-free deployment from `/capabilities/video` and **skips** that
+  suite with an explicit note — it never reports a pass it did not run.
+* Frames larger than the inline budget: with no storage they cannot be exposed,
+  and the frame reports `FRAMES_UNAVAILABLE` for that sample.
+
+Every one of these is an explicit, structured "unavailable" with a stable error
+code and a `limitations` list. Nothing crashes, and nothing pretends to have
+succeeded. `/health` reports `screenshots: false`, `screenshotLinks: false`,
+`videoBytesRetrieval: false` and `videoArtifacts: false`, so a client can check
+before it asks.
+
+**Re-enabling R2 later**
+
+1. Add a payment method, then enable R2 in the Cloudflare dashboard.
+2. `npx wrangler r2 bucket create demo-mcp-screenshots`.
+3. Restore the commented `r2_buckets` binding in `wrangler.jsonc`.
+4. Re-add the two R2 steps to `.github/workflows/live-deploy.yml` (bucket
+   create, plus the `video-artifacts/` lifecycle rule) if you want CI to manage
+   them.
+5. Deploy, then run the workflow with `skip_live=false`; the smoke check now
+   reports `r2Storage=true` and the live video suite runs again.
 
 ## Limits (Cloudflare Browser Rendering)
 
@@ -522,7 +599,10 @@ DEMO_MCP_LIVE=1 LIVE_WORKER_URL=https://demo-mcp.<sub>.workers.dev npm run test:
 * Live: opt-in tests that drive the real Browser Run service; the video suite
   verifies real frames (validated image bytes), R2 upload **and** retrieval
   (SHA-256 checked) and distinguishes sandbox egress restrictions from real
-  failures (`tests/video-live.test.ts`).
+  failures (`tests/video-live.test.ts`). That suite needs an R2 binding on the
+  deployment it targets — on an R2-free worker it cannot run, so the deploy
+  workflow skips it with an explicit note (see
+  [Running without R2](#running-without-r2-no-credit-card)).
 
 See [`docs/BROWSER.md`](docs/BROWSER.md) for the subsystem design and
 [`docs/TESTING.md`](docs/TESTING.md) for the test matrix.
@@ -546,3 +626,8 @@ https://demo-mcp.www-notamirrblx.workers.dev/screenshots/<high-entropy-id>
 This keeps large image bytes out of the ChatGPT tool result. `inline_base64` is
 available but capped (`LIMITS.inlineImageMaxBytes`) and disabled by default.
 Configure an R2 lifecycle rule if you want automatic deletion.
+
+On an R2-free deployment (the shipped default) there is no URL to hand back:
+`browser_screenshot` returns `capability_unavailable` and `/screenshots/:id`
+returns `503`. Video frames are the exception — they still arrive as inline
+base64 MCP image blocks while they fit the inline budget.
