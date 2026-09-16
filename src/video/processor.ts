@@ -7,6 +7,8 @@ import { MediaInspector } from "../browser/media.js";
 import { PuppeteerPageHandle } from "../browser/providers/puppeteer-adapter.js";
 import { ScreenshotManager } from "../browser/screenshot.js";
 import { capturePublicAudio, installPublicVideo } from "./page-functions.js";
+import { detectVideoIntent, type IntentFocus } from "./intent.js";
+import { planFrameCount, planFrameTimestamps } from "./frame-plan.js";
 import {
   contentType,
   fetchPublic,
@@ -22,6 +24,10 @@ import {
 import { VideoArtifactStore, artifactBaseUrl } from "./store.js";
 import { assertNavigableUrl } from "../core/url-guard.js";
 import type {
+  InspectVideoFrame,
+  InspectVideoOptions,
+  InspectVideoResult,
+  InspectVideoScene,
   PipelineStageReport,
   TimestampedTranscriptSegment,
   VideoArtifact,
@@ -57,6 +63,9 @@ export interface FrameRequest {
   frameInterval?: number;
   maxFrameCount?: number;
   inline?: boolean;
+  /** `"interval"` (default, backwards compatible) or `"even"` — first, middle
+   * and final meaningful frames with even coverage, used by `inspect_video`. */
+  strategy?: "interval" | "even";
 }
 
 export interface FrameCaptureResult {
@@ -121,6 +130,12 @@ function frameTimestamps(duration: number | null, request: FrameRequest, maxDura
       .filter((value) => Number.isFinite(value) && value >= 0 && value <= usableDuration)
       .slice(0, maxFrames)
       .map((value) => Number(value.toFixed(3)));
+  }
+  if (request.strategy === "even") {
+    // Even coverage needs a real decoded duration; without one, fall back to a
+    // single first frame rather than guessing timestamps over the policy cap.
+    if (duration === null || !Number.isFinite(usableDuration) || usableDuration <= 0) return [0];
+    return planFrameTimestamps(usableDuration, maxFrames);
   }
   const interval = Math.max(0.25, Math.min(request.frameInterval ?? LIMITS.videoFramesDefaultIntervalSeconds, maxDuration));
   if (!Number.isFinite(usableDuration) || usableDuration <= 0) return [0];
@@ -345,22 +360,38 @@ export class VideoProcessor {
    */
   async ingest(url: string, options: VideoIngestOptions): Promise<VideoIngestResult> {
     this.charge("ingest", url);
+    const resolution = await this.resolve(url);
+    return this.ingestResolved(url, resolution, options);
+  }
+
+  /**
+   * The `ingest()` body operating on an already completed resolution, so the
+   * high-level `inspectVideo()` can resolve once (page fetches are bounded but
+   * expensive) and plan frames from the known duration/platform metadata.
+   */
+  private async ingestResolved(url: string, initialResolution: VideoResolution, options: VideoIngestOptions): Promise<VideoIngestResult> {
     const outputMode = options.outputMode;
     const needsArtifact = outputMode !== "frames";
     const needsFrames = outputMode !== "video_artifact";
 
-    let resolution = await this.resolve(url);
+    let resolution = initialResolution;
     const maxDuration = Math.min(options.maxDurationSeconds ?? this.maxDuration(), this.maxDuration());
+    const explicitTimestamps = (options.timestamps ?? [])
+      .filter((value) => Number.isFinite(value) && value >= 0)
+      .slice(0, LIMITS.videoFramesMaxCount)
+      .map((value) => Number(value.toFixed(3)));
     const frameRequest: FrameRequest = {
-      ...(resolution.metadata.durationSeconds !== null
-        ? {
-            timestamps: frameTimestamps(
-              resolution.metadata.durationSeconds,
-              { frameInterval: options.frameIntervalSeconds, maxFrameCount: options.frameCount ?? LIMITS.videoFramesMaxCount },
-              maxDuration,
-            ),
-          }
-        : { frameInterval: options.frameIntervalSeconds, maxFrameCount: options.frameCount ?? LIMITS.videoFramesMaxCount }),
+      ...(explicitTimestamps.length
+        ? { timestamps: explicitTimestamps }
+        : resolution.metadata.durationSeconds !== null
+          ? {
+              timestamps: frameTimestamps(
+                resolution.metadata.durationSeconds,
+                { frameInterval: options.frameIntervalSeconds, maxFrameCount: options.frameCount ?? LIMITS.videoFramesMaxCount, strategy: options.frameStrategy },
+                maxDuration,
+              ),
+            }
+          : { frameInterval: options.frameIntervalSeconds, maxFrameCount: options.frameCount ?? LIMITS.videoFramesMaxCount, strategy: options.frameStrategy }),
       inline: true,
     };
 
@@ -525,6 +556,272 @@ export class VideoProcessor {
       analysisReady: framesOk,
       challenge: resolution.challenge,
       limitations,
+    };
+  }
+
+  /**
+   * High-level automatic video understanding backing the `inspect_video` tool.
+   *
+   * This is the single entry point a connected AI calls when a user sends a
+   * public video link — with or without a question like "react to this", "is
+   * this real?", "what happens at the end?" or nothing at all. It resolves the
+   * platform and actual media, plans an intent- and duration-aware frame
+   * budget (first / middle / final meaningful frames, dense coverage for short
+   * clips, focus-biased sampling), decodes real frames in Browser Run,
+   * optionally attempts audio + transcription, and runs frame-grounded
+   * scene / on-screen-text analysis when a server-side vision model exists.
+   *
+   * The result always states explicitly whether real visual evidence was
+   * delivered (`visualEvidenceDelivered`) so the AI can never claim to have
+   * watched a video it did not actually see.
+   */
+  async inspectVideo(url: string, options: InspectVideoOptions = {}): Promise<InspectVideoResult> {
+    const intent = detectVideoIntent({
+      userIntent: options.userIntent ?? null,
+      question: options.question ?? null,
+      reactionMode: options.reactionMode ?? null,
+    });
+    const includeMetadata = options.includeMetadata !== false;
+    const includeAudio = options.includeAudio === true;
+    const analyzeScenes = options.analyzeScenes !== false;
+    const analyzeOnScreenText = options.analyzeOnScreenText !== false;
+
+    this.charge("inspect_video", url);
+    const resolution = await this.resolve(url);
+    const maxDuration = this.maxDuration();
+
+    const buildSource = (decoded: { durationSeconds?: number | null; width?: number | null; height?: number | null; contentType?: string | null } = {}): InspectVideoResult["source"] => ({
+      platform: resolution.platform,
+      url,
+      resolvedUrl: resolution.resolvedUrl,
+      mediaUrl: resolution.mediaUrl,
+      durationSeconds: decoded.durationSeconds ?? resolution.metadata.durationSeconds,
+      width: decoded.width ?? resolution.metadata.width,
+      height: decoded.height ?? resolution.metadata.height,
+      contentType: includeMetadata ? (decoded.contentType ?? resolution.metadata.contentType) : null,
+      title: includeMetadata ? resolution.metadata.title : null,
+      description: includeMetadata ? resolution.metadata.description : null,
+    });
+
+    const intentPayload = { userIntent: intent.userIntent, question: intent.question, reactionMode: intent.reactionMode, focus: intent.focus };
+
+    const failure = (error: string, message: string, extraLimitations: string[]): InspectVideoResult => ({
+      inspectionStatus: "failed",
+      source: buildSource(),
+      intent: intentPayload,
+      frames: [],
+      detectedScenes: null,
+      extractedText: null,
+      audioStatus: null,
+      transcript: null,
+      framesDelivered: 0,
+      imageBlocksDelivered: 0,
+      visualEvidenceDelivered: false,
+      error,
+      message,
+      challenge: resolution.challenge,
+      limitations: [...new Set([...resolution.limitations, ...extraLimitations])],
+      honestyNote:
+        "No visual frames were delivered. The AI MUST NOT claim to have seen, watched, or inspected this video, and must not describe its content; report the error and limitations to the user instead.",
+      responseGuidance:
+        "Visual inspection did not complete. Tell the user honestly what failed and why (see error/limitations). Do not invent or assume anything about the video's content.",
+    });
+
+    // Policy gates before any browser time is spent.
+    const maxBytes = this.maxDownloadBytes();
+    if (resolution.metadata.contentLength !== null && resolution.metadata.contentLength > maxBytes) {
+      return failure(
+        "DOWNLOAD_TOO_LARGE",
+        `The public video declares ${formatBytes(resolution.metadata.contentLength)}, above the ${formatBytes(maxBytes)} inspection limit.`,
+        ["The declared size exceeded the deployment size policy; no frames were extracted."],
+      );
+    }
+    if (resolution.metadata.durationSeconds !== null && resolution.metadata.durationSeconds > maxDuration) {
+      return failure(
+        "VIDEO_NOT_PUBLIC",
+        `The video duration (${resolution.metadata.durationSeconds.toFixed(1)}s) exceeds the ${maxDuration}s processing limit.`,
+        ["The duration policy is enforced before frame extraction."],
+      );
+    }
+    if (resolution.error === "blocked_url") {
+      return failure(resolution.error, resolution.message ?? "The URL was rejected by the SSRF guard.", [
+        "The URL was rejected before any network or browser request was made.",
+      ]);
+    }
+
+    // Intent-aware, duration-aware frame plan.
+    const plannedCount = clamp(options.frameCount ?? planFrameCount(resolution.metadata.durationSeconds), 1, LIMITS.videoFramesMaxCount);
+    const requestedTimestamps = (options.timestamps ?? []).filter((value) => Number.isFinite(value) && value >= 0);
+    const explicitTimestamps = requestedTimestamps.filter((value) => value <= maxDuration).slice(0, LIMITS.videoFramesMaxCount).map((value) => Number(value.toFixed(3)));
+    const droppedTimestamps = requestedTimestamps.length - explicitTimestamps.length;
+    const plannedTimestamps = explicitTimestamps.length
+      ? explicitTimestamps
+      : resolution.metadata.durationSeconds !== null
+        ? planFrameTimestamps(Math.min(resolution.metadata.durationSeconds, maxDuration), plannedCount, intent.focus as IntentFocus)
+        : null;
+
+    const ingested = await this.ingestResolved(url, resolution, {
+      outputMode: "frames",
+      frameCount: plannedCount,
+      frameStrategy: "even",
+      ...(plannedTimestamps ? { timestamps: plannedTimestamps } : {}),
+      includeAudio,
+      includeTranscript: false,
+    });
+
+    const limitations: string[] = [...ingested.limitations];
+    if (droppedTimestamps > 0) {
+      // Never silently sample past the duration policy or the frame cap.
+      limitations.push(`${droppedTimestamps} requested timestamp(s) were dropped because they exceeded the ${maxDuration}s duration policy or the ${LIMITS.videoFramesMaxCount}-frame cap.`);
+    }
+
+    // Audio status + transcript: only when requested, always honest.
+    let audioStatus: InspectVideoResult["audioStatus"] = null;
+    let transcript: VideoTranscript | null = null;
+    if (includeAudio) {
+      const audio = ingested.audio;
+      if (audio?.status === "audio_ready") {
+        audioStatus = "available";
+        if (audio.reference) {
+          transcript = await this.transcribe({ videoReference: audio.reference }, {});
+          if (transcript.status === "unavailable") limitations.push(transcript.message ?? "Speech-to-text was not available.");
+        }
+      } else if (audio?.status === "no_audio_track") {
+        audioStatus = "unavailable";
+        limitations.push("The decoded video stream has no audio track; no dialogue or sound is claimed. Visual analysis is unaffected.");
+      } else {
+        audioStatus = "failed";
+        limitations.push("Audio extraction failed or is unsupported in this environment; no dialogue or sound is claimed. Visual analysis is unaffected.");
+      }
+    }
+
+    // Frame-grounded scene / on-screen-text analysis (optional vision model).
+    let detectedScenes: InspectVideoScene[] | null = null;
+    let extractedText: string[] | null = null;
+    const sceneHints = new Map<number, string>();
+    if (analyzeScenes || analyzeOnScreenText) {
+      const frameReferences = ingested.frames.filter((frame) => frame.inspected && frame.imageReference).map((frame) => frame.imageReference as string);
+      if (!frameReferences.length && ingested.frames.some((frame) => frame.inspected)) {
+        limitations.push("Scene/text analysis needs frames with retrievable storage references; frame storage (R2) is unavailable in this deployment.");
+      } else if (frameReferences.length) {
+        const analysis = await this.analyze({ url }, { frameReferences, includeTranscript: false, promptHint: intent.analysisHint });
+        const analysisReady = Boolean((analysis as { analysis_ready?: boolean }).analysis_ready);
+        if (analyzeScenes) {
+          const changes = ((analysis.scene_changes ?? []) as Array<{ timestamp?: number; scene_change?: unknown }>).filter(
+            (entry) => entry?.scene_change !== undefined && entry?.scene_change !== null && entry?.scene_change !== "",
+          );
+          if (changes.length) {
+            detectedScenes = changes.map((entry, index) => ({
+              start: Number(entry.timestamp ?? 0),
+              end: index + 1 < changes.length ? Number(changes[index + 1].timestamp ?? 0) : (ingested.durationSeconds ?? null),
+              significance: boundedSignificance(entry.scene_change),
+            }));
+          } else {
+            limitations.push(
+              analysisReady
+                ? "The vision model reported no distinct scene changes in the analyzed frames."
+                : "Scene detection was requested but no server-side vision model returned scene labels; the frame plan still covers the beginning, middle and end.",
+            );
+          }
+        }
+        if (analyzeOnScreenText) {
+          const texts = ((analysis.visible_text_ocr ?? []) as Array<{ text?: unknown }>).flatMap((entry) =>
+            Array.isArray(entry?.text) ? entry.text.map(String) : entry?.text ? [String(entry.text)] : [],
+          );
+          const unique = [...new Set(texts.map((value) => value.trim()).filter(Boolean))].slice(0, 50).map((value) => value.slice(0, 300));
+          if (unique.length) extractedText = unique;
+          else
+            limitations.push(
+              analysisReady
+                ? "No legible on-screen text was found in the analyzed frames."
+                : "On-screen text extraction was requested but no server-side vision/OCR model was available; read any text directly from the returned frame images instead.",
+            );
+        }
+        for (const entry of (analysis.actions_events ?? []) as Array<{ timestamp?: number; items?: unknown }>) {
+          const items = Array.isArray(entry?.items) ? entry.items.map(String).filter(Boolean) : [];
+          if (items.length) sceneHints.set(Number(entry.timestamp ?? -1), items.slice(0, 2).join("; ").slice(0, 200));
+        }
+        for (const limitation of (analysis.limitations ?? []) as string[]) {
+          if (limitation.startsWith("Vision analysis failed") && !limitations.includes(limitation)) limitations.push(limitation);
+        }
+      }
+    }
+
+    // Map decoded frames to deliverable evidence, respecting the inline budget.
+    const frames: InspectVideoFrame[] = [];
+    let inlineTotal = 0;
+    for (const frame of ingested.frames) {
+      if (!frame.inspected) continue; // undecodable frames stay limitations, never evidence
+      let imageBlockIndex: number | null = null;
+      if (frame.inlineData) {
+        const approximateBytes = Math.ceil(frame.inlineData.length * 0.75);
+        if (inlineTotal + approximateBytes <= LIMITS.videoInlineMaxTotalBytes) {
+          imageBlockIndex = frames.filter((entry) => entry.imageBlockIndex !== null).length;
+          inlineTotal += approximateBytes;
+        }
+      }
+      frames.push({
+        timestamp: frame.timestamp,
+        mimeType: frame.contentType,
+        bytes: frame.bytes,
+        imageBlockIndex,
+        imageReference: frame.imageReference,
+        ...(frame.inlineData && imageBlockIndex !== null ? { inlineData: frame.inlineData } : {}),
+        sceneDescriptionHint: sceneHints.get(frame.timestamp) ?? null,
+      });
+    }
+
+    const framesDelivered = frames.length;
+    const imageBlocksDelivered = frames.filter((frame) => frame.imageBlockIndex !== null).length;
+    const attemptedFrames = ingested.frames.length;
+    const failedCaptures = attemptedFrames - framesDelivered;
+    const plannedShortfall = plannedTimestamps ? Math.max(0, plannedTimestamps.length - attemptedFrames) : 0;
+
+    let inspectionStatus: InspectVideoResult["inspectionStatus"];
+    if (!framesDelivered) inspectionStatus = "failed";
+    else if (imageBlocksDelivered === 0 || failedCaptures > 0 || plannedShortfall > 0 || (includeAudio && audioStatus === "failed") || ingested.error) inspectionStatus = "partial";
+    else inspectionStatus = "complete";
+
+    if (imageBlocksDelivered === 0 && framesDelivered > 0) {
+      limitations.push(
+        "Frames were decoded and stored, but none travelled as inline MCP image blocks (inline size budget exhausted or storage-only delivery); the client can still retrieve them from the frame imageReference URLs while they are valid.",
+      );
+    }
+
+    const audioClause = audioStatus === "available" ? "" : ", and do not describe audio, dialogue, or sound effects (no verified audio track)";
+    const honestyNote = framesDelivered
+      ? `${framesDelivered} real decoded frame(s) were delivered (${imageBlocksDelivered} as MCP image content blocks). They are sampled frames, not continuous playback: do not claim to have watched the full video${audioClause}. Never invent events outside these frames, and state uncertainty where the frames do not establish something.`
+      : "No visual frames were delivered. The AI MUST NOT claim to have seen, watched, or inspected this video, and must not describe its content; report the error and limitations to the user instead.";
+
+    const responseGuidance = !framesDelivered
+      ? "Visual inspection did not complete. Tell the user honestly what failed and why (see error/limitations). Do not invent or assume anything about the video's content."
+      : intent.reactionMode
+        ? "Reaction mode: the user wants your genuine take, not a metadata report. Examine the frame images first, then react naturally to what actually happens — match the user's tone, anchor the reaction in specific visible moments (with timestamps), and stay honest about what sampled frames cannot verify (audio, off-screen context, whether it is staged)."
+        : "Answer the user's question from what is visible in the returned frames. Reference timestamps, distinguish what you see from what you infer, and mention uncertainty where the sampled frames do not establish something.";
+
+    return {
+      inspectionStatus,
+      source: buildSource({
+        durationSeconds: ingested.durationSeconds,
+        width: ingested.width,
+        height: ingested.height,
+        contentType: ingested.contentType,
+      }),
+      intent: intentPayload,
+      frames,
+      detectedScenes,
+      extractedText,
+      audioStatus,
+      transcript,
+      framesDelivered,
+      imageBlocksDelivered,
+      visualEvidenceDelivered: framesDelivered > 0,
+      error: framesDelivered ? null : (ingested.error ?? resolution.error ?? "FRAMES_UNAVAILABLE"),
+      message: framesDelivered ? null : (ingested.message ?? resolution.message ?? "No decoded frames could be extracted from the public video."),
+      challenge: resolution.challenge,
+      limitations: [...new Set(limitations)],
+      honestyNote,
+      responseGuidance,
     };
   }
 
@@ -908,7 +1205,7 @@ export class VideoProcessor {
     return { status: "unavailable", language: options.language ?? null, text: null, segments: [], provider: null, message: "TRANSCRIPTION_UNAVAILABLE: no Cloudflare AI or server-side speech-to-text provider is configured." };
   }
 
-  async analyze(input: VideoInput, options: { frameReferences?: string[]; includeTranscript?: boolean } = {}): Promise<Record<string, unknown>> {
+  async analyze(input: VideoInput, options: { frameReferences?: string[]; includeTranscript?: boolean; promptHint?: string | null } = {}): Promise<Record<string, unknown>> {
     this.charge("analyze", input.videoReference ?? input.url ?? (options.frameReferences?.[0] ?? "frames"));
     let frameResult: FrameCaptureResult = { success: false, sourceUrl: input.url ?? input.videoReference ?? "", durationSeconds: null, width: null, height: null, frames: [], limitations: [] };
     if (options.frameReferences?.length) {
@@ -923,6 +1220,10 @@ export class VideoProcessor {
     const ai = this.aiBinding();
     if (ai && frameResult.frames.length) {
       const model = this.env.VIDEO_VISION_MODEL ?? "@cf/llava-hf/llava-1.5-7b-hf";
+      const basePrompt = "Inspect this video frame. Return compact JSON with visible_text, objects_people, actions_events, and scene_change. Do not infer anything outside the pixels.";
+      // The hint is a curated focus string produced by DEMO's intent module —
+      // never raw user text — so a hostile message cannot steer the model.
+      const prompt = options.promptHint ? `${basePrompt} Request focus: ${redactText(options.promptHint, 300)}` : basePrompt;
       for (const frame of frameResult.frames.slice(0, LIMITS.videoMaxVisionFrames)) {
         if (!frame.inlineData) continue;
         try {
@@ -931,7 +1232,7 @@ export class VideoProcessor {
           imageCopy.set(imageBytes);
           const raw = await ai.run(model, {
             image: imageCopy.buffer,
-            prompt: "Inspect this video frame. Return compact JSON with visible_text, objects_people, actions_events, and scene_change. Do not infer anything outside the pixels.",
+            prompt,
           });
           visionResults.push({ timestamp: frame.timestamp, result: sanitiseVision(raw) });
         } catch (error) {
@@ -975,10 +1276,13 @@ export class VideoProcessor {
       const object = await bucket.get(`screenshots/${match[1]}`).catch(() => null);
       if (!object) continue;
       try {
-        const buffer = object.arrayBuffer ? await object.arrayBuffer() : await readStreamBytes(object.body);
-        const bytes = new Uint8Array(buffer);
-        const binary = bytes.byteLength <= LIMITS.inlineImageMaxBytes ? bytesToBase64(bytes) : undefined;
-        frames.push({ timestamp: frames.length, contentType: contentTypeForFrame(object.httpMetadata?.contentType ?? null), imageReference: reference, bytes: bytes.byteLength, ...(binary ? { inlineData: binary } : {}), inspected: true });
+      const buffer = object.arrayBuffer ? await object.arrayBuffer() : await readStreamBytes(object.body);
+      const bytes = new Uint8Array(buffer);
+      const binary = bytes.byteLength <= LIMITS.inlineImageMaxBytes ? bytesToBase64(bytes) : undefined;
+      // Restore the real capture timestamp stored with the frame (falling back
+      // to the reference order) so analysis stays grounded in actual times.
+      const storedSeconds = finiteOrNull(object.customMetadata?.timeSeconds);
+      frames.push({ timestamp: storedSeconds ?? frames.length, contentType: contentTypeForFrame(object.httpMetadata?.contentType ?? null), imageReference: reference, bytes: bytes.byteLength, ...(binary ? { inlineData: binary } : {}), inspected: true });
       } catch {
         /* A missing/expired frame is reported by the count and limitations. */
       }
@@ -1045,6 +1349,7 @@ export class VideoProcessor {
           index: 0,
           type: "jpeg",
           inline: request.inline !== false,
+          maxFrames: LIMITS.videoFramesMaxCount,
         });
         return { info, report };
       });
@@ -1134,6 +1439,12 @@ function finiteOrNull(value: string | number | undefined): number | null {
 
 function safeVideoMessage(error: unknown, max = 500): string {
   return redactText((error instanceof Error ? error.message : String(error)).replace(/[\r\n]+/g, " "), max);
+}
+
+/** Bound a vision-model scene label so one frame cannot flood the payload. */
+function boundedSignificance(value: unknown): string {
+  const text = typeof value === "string" ? value : (() => { try { return JSON.stringify(value) ?? String(value); } catch { return String(value); } })();
+  return redactText(text.replace(/[\r\n]+/g, " "), 240);
 }
 
 function emptyMetadata(): VideoMetadata {

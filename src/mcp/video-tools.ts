@@ -126,6 +126,101 @@ function transcriptPayload(transcript: VideoTranscript) {
 
 export function registerVideoTools(mcp: McpServer, ctx: VideoToolContext): void {
   mcp.registerTool(
+    "inspect_video",
+    {
+      title: "Inspect Video (Watch, Understand & React)",
+      description:
+        "Automatic video viewing and understanding from a URL alone — the ONLY tool needed when a user sends a video link. Resolves the platform and actual media (direct MP4/WebM files, public video pages, TikTok/Instagram/X/Reddit links including vt./vm. short URLs), extracts REAL decoded frames from throughout the video in Cloudflare Browser Rendering (first, middle, final and intent-biased moments — never thumbnails or cover images), and returns them as MCP image content blocks a vision model can examine directly, plus structured context: source metadata, detected scenes, on-screen text, honest audio status. " +
+        "CALL AUTOMATICALLY when a user sends a public video URL and asks 'What do you think of this?', 'React to this.', 'Watch this.', 'What happens?', 'Is this real?', 'Is this funny?', 'Explain this video.', 'Rate the vibe.', 'Look at this', 'What does the text say?', or pastes only a link with no explanation — pass the user's original message as userIntent and their explicit question as question; reaction mode and the frame plan are then derived automatically. Never ask the user to download the video, extract frames, upload screenshots, or provide timestamps. " +
+        "RESPONSE CONTRACT: the returned image blocks are the visual evidence. When visualEvidenceDelivered=true, examine the frames and answer the user's intent naturally — for reaction requests give a genuine, context-aware reaction matching the user's tone instead of a robotic metadata summary; mention uncertainty where the frames do not establish something. When visualEvidenceDelivered=false the inspection failed: say so honestly and NEVER claim to have seen or watched the video. Frames are samples, not continuous playback: do not claim to have watched the whole video, and never invent audio, dialogue, or events outside the frames.",
+      annotations: {
+        title: "Inspect Video (Watch, Understand & React)",
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+      inputSchema: {
+        url: z.string().url().describe("Public video URL: a direct media file (mp4/webm/mov), a public video page, or a share/short link (https://vt.tiktok.com/..., https://vm.tiktok.com/..., Instagram/X/Reddit/YouTube links)."),
+        userIntent: z.string().max(2_000).optional().describe("The user's original message, e.g. 'React to this' or 'Is this real?'. Drives automatic reaction mode and analysis focus."),
+        question: z.string().max(2_000).optional().describe("The explicit question about the video, when the user asked one."),
+        reactionMode: z.boolean().optional().describe("Force reaction mode on/off. Omit to auto-detect: enabled when the user says 'react', 'what do you think', 'look at this', or sends only the link."),
+        frameCount: z.number().int().min(1).max(LIMITS.videoFramesMaxCount).optional().describe("Frames to extract. Omit for the automatic duration-aware plan (5–8 frames under 10s, 8–12 up to a minute, up to 16 for longer videos)."),
+        timestamps: z.array(z.number().min(0)).max(LIMITS.videoFramesMaxCount).optional().describe("Explicit timestamps in seconds. Omit for automatic beginning/middle/end sampling biased toward the user's focus (e.g. the ending for 'what happens at the end?')."),
+        includeMetadata: z.boolean().default(true).describe("Include title/description/content-type metadata in the source object."),
+        includeAudio: z.boolean().default(false).describe("Best-effort audio extraction + speech-to-text when the Cloudflare-compatible capture path supports it. audioStatus reports 'available' | 'unavailable' | 'failed' honestly; visual analysis never depends on audio and dialogue is never fabricated."),
+        analyzeScenes: z.boolean().default(true).describe("Frame-grounded scene detection when a server-side vision model is configured; unavailable analysis is reported, never guessed."),
+        analyzeOnScreenText: z.boolean().default(true).describe("Frame-grounded on-screen text (OCR) extraction when a server-side vision model is configured; the raw frames are always returned so the calling vision model can read text itself."),
+      },
+    },
+    (args) =>
+      runTool(async () => {
+        const result = await processor(ctx).inspectVideo(args.url, {
+          userIntent: args.userIntent ?? null,
+          question: args.question ?? null,
+          reactionMode: args.reactionMode ?? null,
+          frameCount: args.frameCount ?? null,
+          timestamps: args.timestamps ?? null,
+          includeMetadata: args.includeMetadata,
+          includeAudio: args.includeAudio,
+          analyzeScenes: args.analyzeScenes,
+          analyzeOnScreenText: args.analyzeOnScreenText,
+        });
+        const images = result.frames
+          .filter((frame) => frame.imageBlockIndex !== null && frame.inlineData)
+          .sort((a, b) => (a.imageBlockIndex as number) - (b.imageBlockIndex as number))
+          .map((frame) => ({ data: frame.inlineData as string, mimeType: frame.mimeType }));
+        const payload = {
+          tool: "inspect_video",
+          inspectionStatus: result.inspectionStatus,
+          source: {
+            platform: result.source.platform,
+            url: result.source.url,
+            resolvedUrl: result.source.resolvedUrl,
+            durationSeconds: result.source.durationSeconds,
+            width: result.source.width,
+            height: result.source.height,
+            ...(result.source.contentType !== null ? { mimeType: result.source.contentType } : {}),
+            ...(result.source.title !== null ? { title: result.source.title } : {}),
+            ...(result.source.description !== null ? { description: result.source.description } : {}),
+          },
+          intent: {
+            userIntent: result.intent.userIntent,
+            question: result.intent.question,
+            reactionMode: result.intent.reactionMode,
+            focus: result.intent.focus,
+          },
+          frames: result.frames.map((frame) => ({
+            timestamp: frame.timestamp,
+            image: frame.imageBlockIndex !== null ? `mcp_image_block_${frame.imageBlockIndex}` : (frame.imageReference ?? null),
+            mimeType: frame.mimeType,
+            bytes: frame.bytes,
+            ...(frame.imageReference ? { imageReference: frame.imageReference } : {}),
+            ...(frame.sceneDescriptionHint ? { sceneDescriptionHint: frame.sceneDescriptionHint } : {}),
+          })),
+          detectedScenes: result.detectedScenes,
+          extractedText: result.extractedText,
+          audioStatus: result.audioStatus,
+          transcript: result.transcript ? transcriptPayload(result.transcript) : null,
+          framesDelivered: result.framesDelivered,
+          imageBlocksDelivered: result.imageBlocksDelivered,
+          visualEvidenceDelivered: result.visualEvidenceDelivered,
+          ...(result.error ? { error: result.error } : {}),
+          ...(result.message ? { message: result.message } : {}),
+          challenge: result.challenge,
+          limitations: result.limitations,
+          honestyNote: result.honestyNote,
+          responseGuidance: result.responseGuidance,
+          imageDeliveryNote:
+            "MCP image content blocks precede this JSON, in frame order: mcp_image_block_N is the (N+1)th image block. imageReference values are short-lived R2 retrieval links for the same decoded frames.",
+        };
+        const safePayload = safeVideoValue(payload) as Record<string, unknown>;
+        if (result.inspectionStatus === "failed") return errorResult(JSON.stringify(safePayload, null, 2));
+        return images.length ? imageResult(images, safePayload) : safeTextResult(safePayload);
+      }),
+  );
+
+  mcp.registerTool(
     "video_inspect_url",
     {
       title: "Inspect Public Video URL",
@@ -433,6 +528,7 @@ export function registerVideoTools(mcp: McpServer, ctx: VideoToolContext): void 
 }
 
 export const VIDEO_TOOL_NAMES = [
+  "inspect_video",
   "video_inspect_url",
   "video_ingest",
   "video_download_public",

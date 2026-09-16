@@ -113,6 +113,10 @@ export interface FrameSamplingOptions {
   timestamps?: number[];
   type?: ScreenshotType;
   inline?: boolean;
+  /** Upper bound for count/timestamp clamping. Defaults to
+   * `LIMITS.framesMaxCount`; the public video pipeline passes its own higher
+   * cap (`LIMITS.videoFramesMaxCount`). Browser tools never raise it. */
+  maxFrames?: number;
 }
 
 export interface SampledFrame {
@@ -152,7 +156,8 @@ export class MediaInspector {
 
   /** Rendered-frame sampling from a publicly playable <video> element. */
   async sampleFrames(page: PageHandle, options: FrameSamplingOptions = {}): Promise<FrameSamplingReport> {
-    const requestedCount = clamp(options.count ?? LIMITS.framesDefaultCount, 1, LIMITS.framesMaxCount);
+    const frameCap = Math.max(1, options.maxFrames ?? LIMITS.framesMaxCount);
+    const requestedCount = clamp(options.count ?? LIMITS.framesDefaultCount, 1, frameCap);
     const index = Math.max(0, options.index ?? 0);
     const type: ScreenshotType = options.type ?? "png";
     const selector = options.selector ?? null;
@@ -217,7 +222,7 @@ export class MediaInspector {
       video?.scrollIntoView({ block: "center", inline: "center" });
     }, { index, selector });
 
-    const timestamps = normaliseTimestamps(options.timestamps, requestedCount, duration);
+    const timestamps = normaliseTimestamps(options.timestamps, requestedCount, duration, frameCap);
     const frames: SampledFrame[] = [];
     const viewport = await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
 
@@ -288,15 +293,15 @@ export class MediaInspector {
   }
 }
 
-function normaliseTimestamps(requested: number[] | undefined, count: number, duration: number): number[] {
+function normaliseTimestamps(requested: number[] | undefined, count: number, duration: number, cap: number = LIMITS.framesMaxCount): number[] {
   if (requested && requested.length > 0) {
     const cleaned = requested
       .filter((value) => Number.isFinite(value) && value >= 0)
-      .slice(0, LIMITS.framesMaxCount)
+      .slice(0, cap)
       .map((value) => Math.min(Number(value.toFixed(3)), Math.max(0, duration - 0.05)));
     if (cleaned.length > 0) return cleaned;
   }
-  const total = clamp(count, 1, LIMITS.framesMaxCount);
+  const total = clamp(count, 1, cap);
   const safeDuration = Math.max(0.2, duration - 0.1);
   const step = safeDuration / total;
   return Array.from({ length: total }, (_unused, i) => Number(Math.min(safeDuration, step * (i + 0.5)).toFixed(3)));

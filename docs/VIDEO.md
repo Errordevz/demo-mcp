@@ -1,13 +1,15 @@
 # DEMO public video pipeline
 
-This document describes the public-video contract added in DEMO 0.5. The pipeline
-is designed for Cloudflare Workers and Cloudflare Browser Rendering, not for a
-VPS with FFmpeg.
+This document describes the public-video contract added in DEMO 0.5 and the
+high-level automatic video understanding tool (`inspect_video`) added in DEMO
+0.6.1. The pipeline is designed for Cloudflare Workers and Cloudflare Browser
+Rendering, not for a VPS with FFmpeg.
 
 ## Tools
 
 | Tool | Purpose |
 | --- | --- |
+| `inspect_video` | **One high-level tool for automatic video viewing, understanding and reactions (0.6.1)**: intent detection, dynamic frame planning, real decoded frames as MCP image blocks, scene/OCR/audio context, and an explicit honesty contract. This is the tool a connected AI should call when a user sends a video link. |
 | `video_ingest` | **One-call ingestion**: resolve → download to R2 → decode frames → optional audio/transcript/analysis. The primary tool for "give me this public video so I can see it". |
 | `video_inspect_url` | Metadata + frames for a public page/media URL (the acceptance path used by the live TikTok test). |
 | `video_download_public` | Bounded download to an expiring R2 artifact only. |
@@ -40,8 +42,8 @@ signature/cipher, bypass a private account, or decrypt DRM.
 
 ## MCP result visibility
 
-`video_ingest`, `video_extract_frames`, `video_get_frame`, and the frame
-portion of `video_inspect_url` include native MCP content blocks:
+`inspect_video`, `video_ingest`, `video_extract_frames`, `video_get_frame`, and
+the frame portion of `video_inspect_url` include native MCP content blocks:
 
 ```json
 {
@@ -59,6 +61,112 @@ and a frame that has neither delivery path is reported as `FRAMES_UNAVAILABLE`.
 A thumbnail or an image returned by OpenGraph is never put in the `frames` array.
 
 ## Tool contracts
+
+### `inspect_video` (DEMO 0.6.1)
+
+The single entry point for "the user sent a video link". The AI calls it
+automatically — server `instructions` and the tool description tell ChatGPT-like
+clients to invoke it when the user asks about a video's contents, requests a
+reaction, asks for an explanation, or sends only the link. The user never
+downloads the video, extracts frames, uploads screenshots, provides timestamps
+or chains lower-level tools.
+
+Input (only `url` is required):
+
+```json
+{
+  "url": "string (public page, direct media file, or TikTok/Instagram/X/Reddit/YouTube link incl. vt./vm. short URLs)",
+  "userIntent": "string? — the user's original message, e.g. 'React to this'",
+  "question": "string? — the explicit question, e.g. 'Is this real?'",
+  "reactionMode": "boolean? — explicit override; auto-detected when omitted",
+  "frameCount": "number? — 1..16; duration-aware plan when omitted",
+  "timestamps": "number[]? — explicit seconds; automatic plan when omitted",
+  "includeMetadata": "boolean = true",
+  "includeAudio": "boolean = false — best-effort, Cloudflare-compatible capture only",
+  "analyzeScenes": "boolean = true",
+  "analyzeOnScreenText": "boolean = true"
+}
+```
+
+Automatic behaviour:
+
+* **Intent detection** (`src/video/intent.ts`): "react", "what do you think",
+  "look at this", "watch this", "rate the vibe", 💀-style emoji — or a bare link
+  with no message — enable `reactionMode`. Questions map to an analysis focus:
+  `authenticity` ("is this real?"), `text_ocr` ("what does the text say?"),
+  `ending` ("what happens at the end?"), `beginning`, `scary`, `humor`, `people`,
+  `game`, `summary`. The focus biases frame allocation and adds a *curated*
+  hint to the vision prompt — raw user text is never injected into the prompt.
+* **Dynamic frame plan** (`src/video/frame-plan.ts`): under 10 s → 5–8 frames;
+  10–60 s → 8–12; longer → up to 16 with strict caps; unknown duration → 8 and
+  even sampling once the browser decodes the real duration. The first and final
+  meaningful frames are always included; `ending`/`beginning` focuses pack about
+  half the budget into the relevant quarter; near-duplicate timestamps (<100 ms
+  apart) are removed.
+* **Real frames**: decoding happens exactly like `video_ingest`'s frame path —
+  Cloudflare Browser Rendering seeks the actual `<video>` element and DEMO
+  screenshots the rendered pixels. Frames within the inline cap travel as MCP
+  `image` content blocks (in frame order, before the JSON manifest); every
+  stored frame also gets a short-lived R2 `imageReference`. Thumbnails, cover
+  images, metadata and webpage screenshots are never returned as frames.
+* **Scenes / OCR**: `analyzeScenes` and `analyzeOnScreenText` run frame-grounded
+  analysis through the optional server-side vision model (up to
+  `LIMITS.videoMaxVisionFrames` frames). Without a model the fields are `null`
+  and a limitation says so — the calling vision model can still read text and
+  scenes directly from the returned frame images.
+* **Audio**: only when `includeAudio` is true, via the existing browser
+  `captureStream`/`MediaRecorder` path, with optional speech-to-text on the
+  captured artifact. `audioStatus` is `"available" | "unavailable" | "failed"`;
+  nothing is fabricated and visual analysis never depends on audio.
+* **Policy gates** run before browser time is spent: SSRF guard (incl. private
+  IPs → `blocked_url`), declared size > `VIDEO_MAX_DOWNLOAD_MB` →
+  `DOWNLOAD_TOO_LARGE`, known duration > `VIDEO_MAX_DURATION_SECONDS` →
+  duration-policy failure.
+
+Result (JSON manifest; `frames[].image` names the MCP image block that carries
+the actual pixels, e.g. `mcp_image_block_0`):
+
+```json
+{
+  "tool": "inspect_video",
+  "inspectionStatus": "complete | partial | failed",
+  "source": { "platform": "…", "url": "…", "resolvedUrl": "…", "durationSeconds": 9.2, "width": 720, "height": 1280, "title": "…", "mimeType": "video/mp4" },
+  "intent": { "userIntent": "…", "question": "…", "reactionMode": true, "focus": "reaction" },
+  "frames": [{ "timestamp": 0.184, "image": "mcp_image_block_0", "mimeType": "image/jpeg", "bytes": 98213, "imageReference": "https://…/screenshots/<id>", "sceneDescriptionHint": "…" }],
+  "detectedScenes": [{ "start": 0.184, "end": 4.6, "significance": "…" }],
+  "extractedText": ["…"],
+  "audioStatus": null,
+  "transcript": null,
+  "framesDelivered": 7,
+  "imageBlocksDelivered": 7,
+  "visualEvidenceDelivered": true,
+  "error": null,
+  "message": null,
+  "challenge": { "detected": false, "kind": null, "reason": null },
+  "limitations": ["…"],
+  "honestyNote": "…",
+  "responseGuidance": "…"
+}
+```
+
+Status semantics:
+
+* `complete` — every planned frame decoded and delivered as inline MCP image
+  blocks, no stage errors.
+* `partial` — real frames delivered but something was reduced: reference-only
+  delivery (inline budget exhausted), fewer frames than planned, or a requested
+  audio extraction failed.
+* `failed` — no frames at all; the MCP result is an error (`isError: true`) with
+  the stable code (`blocked_url`, `VIDEO_NOT_FOUND`, `VIDEO_NOT_PUBLIC`,
+  `PLATFORM_BLOCKED`, `DOWNLOAD_TOO_LARGE`, `FRAMES_UNAVAILABLE`, …),
+  `frames: []` and `visualEvidenceDelivered: false`.
+
+Honesty contract: `visualEvidenceDelivered` is true only when actual decoded
+frame pixels reached the caller. `honestyNote` states what the AI may claim:
+with frames — describe what is visible, never claim continuous playback, never
+invent audio/dialogue; without frames — the AI MUST NOT claim to have seen the
+video. The MCP server `instructions` repeat this rule at the protocol level, so
+clients that read server instructions apply it before any tool call.
 
 ### `video_ingest`
 
@@ -250,9 +358,17 @@ DEMO_MCP_LIVE=1 LIVE_WORKER_URL=https://demo-mcp.<sub>.workers.dev npm run test:
    accepted outcome only when the response is explicit.
 3. `video_inspect_url` on the supplied short link
    `https://vt.tiktok.com/ZSq4b6A3K/` with the same honest pass criteria.
-4. **Failure honesty**: a private IP is rejected as `blocked_url` before any
-   request; a public URL with no video fails with a stable code and zero
-   frames.
+4. `inspect_video` on a **plain public MP4 link with no other arguments**:
+   the automatic flow must enable reaction mode, decode frames, return them as
+   consumable MCP image blocks (validated JPEG/PNG bytes) and/or HTTPS
+   references, and carry the honesty note.
+5. `inspect_video` on the supplied short link `https://vt.tiktok.com/ZSqVLjkpU/`
+   with `userIntent: "React to this:"`: pass with real frames, or with an
+   explicit `failed` status, a stable error code, `frames: []` and a
+   `honestyNote` forbidding the AI from claiming it saw the video.
+6. **Failure honesty**: a private IP is rejected as `blocked_url` before any
+   request (for both `video_ingest` and `inspect_video`); a public URL with no
+   video fails with a stable code and zero frames.
 
 **Sandbox vs. live.** The suite prefights the worker (`/health`) and
 distinguishes three very different failures:
