@@ -22,6 +22,16 @@ export type StreamSource =
   | "tiktok.playApi"
   | "tiktok.downloadAddr"
   | "tiktok.imagePost"
+  | "instagram.video_url"
+  | "instagram.playable_url"
+  | "youtube.format_url"
+  | "youtube.hls"
+  | "youtube.dash"
+  | "x.variant"
+  | "x.hls"
+  | "reddit.fallback"
+  | "reddit.hls"
+  | "reddit.dash"
   | "json_ld.contentUrl"
   | "og.video"
   | "html.video_element"
@@ -126,10 +136,14 @@ export function unsignedUrlShape(url: string): string {
 
 function kindForSource(source: StreamSource, url: string): StreamKind {
   if (source === "tiktok.imagePost" || /\.(?:jpe?g|png|webp|gif|avif)(?:$|[?#])/i.test(url)) return "image";
+  // Platform manifest URLs do not always end in .m3u8/.mpd (YouTube's manifest
+  // URLs are opaque), so the source is authoritative for manifests.
+  if (source.endsWith(".hls") || source.endsWith(".dash")) return "manifest";
   if (/\.m3u8(?:$|[?#])/i.test(url) || /\.mpd(?:$|[?#])/i.test(url)) return "manifest";
   if (/\.(?:mp3|m4a|wav|aac|flac)(?:$|[?#])/i.test(url)) return "audio";
   if (source === "tiktok.downloadAddr") return "download";
   if (source.startsWith("tiktok.")) return "play";
+  if (source.startsWith("instagram.") || source.startsWith("youtube.") || source.startsWith("x.") || source.startsWith("reddit.")) return "play";
   if (source === "direct_url") return "play";
   return "page";
 }
@@ -188,6 +202,11 @@ function sourceScore(candidate: StreamCandidate): number {
     case "tiktok.playAddrUrlList":
     case "tiktok.bitrateInfo":
     case "tiktok.playApi":
+    case "instagram.video_url":
+    case "instagram.playable_url":
+    case "youtube.format_url":
+    case "x.variant":
+    case "reddit.fallback":
       return 50;
     case "json_ld.contentUrl":
       return 45;
@@ -199,6 +218,12 @@ function sourceScore(candidate: StreamCandidate): number {
       return 55;
     case "html.literal_url":
       return 20;
+    case "youtube.hls":
+    case "youtube.dash":
+    case "x.hls":
+    case "reddit.hls":
+    case "reddit.dash":
+      return 15;
     default:
       return 10;
   }

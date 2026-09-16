@@ -130,6 +130,7 @@ export function detectMediaSignature(bytes: Uint8Array, contentTypeHint: string 
         const brandLabel = brandKey.trim();
         if (ISO_BRANDS_MOV.has(brandKey)) return signature(bytes, "mov", "video", "quicktime (mov)", `ISO base media file, brand "${brandLabel}"`, brand);
         if (ISO_BRANDS_AUDIO.has(brandKey)) return signature(bytes, "m4a", "audio", "mpeg-4 audio (m4a)", `ISO base media file, audio brand "${brandLabel}"`, brand);
+        if (brandKey === "avif" || brandKey === "avis") return signature(bytes, "avif", "image", "avif image", `AVIF still image, brand "${brandLabel}" — a still image, not a video stream`, brand);
         if (brandLabel.startsWith("3g")) return signature(bytes, "3gp", "video", "3gpp", `ISO base media file, brand "${brandLabel}"`, brand);
         if (fourcc === "ftyp" || fourcc === "styp") {
           const known = ISO_BRANDS_VIDEO.has(brandKey);
@@ -150,7 +151,7 @@ export function detectMediaSignature(bytes: Uint8Array, contentTypeHint: string 
 
   // ── Ogg (video or audio) ──
   if (ascii(bytes, 0, 4) === "OggS") {
-    const head = ascii(bytes, 0, 64);
+    const head = ascii(bytes, 0, 64).toLowerCase();
     if (head.includes("theora") || head.includes("vp8") || head.includes("uvp")) return signature(bytes, "ogg", "video", "ogg video", "OggS container with a video codec header");
     if (head.includes("vorbis") || head.includes("opus") || head.includes("flac")) return signature(bytes, "ogg", "audio", "ogg audio", "OggS container with an audio codec header");
     return signature(bytes, "ogg", "video", "ogg", "OggS container (codec not identified in the sample)");
@@ -175,7 +176,6 @@ export function detectMediaSignature(bytes: Uint8Array, contentTypeHint: string 
   if (startsWith(bytes, [0xff, 0xd8, 0xff])) return signature(bytes, "jpeg", "image", "jpeg image", "JPEG image — a thumbnail or cover image, not a video stream");
   if (startsWith(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return signature(bytes, "png", "image", "png image", "PNG image — a thumbnail, poster or screenshot, not a video stream");
   if (ascii(bytes, 0, 4) === "GIF8") return signature(bytes, "gif", "image", "gif image", "GIF image — an animated still, not a decodable video stream");
-  if (bytes.byteLength >= 12 && ascii(bytes, 4, 8) === "ftypavif") return signature(bytes, "avif", "image", "avif image", "AVIF image — a still image, not a video stream");
   if (ascii(bytes, 0, 2) === "BM") return signature(bytes, "bmp", "image", "bmp image", "BMP image — a still image, not a video stream");
 
   // ── Audio-only containers ──
@@ -346,31 +346,52 @@ export function mp4DurationFromBytes(bytes: Uint8Array): number | null {
   return scanForMvhd(bytes);
 }
 
+/** Read an EBML variable-length integer (vint): the position of the first
+ * set bit gives the byte length, the remaining bits the value. Returns null
+ * for truncated or all-zero input. */
+function readEbmlVint(bytes: Uint8Array, offset: number): { length: number; value: number } | null {
+  if (offset >= bytes.byteLength) return null;
+  const first = bytes[offset];
+  let length = 0;
+  for (let bit = 7; bit >= 0; bit--) {
+    if (first & (1 << bit)) {
+      length = 8 - bit;
+      break;
+    }
+  }
+  if (length === 0 || length > 8 || offset + length > bytes.byteLength) return null;
+  let value = length === 8 ? 0 : first & ((1 << (8 - length)) - 1);
+  for (let k = 1; k < length; k++) value = value * 256 + bytes[offset + k];
+  return { length, value };
+}
+
 /** WebM/Matroska duration lives in an EBML `Segment > Info > Duration` element.
- * A best-effort bounded scan: element id 0x4489 (Duration) followed by a
- * 4/8-byte float, scaled by TimecodeScale (0x2ad7b1). Returns null when the
- * sample does not contain it rather than guessing. */
+ * A best-effort bounded scan for element id 0x2ad7b1 (TimecodeScale, default
+ * 1ms) and 0x4489 (Duration, a 4/8-byte float in timecode ticks). Element data
+ * lengths are parsed as EBML vints, as real muxers write them. Returns null
+ * when the sample does not contain a usable Duration rather than guessing. */
 export function webmDurationFromBytes(bytes: Uint8Array): number | null {
   if (bytes.byteLength < 32) return null;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let timecodeScale = 1_000_000;
   for (let i = 0; i + 4 <= bytes.byteLength; i++) {
     if (bytes[i] === 0x2a && bytes[i + 1] === 0xd7 && bytes[i + 2] === 0xb1) {
-      const size = bytes[i + 3];
-      if (size >= 1 && size <= 4 && i + 4 + size <= bytes.byteLength) {
+      const vint = readEbmlVint(bytes, i + 3);
+      if (vint && vint.value >= 1 && vint.value <= 8 && i + 3 + vint.length + vint.value <= bytes.byteLength) {
         let value = 0;
-        for (let j = 0; j < size; j++) value = value * 256 + bytes[i + 4 + j];
+        for (let j = 0; j < vint.value; j++) value = value * 256 + bytes[i + 3 + vint.length + j];
         if (value > 0) timecodeScale = value;
       }
     }
     if (bytes[i] === 0x44 && bytes[i + 1] === 0x89) {
-      const size = bytes[i + 2];
-      if ((size === 4 || size === 8) && i + 3 + size <= bytes.byteLength) {
-        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-        const raw = size === 4 ? view.getFloat32(i + 3) : view.getFloat64(i + 3);
-        if (Number.isFinite(raw) && raw > 0) {
-          const seconds = (raw * timecodeScale) / 1_000_000_000;
-          if (plausibleDuration(seconds)) return seconds;
-        }
+      const vint = readEbmlVint(bytes, i + 2);
+      if (!vint || (vint.value !== 4 && vint.value !== 8)) continue;
+      const dataAt = i + 2 + vint.length;
+      if (dataAt + vint.value > bytes.byteLength) continue;
+      const raw = vint.value === 4 ? view.getFloat32(dataAt) : view.getFloat64(dataAt);
+      if (Number.isFinite(raw) && raw > 0) {
+        const seconds = (raw * timecodeScale) / 1_000_000_000;
+        if (plausibleDuration(seconds)) return seconds;
       }
     }
   }
@@ -424,6 +445,20 @@ export function imageDimensions(bytes: Uint8Array): { width: number; height: num
       return { width: (bits & 0x3fff) + 1, height: ((bits >> 14) & 0x3fff) + 1 };
     }
   }
+  // BMP: DIB header at offset 14 carries width/height as signed 32-bit LE.
+  // A negative height means top-down row order; the pixel size is the same.
+  if (bytes[0] === 0x42 && bytes[1] === 0x4d && bytes.byteLength >= 26) {
+    const width = view.getInt32(18, true);
+    const height = view.getInt32(22, true);
+    if (width > 0 && width <= 100_000 && height !== 0 && Math.abs(height) <= 100_000) {
+      return { width, height: Math.abs(height) };
+    }
+  }
+  // AVIF: dimensions live in the meta > iprp > ipco > ispe box chain.
+  if (bytes.byteLength >= 12 && ascii(bytes, 4, 4) === "ftyp" && (ascii(bytes, 8, 4) === "avif" || ascii(bytes, 8, 4) === "avis")) {
+    const avif = avifDimensions(bytes);
+    if (avif) return avif;
+  }
   // JPEG: walk segments to the first SOFn marker.
   if (bytes[0] === 0xff && bytes[1] === 0xd8) {
     let offset = 2;
@@ -448,4 +483,51 @@ export function imageDimensions(bytes: Uint8Array): { width: number; height: num
     }
   }
   return null;
+}
+
+/**
+ * Read AVIF dimensions from the `ispe` (image spatial extents) box nested
+ * under `meta` > `iprp` > `ipco`. A strictly bounded nested walk: unknown
+ * boxes are skipped by their declared size, malformed sizes abort the walk,
+ * and implausible dimensions are rejected rather than returned.
+ */
+function avifDimensions(bytes: Uint8Array): { width: number; height: number } | null {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const readBox = (offset: number, end: number): { type: string; header: number; size: number } | null => {
+    if (offset + 8 > end) return null;
+    let size = view.getUint32(offset);
+    const type = ascii(bytes, offset + 4, 4);
+    let header = 8;
+    if (size === 1) {
+      if (offset + 16 > end) return null;
+      size = view.getUint32(offset + 8) * 2 ** 32 + view.getUint32(offset + 12);
+      header = 16;
+    } else if (size === 0) {
+      size = end - offset;
+    }
+    if (!Number.isFinite(size) || size < header || offset + size > end) return null;
+    return { type, header, size };
+  };
+  const search = (start: number, end: number, depth: number): { width: number; height: number } | null => {
+    if (depth > 6) return null;
+    let offset = start;
+    let boxes = 0;
+    while (offset + 8 <= end && boxes < 64) {
+      const box = readBox(offset, end);
+      if (!box) return null;
+      boxes++;
+      const payloadStart = offset + box.header + (box.type === "meta" ? 4 : 0);
+      if (box.type === "ispe" && box.size >= 20 && payloadStart + 8 <= end) {
+        const width = view.getUint32(payloadStart + 4);
+        const height = view.getUint32(payloadStart + 8);
+        if (width > 0 && width <= 100_000 && height > 0 && height <= 100_000) return { width, height };
+      } else if ((box.type === "meta" || box.type === "iprp" || box.type === "ipco") && payloadStart < offset + box.size) {
+        const found = search(payloadStart, Math.min(offset + box.size, end), depth + 1);
+        if (found) return found;
+      }
+      offset += box.size;
+    }
+    return null;
+  };
+  return search(0, view.byteLength, 0);
 }

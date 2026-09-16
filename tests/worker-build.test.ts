@@ -30,6 +30,7 @@ describe("Cloudflare Worker build", () => {
       // Every declared binding must be present in the deploy plan.
       expect(output).toMatch(/BROWSER_SESSIONS/);
       expect(output).toMatch(/SCREENSHOTS/);
+      expect(output).toMatch(/env\.AI/);
       expect(output).not.toMatch(/Error:|ERROR:/);
     },
     300_000,

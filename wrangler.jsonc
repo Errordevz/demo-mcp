@@ -31,11 +31,12 @@
       "new_sqlite_classes": ["BrowserSession"]
     }
   ],
-  // Optional: Workers AI binding. Enables server-side speech-to-text
-  // (video_transcribe) and frame-grounded scene/OCR labels (video_analyze,
-  // video_react, inspect_video). Everything else — resolution, verified byte
-  // retrieval, frame decoding, artifacts — works without it.
-  // "ai": { "binding": "AI" },
+  // Workers AI binding. Enables server-side speech-to-text (video_transcribe)
+  // and frame-grounded scene/OCR labels (video_analyze, video_react,
+  // inspect_video). Everything else — resolution, verified byte retrieval,
+  // frame decoding, artifacts — works without it, and every AI-dependent step
+  // degrades to an explicit structured "unavailable" when the binding is absent.
+  "ai": { "binding": "AI" },
   "vars": {
     "DEMO_PLATFORM_ORIGIN": "https://demo-platform.pages.dev",
     "BROWSER_PROVIDER": "cloudflare",

@@ -278,18 +278,6 @@ function frameTimestamps(duration: number | null, request: FrameRequest, maxDura
   return values.slice(0, maxFrames);
 }
 
-/**
- * Parse a duration out of a bounded byte sample without any media library.
- *
- * Delegates to the shared container probe so the download path and the
- * streaming `video_fetch` path apply exactly the same policy check. This is a
- * header read, never a decoder.
- */
-function durationFromBytes(bytes: Uint8Array, contentType: string | null): number | null {
-  if (!(contentType === "video/mp4" || contentType === "video/quicktime" || contentType === "video/webm" || contentType === "video/x-matroska" || contentType === "application/octet-stream" || contentType === null)) return null;
-  return durationFromSample(bytes);
-}
-
 function normaliseTranscript(raw: any, language: string | null, duration: number | null, provider: string): VideoTranscript {
   const text = (typeof raw?.text === "string" ? raw.text : typeof raw?.transcription === "string" ? raw.transcription : "").trim().slice(0, 200_000);
   const rawSegments = Array.isArray(raw?.segments) ? raw.segments : Array.isArray(raw?.chunks) ? raw.chunks : [];
@@ -1157,34 +1145,209 @@ export class VideoProcessor {
    * `download()` (which resolves first) and `ingest()` (which reuses its own
    * resolution so the page is fetched once, not twice).
    */
+  /**
+   * Download an already resolved media URL to expiring R2 storage. Shared by
+   * `download()` (which resolves first) and `ingest()` (which reuses its own
+   * resolution so the page is fetched once, not twice).
+   *
+   * This is the same streaming pipeline as `video_fetch`: the body is piped
+   * into R2 through `storeStream` (never buffered whole), the container is
+   * proven from its byte signature, the duration policy is verified from page
+   * metadata, the head sample or a bounded tail read, and any verification
+   * failure deletes the partial object. The response contract is unchanged —
+   * `{ resolution, artifact }` with a content-addressed `video_<sha256>`
+   * artifact on success — so `video_download_public` and `video_ingest` keep
+   * their documented shape while gaining the hardened retrieval path.
+   */
   async downloadResolved(resolution: VideoResolution, requestedMb?: number): Promise<{ resolution: VideoResolution; artifact: VideoArtifact | null; error?: string; message?: string }> {
     if (!resolution.success || !resolution.mediaUrl) return { resolution, artifact: null };
     const maxBytes = this.maxDownloadBytes(requestedMb);
-    let responseResult;
+    const maxDuration = this.maxDuration();
+    const fail = (error: string, message: string): { resolution: VideoResolution; artifact: VideoArtifact | null; error: string; message: string } => ({ resolution, artifact: null, error, message });
+
+    // Declared-size gate before any bytes are pulled.
+    if (resolution.metadata.contentLength !== null && resolution.metadata.contentLength > maxBytes) {
+      return fail("DOWNLOAD_TOO_LARGE", `The stream declares ${formatBytes(resolution.metadata.contentLength)}, above the ${formatBytes(maxBytes)} policy limit.`);
+    }
+
+    let responseResult: Awaited<ReturnType<typeof fetchPublic>>;
     try {
       responseResult = await fetchPublic(resolution.mediaUrl, this.env, { method: "GET", headers: { accept: "video/*,application/octet-stream;q=0.8" } }, { timeoutMs: LIMITS.videoDownloadTimeoutMs, referer: resolution.resolvedUrl ?? resolution.sourceUrl });
-      if (!responseResult.response.ok) throw videoError("VIDEO_NOT_PUBLIC", `The public media URL returned HTTP ${responseResult.response.status}.`);
-      const type = contentType(responseResult.response) ?? resolution.metadata.contentType;
-      if (isPlaylistContentType(type, responseResult.finalUrl)) throw videoError("UNSUPPORTED_MEDIA", "The public URL is an HLS playlist, not a bounded video file. Browser playback may still work when the platform exposes it normally.");
-      if (!isVideoContentType(type) && !looksLikeMediaUrl(responseResult.finalUrl)) throw videoError("UNSUPPORTED_MEDIA", `The public media response is not a supported video content type${type ? ` (${type})` : ""}.`);
-      const bytes = await readBounded(responseResult.response, maxBytes, LIMITS.videoDownloadTimeoutMs);
-      const duration = durationFromBytes(bytes, type) ?? resolution.metadata.durationSeconds;
-      if (duration === null) throw videoError("UNSUPPORTED_MEDIA", "The public video duration could not be verified from page metadata or the bounded MP4 header, so DEMO refused to persist it.");
-      if (duration > this.maxDuration()) throw videoError("VIDEO_NOT_PUBLIC", `The video duration (${duration.toFixed(1)}s) exceeds the ${this.maxDuration()}s processing limit.`);
-      if (!this.artifacts.available) throw new BrowserError("capability_unavailable", this.artifacts.unavailableReason(), { capability: "video_artifact_storage" });
-      const artifactType = isVideoContentType(type) ? (type as string) : "video/mp4";
-      const artifact = await this.artifacts.store(bytes, "video", artifactType, {
-        durationSeconds: duration,
-        width: resolution.metadata.width,
-        height: resolution.metadata.height,
-        source: resolution.sourceUrl,
-      });
-      resolution.metadata = { ...resolution.metadata, contentType: type, contentLength: bytes.byteLength, durationSeconds: duration };
-      return { resolution: { ...resolution, status: "downloaded" }, artifact };
     } catch (error) {
       const normal = asBrowserError(error);
-      return { resolution, artifact: null, error: normal.code, message: normal.message };
+      return fail(normal.code, normal.message);
     }
+    const response = responseResult.response;
+    const type = contentType(response) ?? resolution.metadata.contentType;
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      return fail("VIDEO_NOT_PUBLIC", `The public media URL returned HTTP ${response.status}.`);
+    }
+    if (isPlaylistContentType(type, responseResult.finalUrl)) {
+      await response.body?.cancel().catch(() => undefined);
+      return fail("UNSUPPORTED_MEDIA", "The public URL is an HLS playlist, not a bounded video file. Browser playback may still work when the platform exposes it normally.");
+    }
+    if (!isVideoContentType(type) && !looksLikeMediaUrl(responseResult.finalUrl)) {
+      await response.body?.cancel().catch(() => undefined);
+      return fail("UNSUPPORTED_MEDIA", `The public media response is not a supported video content type${type ? ` (${type})` : ""}.`);
+    }
+    // Second size gate: the response's own Content-Length may disagree with the
+    // probe. Refuse before a single byte is streamed.
+    const declaredLength = parseLength(response.headers.get("content-length"));
+    if (declaredLength !== null && declaredLength > maxBytes) {
+      await response.body?.cancel().catch(() => undefined);
+      return fail("DOWNLOAD_TOO_LARGE", `The media response declares ${formatBytes(declaredLength)}, above the ${formatBytes(maxBytes)} policy limit, so the body was never streamed.`);
+    }
+    if (!this.artifacts.available) {
+      await response.body?.cancel().catch(() => undefined);
+      return fail("capability_unavailable", this.artifacts.unavailableReason());
+    }
+
+    const artifactType = isVideoContentType(type) ? (type as string) : "video/mp4";
+    const storeMetadata = {
+      durationSeconds: resolution.metadata.durationSeconds,
+      width: resolution.metadata.width,
+      height: resolution.metadata.height,
+      source: resolution.sourceUrl,
+    };
+
+    // Stream when the runtime gives us a body; fall back to a bounded buffered
+    // read only when there is no stream to pipe (e.g. an empty mock body).
+    // Either way the bytes are signature- and duration-verified and the partial
+    // object is deleted on failure — the buffered path verifies before storing
+    // so there is never a partial object to clean up.
+    if (!response.body) {
+      let bytes: Uint8Array;
+      try {
+        bytes = await readBounded(response, maxBytes, LIMITS.videoDownloadTimeoutMs);
+      } catch (error) {
+        const normal = asBrowserError(error);
+        return fail(normal.code, normal.message);
+      }
+      const signature = detectMediaSignature(bytes.subarray(0, LIMITS.videoHeadProbeBytes), type);
+      if (!signature.isVideo) {
+        return fail("NOT_A_VIDEO", notAVideoMessage(signature));
+      }
+      const duration = resolution.metadata.durationSeconds ?? durationFromSample(bytes.subarray(0, LIMITS.videoHeadProbeBytes), signature) ?? durationFromSample(bytes.subarray(Math.max(0, bytes.byteLength - LIMITS.videoTailProbeBytes)), signature);
+      if (duration === null) {
+        return fail("UNSUPPORTED_MEDIA", "The public video duration could not be verified from page metadata or the container headers of the retrieved bytes, so DEMO refused to persist it.");
+      }
+      if (duration > maxDuration) {
+        return fail("VIDEO_NOT_PUBLIC", `The video duration (${duration.toFixed(1)}s) exceeds the ${maxDuration}s processing limit.`);
+      }
+      try {
+        const artifact = await this.artifacts.store(bytes, "video", artifactType, {
+          durationSeconds: duration,
+          width: resolution.metadata.width,
+          height: resolution.metadata.height,
+          source: resolution.sourceUrl,
+        });
+        await this.artifacts.patchMetadata(artifact.reference, { durationSeconds: String(duration), verifiedContainer: signature.container ?? signature.detectedAs });
+        const resolved: VideoResolution = {
+          ...resolution,
+          status: "downloaded",
+          metadata: { ...resolution.metadata, contentType: type, contentLength: bytes.byteLength, durationSeconds: duration },
+        };
+        return { resolution: resolved, artifact: { ...artifact, durationSeconds: duration } };
+      } catch (error) {
+        const normal = asBrowserError(error);
+        return fail(normal.code, normal.message);
+      }
+    }
+
+    let outcome: StreamStoreOutcome;
+    try {
+      outcome = await this.artifacts.storeStream(response.body, "video", artifactType, storeMetadata, {
+        maxBytes,
+        headBytes: LIMITS.videoHeadProbeBytes,
+        digestBufferBytes: LIMITS.videoDigestBufferBytes,
+        timeoutMs: LIMITS.videoDownloadTimeoutMs,
+      });
+    } catch (error) {
+      const normal = asBrowserError(error);
+      return fail(normal.code, normal.message);
+    }
+    if (outcome.aborted || !outcome.artifact) {
+      return fail(outcome.aborted?.code ?? "PROCESSING_TIMEOUT", outcome.aborted?.message ?? "The video body could not be stored.");
+    }
+
+    // Prove the bytes are really a video; delete the partial object otherwise.
+    const signature = detectMediaSignature(outcome.head, type);
+    if (!signature.isVideo) {
+      await this.artifacts.delete(outcome.artifact.reference);
+      return fail("NOT_A_VIDEO", notAVideoMessage(signature));
+    }
+
+    // Verify the duration policy from real container data: page metadata, else
+    // the head sample, else a bounded tail range read of the stored object.
+    let duration = resolution.metadata.durationSeconds;
+    let durationSource: string | null = duration !== null ? "page_metadata" : null;
+    if (duration === null) {
+      const fromHead = durationFromSample(outcome.head, signature);
+      if (fromHead !== null) {
+        duration = fromHead;
+        durationSource = "head_sample";
+      }
+    }
+    if (duration === null) {
+      const tail = await this.artifacts.getRange(outcome.artifact.reference, Math.max(0, outcome.bytes - LIMITS.videoTailProbeBytes), LIMITS.videoTailProbeBytes);
+      const fromTail = tail ? durationFromSample(tail.bytes, signature) : null;
+      if (fromTail !== null) {
+        duration = fromTail;
+        durationSource = "artifact_tail";
+      }
+    }
+    if (duration === null) {
+      await this.artifacts.delete(outcome.artifact.reference);
+      return fail("UNSUPPORTED_MEDIA", `The container signature verified as ${signature.container ?? signature.detectedAs}, but no duration could be read from page metadata or the ISO-BMFF/EBML headers of the streamed bytes, so DEMO refused to persist it.`);
+    }
+    if (duration > maxDuration) {
+      await this.artifacts.delete(outcome.artifact.reference);
+      return fail("VIDEO_NOT_PUBLIC", `The video duration (${duration.toFixed(1)}s) exceeds the ${maxDuration}s processing limit.`);
+    }
+
+    // The legacy contract is content-addressed: promote the streamed token
+    // object to its `video_<sha256>` key when the digest is known. The verified
+    // duration/container ride along in the same copy. When the runtime could
+    // not digest the stream (Node fallback past the buffer bound) the token
+    // artifact is kept and patched in place instead of faking a hash.
+    let artifact: VideoArtifact = outcome.artifact;
+    const verifiedPatch: Record<string, string> = {
+      durationSeconds: String(duration),
+      ...(durationSource ? { durationSource } : {}),
+      verifiedContainer: signature.container ?? signature.detectedAs,
+    };
+    if (outcome.sha256) {
+      const promoted = await this.artifacts.promoteToContentAddress(
+        outcome.artifact.reference,
+        outcome.sha256,
+        {
+          bytes: outcome.bytes,
+          contentType: artifactType,
+          durationSeconds: duration,
+          width: resolution.metadata.width,
+          height: resolution.metadata.height,
+          expiresAt: outcome.artifact.expiresAt,
+        },
+        verifiedPatch,
+      );
+      if (promoted) {
+        artifact = promoted;
+      } else {
+        await this.artifacts.patchMetadata(artifact.reference, verifiedPatch);
+        artifact = { ...artifact, durationSeconds: duration, sha256: outcome.sha256 };
+      }
+    } else {
+      await this.artifacts.patchMetadata(artifact.reference, verifiedPatch);
+      artifact = { ...artifact, durationSeconds: duration };
+    }
+
+    const resolved: VideoResolution = {
+      ...resolution,
+      status: "downloaded",
+      metadata: { ...resolution.metadata, contentType: type, contentLength: outcome.bytes, durationSeconds: duration },
+    };
+    return { resolution: resolved, artifact };
   }
 
   async extractFrames(input: VideoInput, request: FrameRequest = {}): Promise<FrameCaptureResult> {

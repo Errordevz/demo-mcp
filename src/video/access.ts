@@ -93,7 +93,7 @@ export function classifyPlatformStatusCode(platform: string, code: number | null
 /** Text the page itself renders when an item cannot be shown publicly. */
 const TEXT_SIGNALS: Array<{ status: VideoAccessStatus; label: string; test: RegExp }> = [
   { status: "deleted", label: "The page says this video was removed or deleted.", test: /\b(?:video (?:has been )?(?:removed|deleted)|this (?:video|content|post) (?:is|was) (?:no longer available|removed|deleted)|post (?:has been )?deleted|taken down)\b/i },
-  { status: "private", label: "The page says this video is private or followers-only.", test: /\b(?:private (?:video|account|post)|this video is private|only (?:the creator|me|followers) can (?:view|see)|followers-only|hidden by the creator)\b/i },
+  { status: "private", label: "The page says this video is private or followers-only.", test: /\b(?:private (?:video|account|post|community|subreddit)|this video is private|only (?:the creator|me|followers) can (?:view|see)|followers-only|hidden by the creator|these posts are protected|must be invited to visit this community)\b/i },
   { status: "region_restricted", label: "The page says this video is not available in this region.", test: /\b(?:not available in (?:your|this) (?:country|region)|region[- ](?:restricted|locked)|geo[- ]?(?:blocked|restricted)|unavailable in your (?:country|region)|blocked in your country)\b/i },
   { status: "not_found", label: "The page says this video or account could not be found.", test: /\b(?:couldn'?t find (?:this|the) (?:account|page|video)|video (?:is )?not found|page not available|content (?:is )?not available|this (?:page|video|post) (?:doesn'?t|does not) exist|404)\b/i },
   { status: "login_required", label: "The page requires a signed-in session.", test: /\b(?:sign in to (?:continue|view|watch)|log ?in to (?:continue|view|watch)|you must be logged in|authentication required)\b/i },
@@ -107,6 +107,10 @@ export interface AccessClassificationInput {
   httpStatus?: number | null;
   /** Platform item status code from the page's own payload. */
   platformStatusCode?: number | null;
+  /** Precise verdict from a platform's own payload (YouTube playability, a
+   * private-account flag, …). Ranked with the TikTok status code: the
+   * platform's own word about its item. */
+  platformHint?: { status: VideoAccessStatus; label: string } | null;
   /** Challenge detected by the resolver. */
   challenge?: { detected: boolean; kind: string | null; reason: string | null } | null;
   /** Resolver error code (`blocked_url`, `VIDEO_NOT_PUBLIC`, …). */
@@ -149,6 +153,7 @@ export function classifyAccess(input: AccessClassificationInput): AccessStatusIn
 
   const platformStatus = classifyPlatformStatusCode(input.platform ?? "generic", input.platformStatusCode);
   if (platformStatus && platformStatus.status !== "public") return info(platformStatus.status, platformStatus.label);
+  if (input.platformHint && input.platformHint.status !== "public") return info(input.platformHint.status, input.platformHint.label);
 
   const httpStatus = input.httpStatus ?? null;
   if (httpStatus !== null) {

@@ -14,7 +14,7 @@ import type { TikTokAccessFlags, TikTokMusic, TikTokStats } from "../browser/tik
 export type VideoPlatform = "tiktok" | "instagram" | "youtube" | "x" | "reddit" | "generic";
 
 /** Where the reported metadata actually came from. */
-export type VideoMetadataSource = "direct_url" | "http_headers" | "universal" | "sigi" | "json_ld" | "meta" | "none";
+export type VideoMetadataSource = "direct_url" | "http_headers" | "universal" | "sigi" | "platform_payload" | "json_ld" | "meta" | "none";
 
 /** How strongly the chosen media URL was verified. */
 export type VideoVerification =
@@ -68,7 +68,7 @@ export interface VideoResolutionDetail {
   creator: VideoCreator | null;
   /** The post caption. Never a transcript and never generated text. */
   caption: string | null;
-  captionSource: "tiktok_post" | "og_description" | "page_title" | "json_ld" | null;
+  captionSource: "tiktok_post" | "instagram_post" | "youtube_video" | "x_post" | "reddit_post" | "og_description" | "page_title" | "json_ld" | null;
   hashtags: string[];
   createdAt: string | null;
   stats: TikTokStats | null;

@@ -178,28 +178,28 @@ export function describeVideoCapabilities(env: VideoEnv & Record<string, unknown
         shortLinks: true,
         directStreamDiscovery: true,
         frameDecoding: browser.browserAvailable,
-        notes: "Public reels/posts only; login walls and private accounts are reported as access failures.",
+        notes: "Reel/post shortcode, owner, caption, duration and literal video_url/playable_url CDN MP4s are parsed from the page's own shortcode-media JSON; expiring URLs are never persisted. Login walls, private accounts and photo posts (no video track) are reported as precise access failures, never guessed at.",
       },
       {
         platform: "youtube",
         shortLinks: true,
         directStreamDiscovery: false,
         frameDecoding: browser.browserAvailable,
-        notes: "YouTube serves DASH/HLS manifests, not a single bounded MP4, so video_fetch reports UNSUPPORTED_MEDIA for the file download; frames may still be decoded from a publicly playable embed where the platform allows it.",
+        notes: "Video id, title, author, duration and YouTube's own playability verdict (private / login-required / unplayable) are parsed from ytInitialPlayerResponse. Only literal unciphered progressive MP4 URLs are ever used — ciphered renditions are never deciphered and HLS/DASH manifests are reported, never streamed or assembled — so most watch pages resolve metadata without a downloadable file. Frames may still be decoded from a publicly playable embed where the platform allows it.",
       },
       {
         platform: "x",
         shortLinks: false,
         directStreamDiscovery: true,
         frameDecoding: browser.browserAvailable,
-        notes: "Public video.twimg.com MP4s are discovered from the page payload.",
+        notes: "Status id, author, tweet text and video_info MP4 variants (video.twimg.com) are parsed from the page's __NEXT_DATA__ payload; the HLS variant is reported, never streamed. Protected accounts, deleted posts and photo-only posts are reported as precise access failures.",
       },
       {
         platform: "reddit",
         shortLinks: true,
         directStreamDiscovery: true,
         frameDecoding: browser.browserAvailable,
-        notes: "Public v.redd.it media; note Reddit often splits audio into a separate stream, so audio may be unavailable.",
+        notes: "Post id, author, title, duration and the shreddit-player fallback_url are parsed from the public page. The fallback is a video-only DASH rendition (no audio track), so transcription from it is impossible; HLS/DASH manifests are reported, never assembled. Private/quarantined subreddits and image posts are reported as precise access failures.",
       },
       {
         platform: "generic",
@@ -267,7 +267,10 @@ export function describeVideoCapabilities(env: VideoEnv & Record<string, unknown
       kind: "cloudflare-r2",
       ttlSeconds,
       route: "/video-assets/<video|audio>_<64-hex-reference>",
-      cleanup: "Every object carries expiresAt; the route refuses expired objects and an hourly cron deletes them. Configure an R2 lifecycle rule as a second line of defence.",
+      cleanup:
+        "Every object carries expiresAt; the route refuses expired objects and an hourly cron deletes them. " +
+        "Second line of defence: R2 lifecycle rule `demo-video-artifacts-expiry` on prefix `video-artifacts/` " +
+        "(`wrangler r2 bucket lifecycle add <bucket> demo-video-artifacts-expiry video-artifacts/ --expire-days 2`).",
     },
     browser: { available: browser.browserAvailable, provider: browser.provider, reason: browser.reason ?? null },
     providers,
