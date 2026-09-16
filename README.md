@@ -99,7 +99,9 @@ returning).
 
 ## Public video understanding
 
-DEMO 0.5 adds a separate public-media pipeline. It is intentionally conservative:
+DEMO 0.5 adds a separate public-media pipeline, and DEMO 0.6.1 adds
+**automatic video viewing, understanding and natural reactions** on top of it
+(`inspect_video`). The pipeline is intentionally conservative:
 it follows normal HTTP redirects, reads public HTML/JSON/OpenGraph metadata, and
 uses a literal media URL only when a normal public request exposes it. It does
 not use platform-private APIs or cookies and never solves CAPTCHAs, bypasses login
@@ -107,6 +109,7 @@ walls, cracks signed URLs, circumvents DRM, or accesses private accounts.
 
 | Tool | Purpose |
 | --- | --- |
+| `inspect_video` | **The one high-level tool for "watch this" requests (0.6.1)**: the connected AI calls it automatically when a user sends a video URL and asks "What do you think?", "React to this.", "Is this real?", "What happens at the end?" — or sends only the link. It resolves the platform + actual video, derives reaction mode and analysis focus from the user's message, plans a duration/intent-aware frame budget (first, middle, final + focus-biased moments), decodes real frames in Browser Rendering, and returns them as MCP image content blocks plus structured context (source, detected scenes, on-screen text, honest `audioStatus`, `inspectionStatus`). See below. |
 | `video_ingest` | **One-call ingestion of a public video URL** (incl. TikTok `www`/`vm`/`vt` links): safe redirect resolution, bounded download to an expiring R2 artifact, Browser Run frame decoding, optional audio/transcript, and a single structured result with MCP image blocks + artifact URLs. `output_mode`: `frames` \| `video_artifact` \| `analysis` \| `all`. |
 | `video_inspect_url` | Resolve TikTok, Instagram, YouTube, X, Reddit, generic pages, or direct media URLs; return bounded metadata, representative timestamps, transcript status, and actual MCP image blocks when frames decode. |
 | `video_download_public` | Bounded download to an expiring R2 artifact (`video_<sha256>`), with public redirect, content-type, size, duration and timeout checks. |
@@ -116,6 +119,126 @@ walls, cracks signed URLs, circumvents DRM, or accesses private accounts.
 | `video_analyze` | Return frame-grounded scene/OCR/object/action fields. Without successfully decoded frames and a configured vision model it explicitly reports unavailable instead of guessing. |
 | `video_get_frame` | Return one actual frame at a requested timestamp as an MCP image content block when it fits the inline cap. |
 | `video_inspect_pipeline` | **Diagnostic**: runs URL validation → redirect resolution → media discovery → browser access → media retrieval (64 KiB sample) → frame extraction → R2 round trip → artifact URL generation → MCP serialization, and reports exactly which stage failed. No separate key required (standard `/mcp` auth still applies if configured). Never returns secrets. |
+
+### Automatic video viewing & reactions (`inspect_video`, DEMO 0.6.1)
+
+The user only sends the link. No manual downloading, frame extraction,
+screenshot uploading, timestamps, or chained tool calls.
+
+```text
+User sends video URL ("React to this: https://vt.tiktok.com/…" or just the link)
+        ↓
+AI detects the message contains a video (server instructions + tool description)
+        ↓
+AI automatically calls inspect_video { url, userIntent, question? }
+        ↓
+DEMO resolves the platform + actual video (short links, redirects, pages, direct files)
+        ↓
+DEMO plans frames (duration + intent aware) and decodes them in Browser Rendering
+        ↓
+DEMO returns MCP image content blocks + structured analysis context
+        ↓
+AI vision model examines the actual frames
+        ↓
+AI answers the intent naturally (genuine reaction, honest about uncertainty)
+```
+
+Input schema (all optional except `url`):
+
+```json
+{
+  "url": "https://vt.tiktok.com/ZSqVLjkpU/",
+  "userIntent": "React to this",
+  "question": "Is this real?",
+  "reactionMode": null,
+  "frameCount": null,
+  "timestamps": null,
+  "includeMetadata": true,
+  "includeAudio": false,
+  "analyzeScenes": true,
+  "analyzeOnScreenText": true
+}
+```
+
+Automatic defaults:
+
+* **`reactionMode`** — auto-enabled when the user says "react", "what do you
+  think", "look at this", "watch this", "rate the vibe" (💀-style emoji
+  included) **or sends only the link**; an explicit boolean always wins.
+* **`frameCount`** — chosen from the decoded/known duration: 5–8 frames under
+  10 s, 8–12 up to a minute, up to 16 for longer videos (strict pipeline cap).
+* **Frame selection** — always includes the first and final meaningful frames,
+  even coverage in between, near-duplicates removed; "what happens at the end?"
+  packs extra frames into the final quarter, "how does it start?" into the
+  first. Explicit `timestamps` override the plan.
+* **`analyzeScenes` / `analyzeOnScreenText`** — on by default; populated from
+  frame-grounded vision analysis when a server-side model is configured, and
+  reported as unavailable (never guessed) otherwise. The raw frames always
+  travel as MCP image blocks so the *calling* vision model can read text and
+  scenes itself.
+* **`includeAudio`** — opt-in; attempted only through the existing
+  Cloudflare-compatible browser capture path (`captureStream`/`MediaRecorder`),
+  with optional speech-to-text afterwards. `audioStatus` is reported honestly as
+  `"available" | "unavailable" | "failed"` and visual analysis never depends on
+  it. Dialogue is never fabricated.
+
+Result shape (JSON manifest inside the MCP `text` item; the decoded JPEG frames
+travel as separate `type: "image"` content blocks in frame order):
+
+```json
+{
+  "tool": "inspect_video",
+  "inspectionStatus": "complete",
+  "source": { "platform": "tiktok", "url": "https://vt.tiktok.com/…", "durationSeconds": 9.2, "width": 720, "height": 1280 },
+  "intent": { "userIntent": "React to this", "question": null, "reactionMode": true, "focus": "reaction" },
+  "frames": [
+    { "timestamp": 0.184, "image": "mcp_image_block_0", "mimeType": "image/jpeg", "bytes": 98213, "imageReference": "https://demo-mcp.<sub>.workers.dev/screenshots/<id>", "sceneDescriptionHint": null }
+  ],
+  "detectedScenes": [{ "start": 0.184, "end": 4.6, "significance": "hard cut from a calm wide shot to a close-up" }],
+  "extractedText": ["WAIT FOR IT"],
+  "audioStatus": null,
+  "framesDelivered": 7,
+  "imageBlocksDelivered": 7,
+  "visualEvidenceDelivered": true,
+  "limitations": ["…"],
+  "honestyNote": "7 real decoded frame(s) were delivered … sampled frames, not continuous playback …",
+  "responseGuidance": "Reaction mode: … react naturally to what actually happens …"
+}
+```
+
+Honesty contract (enforced by the payload itself):
+
+* `visualEvidenceDelivered` is `true` **only** when real decoded frames were
+  returned; thumbnails, cover images, metadata, timestamps, MP4 URLs and webpage
+  screenshots never count.
+* `inspectionStatus` is `complete` (every planned frame decoded and delivered as
+  inline image blocks), `partial` (some evidence — e.g. frames delivered but
+  reference-only, fewer frames than planned, or audio failed) or `failed` (no
+  frames; returned as an MCP error with a stable code).
+* `honestyNote` tells the AI exactly what it may claim: with frames, it may
+  describe what is visible but must not claim continuous playback or invent
+  audio; without frames it **MUST NOT** claim to have seen the video at all.
+* The MCP server `instructions` (sent at initialize) plus the tool description
+  teach ChatGPT-like clients to call `inspect_video` automatically and to answer
+  with a natural, tone-matched reaction instead of a robotic metadata dump.
+
+Expected behaviour examples:
+
+```text
+User: https://example.com/video.mp4
+AI:   "💀 The sudden movement at the end is what makes this so unsettling. …
+       I can't verify whether it's real or staged from the frames alone."
+
+User: React to this: https://example.com/video.mp4
+AI:   "NAH 💀😭 The timing of that reveal is ridiculous. …"
+
+User: What happens in this?
+AI:   "The clip shows a person walking toward the camera. Around the middle,
+       another person enters from the side… I couldn't verify the audio."
+```
+
+The AI is never forced into exaggerated slang — `responseGuidance` asks it to
+match the user's tone while staying accurate.
 
 ### AI visibility is explicit
 
@@ -214,7 +337,9 @@ mapping, MCP serialization and stage reporting — only the
   (`VIDEO_MAX_DURATION_SECONDS`), five redirects, bounded HTML, and finite
   request timeouts. A duration that cannot be verified for a download is rejected
   rather than silently exceeding policy.
-* Frames are capped at eight per call. Audio capture is capped at 120 seconds and
+* Frames are capped at sixteen per call for the public video pipeline
+  (`inspect_video`'s dynamic plan stays inside 5–16 by duration; browser-session
+  `browser_video_frames` sampling remains capped at eight). Audio capture is capped at 120 seconds and
   8 MiB. A best-effort isolate-local rate limit (`VIDEO_RATE_LIMIT_PER_MINUTE`)
   protects expensive browser work; Cloudflare plan limits remain authoritative.
 * Temporary video/audio artifacts use content-addressed keys in the existing R2

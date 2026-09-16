@@ -13,8 +13,27 @@ import { registerVideoTools } from "./src/mcp/video-tools.js";
 import type { VideoEnv } from "./src/video/types.js";
 
 type Env = SessionManagerEnv & VideoEnv & { DEMO_API_KEY?: string; SSRF_GUARD_HTTP_FETCH?: string };
-const VERSION = "0.5.0";
+const VERSION = "0.6.1";
 const SKILLS_API = "https://skills.sh/api/v1";
+
+/**
+ * Server-level guidance surfaced to MCP clients in the initialize result.
+ * It teaches the connected AI the automatic video-viewing behaviour so the
+ * user only ever has to send the link.
+ */
+const SERVER_INSTRUCTIONS = `DEMO is an execution layer with a real persistent browser (Cloudflare Browser Rendering), skills.sh integration and a public video understanding pipeline.
+
+AUTOMATIC VIDEO VIEWING — When a user provides a public video URL (a direct .mp4/.webm file, a public video page, or a TikTok/Instagram/X/Reddit/YouTube link including vt./vm. short links), automatically call the inspect_video tool — without the user having to ask for frame extraction — whenever they:
+  - ask about the video's contents ("What happens?", "Is this real?", "Is this funny?", "Explain this video.", "What does the text say?", "What game is this?", "Who is in this?"),
+  - ask for a reaction ("React to this.", "What do you think of this?", "Look at this", "Watch this.", "Rate the vibe."), or
+  - send only the link with no explanation.
+Pass the user's original message as userIntent and their explicit question as question; inspect_video then derives reaction mode, the frame plan and the analysis focus automatically. Never ask the user to download the video, extract frames, upload screenshots or provide timestamps, and do not chain lower-level video tools for this.
+
+USING THE RESULT — inspect_video returns the actual decoded video frames as MCP image content blocks plus structured context (source, scenes, on-screen text, audio status). Examine those frames, then answer the user's intent naturally: for reaction requests give a genuine, context-aware reaction that matches the user's tone instead of a robotic metadata summary; for questions answer from what is visible and identify the tone (funny, scary, wholesome, impressive, confusing, absurd, suspicious…) when it is reasonably clear.
+
+HONESTY — Never claim to have seen or watched the video unless inspect_video actually returned image content blocks (visualEvidenceDelivered=true) and you examined them. The frames are samples: do not claim to have watched continuous playback, never invent audio, dialogue, or events the frames do not show, and state uncertainty explicitly. If audioStatus is not "available", say the audio could not be verified. If inspection failed or only metadata/a thumbnail is available, say visual inspection was not completed and report the error instead of describing content.
+
+For everything else (browsing, screenshots, sessions, utilities, skills) the individual tool descriptions define the behaviour.`;
 
 function authorized(request: Request, env: Env) {
   if (!env.DEMO_API_KEY) return true;
@@ -149,7 +168,7 @@ async function applyBrowserAction(page: any, action: any) {
 }
 
 function server(env: Env, requestUrl: string | null = null, authorization: string | null = null) {
-  const mcp = new McpServer({ name: "DEMO", version: VERSION }, { capabilities: { tools: {} } });
+  const mcp = new McpServer({ name: "DEMO", version: VERSION }, { capabilities: { tools: {} }, instructions: SERVER_INSTRUCTIONS });
   const sessions = new SessionManager(env, requestUrl);
   const capabilities = sessions.capabilities();
 
@@ -172,6 +191,7 @@ function server(env: Env, requestUrl: string | null = null, authorization: strin
         humanHandoff: capabilities.handoff,
         videoFrames: capabilities.videoFrames,
         publicVideo: true,
+        automaticVideoInspection: true,
         videoArtifacts: Boolean(env.VIDEO_ARTIFACTS ?? env.SCREENSHOTS),
         videoTranscription: Boolean(env.AI || env.TRANSCRIPTION_ENDPOINT),
         accessibilitySnapshot: capabilities.accessibilitySnapshot,
@@ -570,6 +590,7 @@ export const DEMO_TOOL_NAMES = [
   "browser_close",
   "browser_capabilities",
   // Public video understanding
+  "inspect_video",
   "video_inspect_url",
   "video_ingest",
   "video_download_public",
@@ -608,6 +629,7 @@ export default {
       screenshotLinks: capabilities.screenshots,
       liveView: capabilities.liveView,
       publicVideo: true,
+      automaticVideoInspection: true,
       videoArtifacts: Boolean(env.VIDEO_ARTIFACTS ?? env.SCREENSHOTS),
       skillsSh: true,
       composio: false,

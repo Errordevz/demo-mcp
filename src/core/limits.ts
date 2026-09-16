@@ -72,7 +72,9 @@ export const LIMITS = {
   videoMaxRedirects: 5,
   videoMaxHtmlBytes: 2 * 1024 * 1024,
   videoFramesDefaultIntervalSeconds: 8,
-  videoFramesMaxCount: 8,
+  /** Cap for the public video pipeline (`inspect_video` may plan up to this
+   * many frames; browser tools stay at `framesMaxCount`). */
+  videoFramesMaxCount: 16,
   videoFrameTimeoutMs: 45_000,
   videoAudioMaxSeconds: 120,
   videoAudioMaxBytes: 8 * 1024 * 1024,

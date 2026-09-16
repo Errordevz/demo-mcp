@@ -18,7 +18,7 @@ type Env = {
   VIDEO_ARTIFACT_TTL_SECONDS?: string | number;
 };
 
-const VERSION = "0.5.0";
+const VERSION = "0.6.1";
 const DEFAULT_PLATFORM_ORIGIN = "https://demo-platform.pages.dev";
 const LOCAL_ORIGINS = new Set(["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:3000", "http://127.0.0.1:5173"]);
 const startedAt = Date.now();
@@ -86,6 +86,7 @@ function telemetry(env: Env) {
       humanHandoff: capabilities.handoff,
       videoFrames: capabilities.videoFrames,
       publicVideo: true,
+      automaticVideoInspection: true,
       videoArtifacts: Boolean(env.SCREENSHOTS),
       accessibilitySnapshot: capabilities.accessibilitySnapshot,
       skills: true,

@@ -18,6 +18,9 @@
  *   6. Failure cases return honest, structured errors.
  *   7. A restricted sandbox (test host without egress) is reported as such,
  *      not as a pipeline failure.
+ *   8. `inspect_video` (DEMO 0.6.1) performs the whole automatic flow in one
+ *      call — intent detection, dynamic frame plan, real frames as MCP image
+ *      blocks — and never lets the AI claim it saw a video without frames.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -193,6 +196,116 @@ describe.skipIf(!liveEnv().enabled)("public video acceptance (live)", () => {
           expect(payload?.frames ?? []).toEqual([]);
           expect(String(payload?.message ?? payload?.limitations ?? "")).not.toHaveLength(0);
         }
+      } finally {
+        await client.close();
+      }
+    },
+    240_000,
+  );
+
+  it(
+    "inspect_video: a plain public MP4 link triggers the automatic flow and returns consumable frames + reaction context",
+    async ({ skip }) => {
+      const url = liveEnv().publicVideoUrl;
+      const client = connectLive(origin);
+      try {
+        // Only the link — no frame counts, timestamps, or manual steps.
+        const result = await client.call("inspect_video", { url });
+        const egressNote = workerEgressSkipNote(result, url);
+        if (egressNote) skip(egressNote);
+        const parsedPayload = result.parsed as Record<string, any> | null;
+        if (!parsedPayload) throw new Error(`expected a JSON payload, got: ${result.text.slice(0, 500)}`);
+        const payload = parsedPayload;
+
+        // A bare link automatically enables reaction mode and inspects.
+        expect(payload.intent?.reactionMode).toBe(true);
+        expect(payload.inspectionStatus === "complete" || payload.inspectionStatus === "partial").toBe(true);
+        expect(payload.visualEvidenceDelivered).toBe(true);
+        expect(payload.source?.url).toBe(url);
+
+        // Real frames: timestamped, image MIME, delivered as MCP image blocks
+        // and/or retrievable HTTPS references.
+        expect(Array.isArray(payload.frames)).toBe(true);
+        expect(payload.frames.length).toBeGreaterThan(0);
+        for (const frame of payload.frames) {
+          expect(typeof frame.timestamp).toBe("number");
+          expect(frame.mimeType).toMatch(/^image\//);
+        }
+        const referenced = payload.frames.every(
+          (frame: any) => typeof frame.imageReference === "string" && /^https:\/\//.test(frame.imageReference),
+        );
+        expect(result.imageCount > 0 || referenced, "frames must be MCP image content or retrievable HTTPS references").toBe(true);
+        if (result.imageCount > 0) {
+          expect(payload.imageBlocksDelivered).toBe(result.imageCount);
+          for (const entry of result.imageBlocks) {
+            const decoded = Uint8Array.from(atob(entry.data), (char) => char.charCodeAt(0));
+            const isJpeg = decoded[0] === 0xff && decoded[1] === 0xd8 && decoded[2] === 0xff;
+            const isPng = decoded[0] === 0x89 && decoded[1] === 0x50 && decoded[2] === 0x4e && decoded[3] === 0x47;
+            expect(isJpeg || isPng, "inline MCP image bytes must be a real JPEG/PNG").toBe(true);
+          }
+        }
+        // Coverage: the plan includes a first and a final meaningful frame.
+        const timestamps = payload.frames.map((frame: any) => frame.timestamp);
+        expect(timestamps[0]).toBeLessThan(Math.max(2, (payload.source.durationSeconds ?? 10) * 0.2));
+        expect(payload.honestyNote).toMatch(/sampled frames|MUST NOT/i);
+      } finally {
+        await client.close();
+      }
+    },
+    300_000,
+  );
+
+  it(
+    "inspect_video: the supplied TikTok short URL returns real frames or an exact technical reason (never a fake 'I watched it')",
+    async ({ skip }) => {
+      const url = "https://vt.tiktok.com/ZSqVLjkpU/";
+      const client = connectLive(origin);
+      try {
+        const result = await client.call("inspect_video", { url, userIntent: "React to this:" });
+        const egressNote = workerEgressSkipNote(result, url);
+        if (egressNote) skip(egressNote);
+        const payload = result.parsed as Record<string, any> | null;
+        expect(payload).toBeTruthy();
+        expect(payload?.source?.url).toBe(url); // the user's link is preserved
+        expect(payload?.intent?.reactionMode).toBe(true);
+
+        if (payload?.visualEvidenceDelivered) {
+          // Pass with real frames: consumable image evidence + honest note.
+          const visible =
+            result.imageCount > 0 ||
+            payload.frames.every((frame: any) => typeof frame.imageReference === "string" && /^https:\/\//.test(frame.imageReference));
+          expect(visible, "decoded frames must be MCP image content or retrievable HTTPS references").toBe(true);
+          expect(payload.frames.length).toBeGreaterThan(0);
+          expect(["complete", "partial"]).toContain(payload.inspectionStatus);
+        } else {
+          // A blocked/expired TikTok is an accepted outcome ONLY when the
+          // response is explicit, failed, and carries zero fabricated frames.
+          expect(payload?.inspectionStatus).toBe("failed");
+          expect([...ACCEPTABLE_BLOCK_ERRORS, "blocked_url"]).toContain(payload?.error);
+          expect(payload?.frames ?? []).toEqual([]);
+          expect(payload?.honestyNote ?? "").toMatch(/MUST NOT claim to have seen/);
+        }
+      } finally {
+        await client.close();
+      }
+    },
+    300_000,
+  );
+
+  it(
+    "inspect_video: private URLs are rejected before any request and the AI cannot claim it saw the video",
+    async () => {
+      const client = connectLive(origin);
+      try {
+        const blocked = await client.call("inspect_video", { url: "http://127.0.0.1:9/secret.mp4", userIntent: "Watch this" });
+        const payload = blocked.parsed as Record<string, any> | null;
+        expect(blocked.isError).toBe(true);
+        expect(payload?.inspectionStatus).toBe("failed");
+        expect(payload?.error).toBe("blocked_url");
+        expect(payload?.visualEvidenceDelivered).toBe(false);
+        expect(payload?.frames ?? []).toEqual([]);
+        expect(blocked.imageCount).toBe(0);
+        expect(payload?.honestyNote ?? "").toMatch(/MUST NOT claim to have seen/);
       } finally {
         await client.close();
       }
