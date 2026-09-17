@@ -176,6 +176,32 @@ describe("worker routes", () => {
     expect(JSON.stringify(body)).not.toMatch(/api[_-]?key|authorization|bearer/i);
   });
 
+  it("offers an obvious Connect Roblox entry point in the UI and the server instructions", async () => {
+    const root = await platform.fetch(new Request("https://demo.test/"), ENV as never, CTX);
+    expect(root.status).toBe(200);
+    const html = await root.text();
+    // The affordance a human looks for, wired to the real route.
+    expect(html).toContain("Connect Roblox account");
+    expect(html).toMatch(/location\.href='\/oauth\/roblox\/start'/);
+    expect(html).toContain("/oauth/roblox/status");
+    expect(html).toContain("/oauth/roblox/logout"); // disconnect/revoke is reachable too
+    expect(html).toContain("Disconnect");
+    // And nothing that could impersonate Roblox: no form, no credential field, no
+    // tokens in the page — the connect step is a plain navigation to Roblox.
+    expect(html).not.toMatch(/<form/i);
+    expect(html).not.toMatch(/type=["']?password/i);
+    expect(html).not.toMatch(/autocomplete=["']?(current-)?password/i);
+    expect(html).not.toMatch(/(access|refresh)[_-]?token\s*[:=]/i);
+
+    const init = await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test-client", version: "1" } });
+    const instructions = String(init.result?.instructions ?? "");
+    expect(instructions).toMatch(/Connect Roblox/i);
+    expect(instructions).toMatch(/\/oauth\/roblox\/start/);
+    expect(instructions).toMatch(/https:\/\/apis\.roblox\.com\/oauth\/v1\/authorize/);
+    expect(instructions).toMatch(/never build or link a Roblox login form/i);
+    expect(instructions).toMatch(/not_supported/i);
+  });
+
   it("returns 404 for unknown routes", async () => {
     const response = await platform.fetch(new Request("https://demo.test/nope"), ENV as never, CTX);
     expect(response.status).toBe(404);

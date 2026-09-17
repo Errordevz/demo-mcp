@@ -327,7 +327,8 @@ async function completeFlow(
         title: "Roblox connected",
         tone: "success",
         lines: [
-          `Signed in as ${record.displayName ?? record.username ?? "your Roblox account"}.`,
+          `${accountLabel(record)} is connected to DEMO on this browser.`,
+          `Roblox user id \`${record.userId}\` (the OIDC \`sub\` claim) — this is what DEMO keys the connection on, so a rename never strands the link.`,
           `Granted scopes: ${record.scopes.join(", ") || "openid"}.`,
           record.hasRefreshToken ? "DEMO will refresh this authorization silently for up to 90 days." : "This authorization has no refresh token, so it expires after about 15 minutes.",
         ],
@@ -575,6 +576,19 @@ function escapeHtml(value: string): string {
 }
 
 /** No scripts, escaped interpolation, CSP `default-src 'none'`: an OAuth error string cannot execute. */
+/**
+ * How a connected account is named to a human: `@username` first, because that is
+ * what a Roblox user recognises, with the display name in parentheses when it
+ * differs. Nothing here is used as an identity key — the record is keyed on `sub`.
+ */
+export function accountLabel(record: Pick<AccountRecord, "username" | "displayName" | "userId">): string {
+  const display = record.displayName?.trim() || null;
+  if (record.username) {
+    return display && display !== record.username ? `@${record.username} (${display})` : `@${record.username}`;
+  }
+  return display ?? `Roblox user ${record.userId ?? "unknown"}`;
+}
+
 function htmlPage(input: PageInput): Response {
   const accent = input.tone === "error" ? "#ff8f8f" : input.tone === "success" ? "#7df2b3" : "#aeb7c6";
   const body = input.lines.map((line) => `<p>${escapeHtml(line)}</p>`).join("");

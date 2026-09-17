@@ -687,3 +687,150 @@ describe("OAuth routes", () => {
     expect(page).not.toContain("authorization code");
   });
 });
+
+/* ------------------------------------------------------------------ acceptance */
+
+/**
+ * The user-facing contract for "Connect Roblox": what the button produces, what the
+ * browser sees, and what it must never see. Written as the checklist a reviewer would
+ * run by hand in Safari, so a regression in the *visible* flow (not just the protocol)
+ * fails the suite.
+ */
+describe("Connect Roblox — user-visible acceptance", () => {
+  const SECRET = "RBX-CR9-secret-value"; // baseEnv()'s sentinel client secret
+  const TOKEN_SENTINELS = ["AT.access-token-value", "RT.refresh-token-value", "ID.id-token-value"];
+
+  function harness() {
+    const calls = stubRoblox().calls;
+    return { env: baseEnv(), deps: { vault: freshVaultHandle() }, calls };
+  }
+
+  it("sends the browser to Roblox's official authorize page with a complete, secret-free request", async () => {
+    const { env, deps } = harness();
+    const response = (await handleRobloxOAuthRoute(new Request(`${WORKER_ORIGIN}/oauth/roblox/start`), env, CTX, deps))!;
+    expect(response.status).toBe(302);
+    const url = new URL(response.headers.get("location")!);
+    // The consent page must be Roblox's own, never a DEMO stand-in.
+    expect(`${url.origin}${url.pathname}`).toBe("https://apis.roblox.com/oauth/v1/authorize");
+    expect(url.searchParams.get("client_id")).toBe("840974200211308101");
+    expect(url.searchParams.get("response_type")).toBe("code");
+    expect(url.searchParams.get("redirect_uri")).toBe(`${WORKER_ORIGIN}/oauth/roblox/callback`);
+    expect(url.searchParams.get("scope")).toBe("openid profile");
+    expect(url.searchParams.get("state")).toMatch(/^[A-Za-z0-9_-]{16,}$/);
+    expect(url.searchParams.get("code_challenge_method")).toBe("S256");
+    expect(url.searchParams.get("code_challenge")).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    // No secret, no verifier, nothing reusable in the URL or in a referrer.
+    expect(url.href).not.toContain(SECRET);
+    for (const param of ["client_secret", "code_verifier", "refresh_token", "access_token"]) {
+      expect(url.searchParams.has(param), param).toBe(false);
+    }
+    // The app announces itself as DEMO MCP; the wording of the page is Roblox's to decide.
+    expect(env.ROBLOX_CLIENT_ID).toBeTruthy();
+    expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+  });
+
+  it("preserves the verifier for the callback, exchanges the code server-side, and shows @username with the sub", async () => {
+    const { env, deps, calls } = harness();
+    const started = await startFlow(env, deps, "");
+    const authorize = new URL(started.authorizeUrl);
+    const challenge = authorize.searchParams.get("code_challenge")!;
+    const state = authorize.searchParams.get("state")!;
+
+    const html = (await handleRobloxOAuthRoute(
+      new Request(`${WORKER_ORIGIN}/oauth/roblox/callback?code=authcode1234567890&state=${state}`, {
+        headers: { Accept: "text/html", Cookie: started.stateCookie.split(";")[0] },
+      }),
+      env,
+      CTX,
+      deps,
+    ))!;
+    expect(html.status).toBe(200);
+    const page = await html.text();
+    // Requirement 15: "Roblox connected" + "@Username".
+    expect(page).toContain("Roblox connected");
+    expect(page).toContain("@exampleuser");
+    // Requirement: the stable identifier is Roblox's `sub`, echoed for the user to check.
+    expect(page).toContain("1516563360");
+    expect(page).toMatch(/sub/);
+
+    // The exchange happened server-side against the pinned Roblox origin only.
+    const token = calls.find((call) => new URL(call.url).pathname === "/oauth/v1/token")!;
+    expect(token.method).toBe("POST");
+    expect(new URL(token.url).origin).toBe("https://apis.roblox.com");
+    expect(token.body).toMatchObject({ grant_type: "authorization_code", code: "authcode1234567890", client_id: "840974200211308101" });
+    expect(token.body!.redirect_uri).toBe(`${WORKER_ORIGIN}/oauth/roblox/callback`);
+    expect(token.body!.client_secret).toBe(SECRET); // sent to Roblox, never to the browser
+    // The verifier kept for the callback is exactly the one the challenge committed to.
+    expect(await verifyPkcePair(token.body!.code_verifier, challenge)).toBe(true);
+
+    for (const secret of [...TOKEN_SENTINELS, SECRET]) expect(page).not.toContain(secret);
+    const cookies = html.headers.getSetCookie();
+    const sessionCookie = cookies.find((cookie) => cookie.startsWith("roblox_session="))!;
+    expect(sessionCookie).toContain("HttpOnly");
+    expect(sessionCookie).toContain("Secure");
+    for (const secret of TOKEN_SENTINELS) expect(cookies.join("\n")).not.toContain(secret);
+    // The state cookie is consumed: single-use, so a replay of the callback fails.
+    expect(cookies.some((cookie) => cookie.startsWith("roblox_oauth_state=") && cookie.includes("Max-Age=0"))).toBe(true);
+
+    // Identity for that session comes from the cookie, not from anything the client asserts.
+    const status = (await handleRobloxOAuthRoute(
+      new Request(`${WORKER_ORIGIN}/oauth/roblox/status`, { headers: { Accept: "application/json", Cookie: sessionCookie.split(";")[0] } }),
+      env,
+      CTX,
+      deps,
+    ))!;
+    const body = (await status.json()) as Record<string, any>;
+    expect(body.connected).toBe(true);
+    expect(body.account).toMatchObject({ userId: "1516563360", username: "exampleuser", displayName: "exampleuser" });
+    expect(body.account.grantedScopes).toEqual(["openid", "profile"]);
+    expect(body.security).toMatchObject({ passwordOrCookieRequested: false, tokensExposedToClient: false });
+    expect(JSON.stringify(body)).not.toContain(TOKEN_SENTINELS[0]);
+    expect(Object.keys(body.account)).not.toContain("token");
+  });
+
+  it("rejects a forged state before any token exchange, and treats denial as not connected", async () => {
+    const { env, deps, calls } = harness();
+
+    const forged = (await handleRobloxOAuthRoute(
+      new Request(`${WORKER_ORIGIN}/oauth/roblox/callback?code=authcode1234567890&state=${randomOpaqueToken(32)}`, { headers: { Accept: "application/json" } }),
+      env,
+      CTX,
+      deps,
+    ))!;
+    expect(forged.ok).toBe(false);
+    expect(((await forged.json()) as Record<string, any>).error).toMatch(/state/);
+    expect(calls.filter((call) => new URL(call.url).pathname === "/oauth/v1/token")).toEqual([]);
+
+    const denied = (await handleRobloxOAuthRoute(
+      new Request(`${WORKER_ORIGIN}/oauth/roblox/callback?error=access_denied&error_description=You+declined&state=${randomOpaqueToken(32)}`, { headers: { Accept: "text/html" } }),
+      env,
+      CTX,
+      deps,
+    ))!;
+    expect(denied.status).toBe(400);
+    const page = await denied.text();
+    expect(page).toContain("did not complete");
+    expect(page).not.toContain("Roblox connected");
+    // A denial must not leave a session behind.
+    expect((denied.headers.getSetCookie() ?? []).some((cookie) => cookie.startsWith("roblox_session="))).toBe(false);
+    const anonymous = (await handleRobloxOAuthRoute(new Request(`${WORKER_ORIGIN}/oauth/roblox/status`, { headers: { Accept: "application/json" } }), env, CTX, deps))!;
+    expect(((await anonymous.json()) as Record<string, any>).connected).toBe(false);
+  });
+
+  it("refuses a callback whose redirect URI no longer matches the registered one", async () => {
+    const { env, deps } = harness();
+    const started = await startFlow(env, deps, "");
+    // A different host at callback time (e.g. a preview deployment) must not be honoured.
+    const state = new URL(started.authorizeUrl).searchParams.get("state")!;
+    const moved = (await handleRobloxOAuthRoute(
+      new Request(`https://other-host.test.workers.dev/oauth/roblox/callback?code=authcode1234567890&state=${state}`, {
+        headers: { Accept: "application/json", Cookie: started.stateCookie.split(";")[0] },
+      }),
+      env,
+      CTX,
+      deps,
+    ))!;
+    expect(moved.status).toBeGreaterThanOrEqual(400);
+    expect(((await moved.json()) as Record<string, any>).error).toMatch(/origin_mismatch|host/);
+  });
+});

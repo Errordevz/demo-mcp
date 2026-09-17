@@ -80,6 +80,29 @@ for the **authenticated** `roblox_account_*` tools; the pre-existing `roblox_use
 `asset:write` and every other write scope are deliberately never requested: DEMO does not
 modify your Roblox account or publish anything.
 
+### Feature → scope → configured → implemented
+
+The same facts are machine-readable in `roblox_account_capabilities` /
+`demo://capabilities/roblox`; this table is the human version for review. "Configured" means
+present in the default `ROBLOX_OAUTH_SCOPES` value (`openid profile`).
+
+| Feature | Required Roblox scope | Configured by default? | Implemented in DEMO? |
+| --- | --- | --- | --- |
+| Identify the connected account (user id) — `roblox_account_status` | `openid` | ✅ yes | ✅ yes |
+| Profile basics: `@username`, display name, profile URL, headshot, creation date — `roblox_account_profile` | `profile` | ✅ yes | ✅ yes |
+| Extended profile (About text and other Open Cloud user fields) — `roblox_account_profile { extended: true }` | `user.advanced:read` **or** `user.social:read` | ❌ no | ✅ code ready; reports `insufficient_scope` until the scope is ticked on the app **and** granted at consent |
+| Inventory items / ownership verdicts — `roblox_account_inventory` | `user.inventory-item:read` (BETA) | ❌ no | ✅ code ready; needs the tick, and still respects the owner's privacy setting (private inventory → empty/forbidden, never scraped) |
+| Own avatar thumbnail — `roblox_account_avatar_thumbnail` | `openid` (Open Cloud thumbnail operation) | ✅ yes | ✅ yes |
+| Check / revoke the authorization — `roblox_account_unlink`, `POST /oauth/roblox/logout` | none (documented introspection + revocation endpoints) | n/a | ✅ yes (best-effort revoke, local state cleared even if Roblox is unreachable) |
+| List *my* experiences / created universes | — no OAuth scope exists for it | ❌ impossible | ❌ `not_supported`, by design — no scraping fallback |
+| Robux balance, earnings, payouts, trade history | — not exposed to third-party OAuth apps | ❌ impossible | ❌ `not_supported` |
+| Friends, followers, messages, groups (read or write), avatar *changes*, any account write | — none available (or deliberately not requested) | ❌ impossible | ❌ `not_supported`; `asset:write`-class scopes are never requested |
+| Public lookups: another user's public page, game info (`roblox_user`, `roblox_game`) | none — unauthenticated public Open Cloud | n/a | ✅ pre-existing, unchanged by this feature |
+
+If a row says "❌ no" in *Configured* and "✅ code ready" in *Implemented*, the work is a
+dashboard tick plus `ROBLOX_OAUTH_SCOPES`, then reconnect — never a workaround. If a row says
+"impossible", no configuration makes it work and Demo will keep saying so.
+
 ---
 
 ## 4. Cloudflare configuration
@@ -184,8 +207,12 @@ GET https://<worker>/health   →  "robloxOAuthConfigured": true,
 
 ## 6. Connect your account (iPhone / Safari)
 
-1. Open the DEMO page (`https://<worker-url>/`) and tap **Connect Roblox account** — or
-   open `https://<worker-url>/oauth/roblox/start` directly.
+1. Open the DEMO page (`https://<worker-url>/`) and tap **Connect Roblox account** — the
+   Roblox card shows `Not connected`, `Connected as @username`, or the exact fix if the app
+   is not configured — or open `https://<worker-url>/oauth/roblox/start` directly (that is
+   the direct test link: it 302s to `https://apis.roblox.com/oauth/v1/authorize`). The same
+   link is handed to a connected AI by `roblox_account_status` → `connectByOpening`, and the
+   MCP server instructions tell it to offer "Connect Roblox" rather than improvise.
 2. Safari navigates to Roblox's own consent page at `apis.roblox.com`. Sign in there if
    asked. Roblox requires a **13+** account to authorize third-party apps.
 3. Approve the scopes. Roblox redirects back to `/oauth/roblox/callback`.
@@ -320,6 +347,10 @@ Two things worth knowing before you report a bug:
   HTML, `Origin`/`Sec-Fetch-Site` checks, per-route rate limiting.
 * `src/mcp/roblox-tools.ts` — field-built payloads through the redaction layer, account
   tools gated behind `DEMO_API_KEY`, `not_supported` instead of workarounds.
-* `tests/roblox-oauth.test.ts` (50 cases) and `tests/roblox-account.test.ts`
-  (35 cases) — 85 tests for the above, including a console-capture test that no
+* `tests/roblox-oauth.test.ts` (54 cases, the last four being the user-visible
+  "Connect Roblox" acceptance checklist) and `tests/roblox-account.test.ts`
+  (35 cases) — 89 tests for the above, including a console-capture test that no
   token ever reaches a log.
+* The UI itself (`tests/mcp-tools.test.ts`) — the served page must keep the
+  **Connect Roblox account** button pointed at `/oauth/roblox/start`, keep a
+  Disconnect path, and contain no form, password field or token in its markup.
