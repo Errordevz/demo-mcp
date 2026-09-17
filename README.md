@@ -24,6 +24,9 @@ DEMO MCP Worker  ─────────────────────
         ├── /screenshots/:id     R2-backed screenshot/frame    │
         ├── /frames/:id          alias for /screenshots/:id    │
         ├── /video-assets/:ref  expiring R2 video/audio artifact│
+        ├── /oauth/roblox/*   Roblox OAuth 2.0 + PKCE (state, callback, status, logout)
+        │        └── RobloxAuth Durable Object (encrypted tokens, single-use state)│
+        ├── /capabilities/jev  Jev decision-engine report (presence + policy only)
         ├── /                    inspector UI (demoUi asset)   │
         └── skills.sh (remote)                                 │
                                                               │
@@ -36,6 +39,7 @@ DEMO MCP Worker  ─────────────────────
         ├── ScreenshotManager    capture bounds + R2 storage
         ├── MediaInspector       metadata + rendered video frame sampling
         ├── VideoPipeline         safe resolve/download/audio/transcript orchestration
+        ├── JevDecisionEngine     TypeSafe structured decisions (advisory, opt-in)
         └── UrlGuard             SSRF protection
 ```
 
@@ -96,6 +100,56 @@ If `DEMO_API_KEY` is set, send `Authorization: Bearer <DEMO_API_KEY>`.
 Every result is JSON, bounded in size, and redacted (tokens, cookies, passwords,
 authorization headers, e-mails, phone numbers are stripped before logging or
 returning).
+
+## Roblox account (OAuth 2.0 + PKCE)
+
+On top of the public `roblox_user` / `roblox_game` lookups, DEMO can hold **your own
+Roblox account authorization** and answer questions about it through Roblox's official
+OAuth 2.0 + Open Cloud APIs. The whole setup and the whole sign-in flow happen in a
+browser — nothing to install, and it works from an iPhone (see
+[`docs/ROBLOX.md`](docs/ROBLOX.md)).
+
+| Tool | What it does |
+| --- | --- |
+| `roblox_account_status` | Connection state, granted scopes, token expiry, where tokens are kept. Never a credential. |
+| `roblox_account_profile` | Identity from `GET /oauth/v1/userinfo`; `extended: true` adds Open Cloud `GET /cloud/v2/users/{id}` when the scope allows. |
+| `roblox_account_inventory` | Owned items via `GET /cloud/v2/users/{id}/inventory-items`, or an explicit ownership verdict for the `assetIds` you pass. |
+| `roblox_account_avatar_thumbnail` | Your own avatar image through the documented Open Cloud long-running operation. |
+| `roblox_account_capabilities` | Per-action matrix: what Roblox's OAuth/Open Cloud APIs allow here, and the reason when they do not (`not_supported` — no scraping fallback, ever). |
+| `roblox_account_unlink` | `POST /oauth/v1/token/revoke` and delete the stored tokens. |
+
+HTTP surface (browser-friendly, JSON when asked for JSON):
+
+```text
+GET  /oauth/roblox/start      → 302 to apis.roblox.com with state + PKCE S256 challenge
+GET  /oauth/roblox/callback    → single-use state, code exchange, session cookie, HTML page
+GET  /oauth/roblox/status     → connected / configured / where tokens live (no secrets)
+POST /oauth/roblox/logout     → revoke at Roblox, clear the session
+```
+
+Security properties, all asserted by `tests/roblox-oauth.test.ts` and
+`tests/roblox-account.test.ts`:
+
+* Authorization-code + **PKCE `S256`**, random `state` stored only as a SHA-256 hash,
+  single-use with a replay tombstone, expiring, and bound to the browser by an
+  `HttpOnly; SameSite=Lax` cookie scoped to `Path=/oauth/roblox`.
+* Endpoints are pinned in code, so a misconfigured variable can never leak the client
+  secret elsewhere; the secret is only ever in a POST body and never in a URL.
+* Tokens are AES-256-GCM encrypted at rest in the `ROBLOX_AUTH` Durable Object (HKDF
+  from `ROBLOX_TOKEN_KEY`). Without a key DEMO keeps the session in isolate memory and
+  says so, rather than writing plaintext to durable storage.
+* Refresh happens before expiry under a single-flight lease, and the **rotated**
+  single-use refresh token is persisted atomically; a refused refresh marks the account
+  `reauthorization_required` instead of retrying with a burned token.
+* `401` → one forced refresh + one retry; `429`/`5xx` → one bounded retry honouring
+  `Retry-After`; Open Cloud calls are self-limited below Roblox's published per-client
+  limits. Scope is verified **before** any request goes out.
+* Every tool/user id comes from the stored `sub`; no tool accepts a target `user_id`, so
+  a linked token can never be pointed at somebody else's account.
+* No `.ROBLOSECURITY`, no password form, no unofficial endpoint: unsupported actions
+  return an explicit `not_supported` result.
+* The account tools refuse to run when `DEMO_API_KEY` is unset — an anonymous `/mcp`
+  endpoint must not read someone's linked account.
 
 ## Public video understanding
 
@@ -430,6 +484,39 @@ browser via `puppeteer.connect(env.BROWSER, sessionId)`.
   identified as bot traffic, so some pages will block it regardless of what we
   do — the tools report that rather than hiding it.
 
+## Jev Decision Engine (TypeSafe)
+
+DEMO can ask **Jev** — TypeSafe's System One decision model — for narrow typed judgments
+inside its workflows. It is a **decision capability, not a chat model**: it produces no
+user-facing prose, it is not selectable in any model picker, it cannot name a tool to run,
+and it cannot satisfy or skip a permission check. The full contract, every question, the
+thresholds and the fallback matrix live in [`docs/JEV.md`](docs/JEV.md).
+
+| Tool | What it does |
+| --- | --- |
+| `jev_decide` | Run one of the **three decision templates defined in code** (`tool_route`, `result_review`, `video_intent_focus`) over bounded state and return the typed answer with its `probabilities`, the `certainty` the model reported, the `policy` band DEMO applied, and DEMO's own deterministic value alongside. Refuses caller-supplied instructions or option sets, and refuses to run at all when `DEMO_API_KEY` is unset — an open endpoint must not be able to spend your API quota. |
+| `jev_capabilities` | Live report: configured/enabled state, model id, thresholds, limits, the templates, documented status codes, and what this is *not*. Presence-only — it never reads or echoes the credential, and it names no endpoint the operator can redirect. |
+| `skill_builtin_typesafe` | The bundled TypeSafe guidance note for a connected AI, same shape as `skill_builtin_caveman`. Documentation only: DEMO does not install or execute skill code. |
+
+One workflow calls it automatically, and only as a tie-breaker: `inspect_video` asks Jev to
+classify the **analysis focus** when the user wrote something *and* DEMO's intent regexes
+matched nothing. High confidence applies, the middle band applies with `requiresReview`,
+low confidence or any failure (missing key, 401, rate limit, timeout, malformed answer)
+falls back to the deterministic rules — and the video inspection still completes. The
+engine's answer stays visible in `intent.decision`, so nothing is quietly overridden.
+
+Set it up with one dashboard field:
+
+```text
+TYPESAFE_API_KEY   Worker secret (Cloudflare dashboard → Settings → Variables and
+                   secrets → Encrypt). Not a var, never in a URL, log or result.
+```
+
+Verify from a browser: `GET /capabilities/jev` (or `/health`, which reports
+`jevDecisionEngine`, `jevApiKeyConfigured`, `jevModel`). Disable everything with
+`TYPESAFE_ENABLED=false`: the code path returns DEMO's own rules with zero network calls.
+`jev_decide` is also reachable from a browser-free client only — see `docs/JEV.md` §6.
+
 ## Configuration
 
 See `.env.example` for a copyable template covering both the live test suite
@@ -443,6 +530,7 @@ Bindings (`wrangler.jsonc`):
 | `BROWSER` | Browser Rendering (Browser Run) | The real browser. **Required** for any browser tool. |
 | `SCREENSHOTS` | R2 bucket (`demo-mcp-screenshots`) | Screenshot + frame storage. |
 | `BROWSER_SESSIONS` | Durable Object (`BrowserSession`) | Session/tab state across requests. |
+| `ROBLOX_AUTH` | Durable Object (`RobloxAuth`) | Encrypted Roblox tokens, single-use OAuth state, rate counters, refresh lease. Required for durable account links. |
 
 Variables (all optional):
 
@@ -463,6 +551,17 @@ Variables (all optional):
 | `VIDEO_TRANSCRIPTION_MODEL` | `@cf/openai/whisper` | Workers AI model used when optional `AI` is bound. |
 | `VIDEO_VISION_MODEL` | `@cf/llava-hf/llava-1.5-7b-hf` | Optional Workers AI vision model for `video_analyze`. |
 | `TRANSCRIPTION_ENDPOINT` | *(unset)* | Optional HTTPS speech-to-text endpoint; API key stays in the Worker secret `TRANSCRIPTION_API_KEY`. |
+| `ROBLOX_CLIENT_ID` / `ROBLOX_CLIENT_SECRET` | *(unset = feature off)* | Roblox OAuth app credentials. The secret is a Worker secret and is only ever POSTed to `apis.roblox.com`. |
+| `ROBLOX_TOKEN_KEY` | *(unset = memory only)* | 32+ random bytes (base64). AES-256-GCM key for tokens at rest; rotating it invalidates stored sessions on purpose. |
+| `ROBLOX_OAUTH_SCOPES` | `openid profile` | Scopes requested at consent. `openid` is required; see `docs/ROBLOX.md` for what each extra scope unlocks. |
+| `ROBLOX_REDIRECT_URI` / `ROBLOX_ALLOWED_HOSTS` | *(derived)* | Pin the callback origin, or restrict which hosts may run the flow. |
+| `OAUTH_STATE_TTL_SECONDS` / `ROBLOX_SESSION_TTL_SECONDS` | `600` / `1209600` | State lifetime; browser-session lifetime. |
+| `ROBLOX_RATE_LIMIT_PER_MINUTE` / `ROBLOX_OPEN_CLOUD_RATE_PER_MINUTE` | `20` / `10` | Per-client cap on the OAuth routes; self-imposed budget kept below Roblox's published per-authorization limits. |
+| `TYPESAFE_ENABLED` | on when the key exists | Jev decision-engine switch. `false`/`0`/`off`/`no` short-circuits every decision path to DEMO's own rules with **no network call**. |
+| `TYPESAFE_MODEL` | `jev-latest` | The `model` id sent to the API. `jev-latest` tracks the newest stable release; pin `jev-1.13.0` if you tune thresholds against a fixed version. |
+| `TYPESAFE_DECISION_TIMEOUT_MS` | `2500` | Per-request budget (250–15 000 ms). Past it the decision is abandoned and the fallback used, never queued. |
+| `TYPESAFE_REVIEW_THRESHOLD` / `TYPESAFE_ACCEPT_THRESHOLD` | `0.5` / `0.7` | Confidence bands: below review → recorded but not acted on; between → applied with `requiresReview`; at or above accept → applied. `accept` is clamped to `≥ review`. Validate both on your own traffic. |
+| `TYPESAFE_API_KEY` | *(unset = engine off)* | TypeSafe key. **Worker secret only** — never a `vars` value, never in a URL, log, tool result or error message. |
 
 `AI` and `VIDEO_ARTIFACTS` are optional bindings. The current deployment reuses
 `SCREENSHOTS` for temporary video artifacts so adding these bindings is not
@@ -497,13 +596,22 @@ DEMO reports these limits through `browser_capabilities` and surfaces
   redactor that strips bearer tokens, cookies, `password`/`token`/`api_key`
   values, PEM blocks, e-mails and phone numbers. Screenshot ids are
   high-entropy and unguessable; the bucket is never listed.
+* **Third-party accounts** — Roblox sign-in is the official OAuth 2.0 authorization-code
+  + PKCE flow; `.ROBLOSECURITY` cookies and password forms are not supported anywhere in
+  the codebase. Tokens are encrypted at rest, never appear in a URL, HTML, log line, MCP
+  result or cookie, and `roblox_account_*` tools refuse to run on an unauthenticated
+  `/mcp` endpoint.
+* **Structured decisions** — the TypeSafe key is a Worker secret read at call time, never
+  stored on a config object, never in a URL or result, and the API origin is pinned in code.
+  Jev answers only from option sets DEMO enumerated in code; an out-of-set answer is rejected
+  rather than mapped, and no decision can widen a limit, skip a confirmation or enable a tool.
 * **Auth preserved** — `DEMO_API_KEY` behaviour, the `/mcp` endpoint, existing
   routes and every original tool are unchanged.
 
 ## Testing
 
 ```bash
-npm test              # 120+ unit/integration tests, including a wrangler build gate
+npm test              # 400+ offline unit/integration tests, including a wrangler build gate
 npm run typecheck     # tsc --noEmit (src + tests)
 DEMO_MCP_LIVE=1 CLOUDFLARE_ACCOUNT_ID=… CLOUDFLARE_API_TOKEN=… npm run test:live
 # video acceptance only:
@@ -517,6 +625,12 @@ DEMO_MCP_LIVE=1 LIVE_WORKER_URL=https://demo-mcp.<sub>.workers.dev npm run test:
   `video_ingest`/`video_inspect_pipeline` pipeline — download-to-R2, frame
   mapping to MCP image blocks, admin gating and stage reporting
   (`tests/video-ingest.test.ts`).
+* Roblox OAuth + account (no network): the full flow against a stubbed
+  `apis.roblox.com` — state mismatch/expiry/replay/browser-binding, token exchange
+  400/429/5xx/network failure, refresh-on-expiry with single-use rotation, forced refresh
+  on 401, `Retry-After`, scope gating, revocation on logout, cookie flags, per-route rate
+  limiting, Durable Object atomicity, and a console spy proving no token is ever logged
+  (`tests/roblox-oauth.test.ts`, `tests/roblox-account.test.ts`).
 * Build gate: `wrangler deploy --dry-run` must succeed and must not pull any
   Node-only code into the Worker bundle.
 * Live: opt-in tests that drive the real Browser Run service; the video suite
@@ -524,7 +638,8 @@ DEMO_MCP_LIVE=1 LIVE_WORKER_URL=https://demo-mcp.<sub>.workers.dev npm run test:
   (SHA-256 checked) and distinguishes sandbox egress restrictions from real
   failures (`tests/video-live.test.ts`).
 
-See [`docs/BROWSER.md`](docs/BROWSER.md) for the subsystem design and
+See [`docs/BROWSER.md`](docs/BROWSER.md) for the subsystem design,
+[`docs/ROBLOX.md`](docs/ROBLOX.md) for the Roblox setup and verification walkthrough, and
 [`docs/TESTING.md`](docs/TESTING.md) for the test matrix.
 
 ## Skills
@@ -533,6 +648,20 @@ DEMO continues to search, fetch, audit and apply skills from skills.sh. Skills
 are treated as instruction material and cannot override system, developer,
 safety or user instructions. DEMO does not execute arbitrary installer commands
 merely because a skill requests them.
+
+The **TypeSafe agent skill** was installed with the provider's documented one method —
+`npx skills add typesafe-ai/skills --skill typesafe-ai` — and then read and followed while
+this feature was built. The installer wrote `.agents/skills/typesafe-ai/` (the real files),
+symlinks for the other agent directories, and `skills-lock.json` with the source and content
+hash (tracked, so an unrefreshed copy is checkable). `skills/typesafe-ai/{SKILL.md,LICENSE}`
+is the vendored copy that ships with the repo,
+next to `skills/caveman/SKILL.md`, so the guidance survives a fresh clone; the agent-specific
+install dirs stay git-ignored. Refresh with `npx skills update`.
+
+None of that is runtime execution: a Worker cannot install or run skill code. Nothing was
+added to `src/`, `index.ts` or the bundle; `skill_install_info` prints the command instead of
+running it, `skill_builtin_typesafe` returns the guidance text, and the capability that *is*
+runtime is `jev_decide` (`docs/JEV.md`).
 
 ## Screenshot delivery
 

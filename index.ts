@@ -10,12 +10,20 @@ import { LIMITS } from "./src/core/limits.js";
 import { ScreenshotManager } from "./src/browser/screenshot.js";
 import { resolveScreenshotBase } from "./src/session/factory.js";
 import { registerVideoTools } from "./src/mcp/video-tools.js";
+import { registerRobloxAccountTools, ROBLOX_TOOL_NAMES } from "./src/mcp/roblox-tools.js";
+import { ROBLOX_CAPABILITIES_URI } from "./src/roblox/capabilities.js";
+import { registerJevTools, JEV_TOOL_NAMES, jevCapabilitiesReport } from "./src/mcp/jev-tools.js";
+import { JEV_CAPABILITIES_URI } from "./src/jev/capabilities.js";
+import { jevFlags, type JevEnv } from "./src/jev/config.js";
+import type { RobloxAuthEnv } from "./src/roblox/types.js";
 import { VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI, registerVideoResources, videoStatusFlags } from "./src/mcp/video-resources.js";
 import { describeVideoCapabilities } from "./src/video/capabilities.js";
 import type { VideoEnv } from "./src/video/types.js";
 
-type Env = SessionManagerEnv & VideoEnv & { DEMO_API_KEY?: string; SSRF_GUARD_HTTP_FETCH?: string };
-const VERSION = "0.7.0";
+type Env = SessionManagerEnv & VideoEnv & RobloxAuthEnv & JevEnv & { DEMO_API_KEY?: string; SSRF_GUARD_HTTP_FETCH?: string };
+/** Release version. Reported by `demo_ping`, `/health`, `/tools`, the MCP initialize
+ * result and `/platform/stats` — one constant, so those can never disagree. */
+const VERSION = "0.8.2";
 const SKILLS_API = "https://skills.sh/api/v1";
 
 /**
@@ -39,6 +47,8 @@ USING THE RESULT — inspect_video returns the actual decoded video frames as MC
 
 HONESTY — Never claim to have seen or watched the video unless a tool actually returned image content blocks (visualEvidenceDelivered=true) or a real transcript, and you examined them. The frames are samples: do not claim to have watched continuous playback, never invent audio, dialogue, or events the frames do not show, and state uncertainty explicitly. If audioStatus is not "available", say the audio could not be verified. A successful video_fetch proves retrieval only, not understanding. A post caption is NOT a transcript and a thumbnail is NOT a frame. When access_status is anything other than "public", say why the video could not be retrieved (deleted, private, region-restricted, login wall, CAPTCHA, expired link, rate limit) instead of describing content. If inspection failed or only metadata/a thumbnail is available, say visual inspection was not completed and report the error instead of describing content.
 
+ROBLOX ACCOUNT — DEMO can read the *user's own* Roblox account through Roblox's official OAuth 2.0 authorization-code + PKCE flow. Call roblox_account_status first. When it reports connected=false, offer the user the connect link it returns (connectByOpening — the same GET /oauth/roblox/start route), labelled "Connect Roblox", in their own browser; that route 302-redirects to https://apis.roblox.com/oauth/v1/authorize and Roblox hosts the login and consent page entirely. Never build or link a Roblox login form, never ask for a password, a ROBLOSECURITY cookie or a token, and never accept a username or user id from the chat: the identity comes from Roblox's verified userinfo response (the sub claim), so a rename does not break the link. Tokens never leave the Worker, so you cannot and must not handle them. A feature whose scope was not granted reports scope_required with the exact scope to tick in the Roblox dashboard; an account action with no official OAuth/Open Cloud endpoint reports not_supported — say that plainly instead of scraping or guessing. Read demo://capabilities/roblox (or roblox_account_capabilities) before promising anything. Disconnecting is roblox_account_unlink (revokes at Roblox).
+
 For everything else (browsing, screenshots, sessions, utilities, skills) the individual tool descriptions define the behaviour.`;
 
 /**
@@ -53,6 +63,32 @@ function browserCapabilitiesFor(env: unknown, requestUrl: string | null) {
     videoFrames: capabilities.videoFrames,
     reason: capabilities.reason ?? null,
     screenshots: capabilities.screenshots,
+  };
+}
+
+/**
+ * Synchronous Roblox surface summary for `demo_ping` / `/health`.
+ *
+ * Presence-only: whether the client id, the client secret and the token
+ * encryption key are configured, and which storage backend is bound. No values,
+ * no account records, no tokens — a linked account is per-browser and is reported
+ * by `/oauth/roblox/status` or `roblox_account_status` instead.
+ */
+function robloxFlags(env: Env) {
+  const clientId = String(env.ROBLOX_CLIENT_ID ?? "").trim();
+  const secret = String(env.ROBLOX_CLIENT_SECRET ?? "").trim();
+  return {
+    robloxOAuthConfigured: Boolean(clientId && secret),
+    robloxOAuthReason: !clientId
+      ? "ROBLOX_CLIENT_ID is not set on this Worker."
+      : !secret
+        ? "ROBLOX_CLIENT_SECRET is not set on this Worker."
+        : null,
+    robloxTokenStorage: env.ROBLOX_AUTH ? ("durable-object" as const) : ("memory" as const),
+    robloxTokenEncryption: String(env.ROBLOX_TOKEN_KEY ?? "").trim() ? ("aes-gcm-256" as const) : ("none" as const),
+    robloxAccountToolsRequireApiKey: !env.DEMO_API_KEY,
+    robloxOAuthRoutes: ["/oauth/roblox/start", "/oauth/roblox/callback", "/oauth/roblox/logout", "/oauth/roblox/status"],
+    robloxCapabilitiesResource: ROBLOX_CAPABILITIES_URI,
   };
 }
 
@@ -217,6 +253,8 @@ function server(env: Env, requestUrl: string | null = null, authorization: strin
         humanHandoff: capabilities.handoff,
         accessibilitySnapshot: capabilities.accessibilitySnapshot,
         provider: capabilities.provider,
+        ...robloxFlags(env),
+        ...jevFlags(env as unknown as Record<string, unknown>),
         toolCount: DEMO_TOOL_NAMES.length,
         // Flattened for existing clients, plus the nested report for new ones.
         ...videoFlags,
@@ -467,6 +505,14 @@ function server(env: Env, requestUrl: string | null = null, authorization: strin
 
   registerVideoTools(mcp, { env: env as Env & Record<string, unknown>, requestUrl });
 
+  /* -------------------------------------------- authenticated Roblox account */
+
+  registerRobloxAccountTools(mcp, { env: env as unknown as Record<string, unknown>, requestUrl });
+
+  /* -------------------------------------- Jev decision engine (TypeSafe) */
+
+  registerJevTools(mcp, { env: env as unknown as Record<string, unknown>, requestUrl });
+
   /* ----------------------------------------------------------- skills tools */
 
   mcp.registerTool(
@@ -563,6 +609,21 @@ function server(env: Env, requestUrl: string | null = null, authorization: strin
     async ({ installUrl }) => textResult({ command: `npx skills add ${installUrl}`, source: installUrl, note: "Review the skill and audit before installing or applying it." }),
   );
   mcp.registerTool(
+    "skill_builtin_typesafe",
+    { title: "Use Built-in TypeSafe Skill", description: "Return DEMO's bundled TypeSafe/Jev skill guidance for the current task.", inputSchema: z.object({}) },
+    async () =>
+      textResult({
+        name: "typesafe-ai",
+        source: "github:typesafe-ai/skills → skills/typesafe-ai (installed for the coding agent with `npx skills add typesafe-ai/skills --skill typesafe-ai`)",
+        instructions:
+          "Use TypeSafe's System One models (Jev) as typed decision primitives, not as a chat model: keep deterministic rules, permissions and execution in code; ask one narrow question per judgment with the allowed answers enumerated in code (choice), rated (score) or yes/no (noul); read probabilities and confidence as evidence about the answer rather than proof it is right; act above the accept bar, record between the bars, and fall back to code below the review floor; never let a judgment authorize a write, a spend, an account change or a bypass; keep questions and thresholds in one reviewable file. Read the live docs (docs.typesafe.ai) before changing the contract.",
+        appliesTo: ["jev_decide", "jev_capabilities", "inspect_video focus resolution", "any new TypeSafe/Jev work in this repository"],
+        runtimeNote:
+          "DEMO does not install or execute skill code. This is the guidance the coding agent (or a connected AI editing this project) follows; the runtime capability is the jev_* tools and the hook in src/video/processor.ts. Full skill text: skills/typesafe-ai/SKILL.md (vendored) and docs/JEV.md.",
+      }),
+  );
+
+  mcp.registerTool(
     "skill_builtin_caveman",
     { title: "Use Built-in Caveman Skill", description: "Return DEMO's bundled Caveman skill instructions for the current task.", inputSchema: z.object({}) },
     async () =>
@@ -614,6 +675,8 @@ export const DEMO_TOOL_NAMES = [
   "browser_session",
   "browser_close",
   "browser_capabilities",
+  // Authenticated Roblox account (OAuth 2.0 + PKCE, server-side tokens only)
+  ...ROBLOX_TOOL_NAMES,
   // Public video understanding
   "inspect_video",
   "video_resolve",
@@ -637,6 +700,9 @@ export const DEMO_TOOL_NAMES = [
   "skills_curated",
   "skill_install_info",
   "skill_builtin_caveman",
+  "skill_builtin_typesafe",
+  // Jev decision engine (TypeSafe)
+  ...JEV_TOOL_NAMES,
 ] as const;
 
 export const TOOL_COUNT = DEMO_TOOL_NAMES.length;
@@ -658,14 +724,17 @@ export default {
       screenshotLinks: capabilities.screenshots,
       liveView: capabilities.liveView,
       ...video,
+      ...robloxFlags(env),
+      ...jevFlags(env as unknown as Record<string, unknown>),
       skillsSh: true,
       composio: false,
       toolCount: TOOL_COUNT,
-      resources: [VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI],
+      resources: [VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI, ROBLOX_CAPABILITIES_URI, JEV_CAPABILITIES_URI],
     };
     if (url.pathname === "/") return Response.json({ ...status, capabilities });
     if (url.pathname === "/health") return Response.json({ ok: true, ...status });
     if (url.pathname === "/tools") return Response.json({ count: TOOL_COUNT, tools: DEMO_TOOL_NAMES, resources: [VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI] });
+    if (url.pathname === "/capabilities/jev") return Response.json(jevCapabilitiesReport(env as unknown as Record<string, unknown>));
     if (url.pathname === "/capabilities/video") {
       return Response.json(describeVideoCapabilities(env as Env & Record<string, unknown>, browserCapabilitiesFor(env, request.url)));
     }

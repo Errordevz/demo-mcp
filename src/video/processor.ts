@@ -8,6 +8,8 @@ import { PuppeteerPageHandle } from "../browser/providers/puppeteer-adapter.js";
 import { ScreenshotManager } from "../browser/screenshot.js";
 import { capturePublicAudio, installPublicVideo } from "./page-functions.js";
 import { detectVideoIntent, type IntentFocus } from "./intent.js";
+import { applyIntentHook } from "./intent-hook.js";
+import type { IntentDecisionHook } from "./types.js";
 import { planFrameCount, planFrameTimestamps } from "./frame-plan.js";
 import { accessStatusGuidance, classifyAccess, type AccessStatusInfo, type VideoAccessStatus } from "./access.js";
 import { describeVideoCapabilities, type VideoCapabilityReport } from "./capabilities.js";
@@ -302,7 +304,11 @@ export class VideoProcessor {
   readonly artifacts: VideoArtifactStore;
   readonly media: MediaInspector;
 
-  constructor(env: BrowserVideoEnv, requestUrl?: string | null) {
+  /** Optional decision-engine hook, injected by the tool layer (see `IntentDecisionHook`). */
+  readonly intentHook: IntentDecisionHook | null;
+
+  constructor(env: BrowserVideoEnv, requestUrl?: string | null, options: { intentHook?: IntentDecisionHook } = {}) {
+    this.intentHook = options.intentHook ?? null;
     this.env = env;
     this.requestUrl = requestUrl ?? null;
     const screenshotBase = resolveScreenshotBase(env as never, requestUrl ?? null);
@@ -674,11 +680,21 @@ export class VideoProcessor {
   }
 
   private async runInspectVideo(url: string, resolution: VideoResolution, options: InspectVideoOptions = {}): Promise<InspectVideoResult> {
-    const intent = detectVideoIntent({
+    const intentInput = {
       userIntent: options.userIntent ?? null,
       question: options.question ?? null,
       reactionMode: options.reactionMode ?? null,
-    });
+    };
+    /**
+     * One bounded consultation with the decision engine, when a deployment injects one.
+     * The deterministic rules run first and win whenever they matched; the engine is
+     * asked only when they did not, and every failure path — a throw, a timeout, a
+     * malformed or out-of-set answer — leaves this intent untouched, because video
+     * inspection must never depend on a third-party service being up. `applyIntentHook`
+     * also refuses a focus outside `FOCUS_VALUES` and recomputes the curated vision hint,
+     * so a provider response can never steer the prompt directly.
+     */
+    const { intent, decision } = await applyIntentHook(this.intentHook, intentInput, detectVideoIntent(intentInput));
     const includeMetadata = options.includeMetadata !== false;
     const includeAudio = options.includeAudio === true;
     const analyzeScenes = options.analyzeScenes !== false;
@@ -699,7 +715,13 @@ export class VideoProcessor {
       description: includeMetadata ? resolution.metadata.description : null,
     });
 
-    const intentPayload = { userIntent: intent.userIntent, question: intent.question, reactionMode: intent.reactionMode, focus: intent.focus };
+    const intentPayload = {
+      userIntent: intent.userIntent,
+      question: intent.question,
+      reactionMode: intent.reactionMode,
+      focus: intent.focus,
+      ...(decision ? { decision } : {}),
+    };
 
     const failure = (error: string, message: string, extraLimitations: string[]): InspectVideoResult => ({
       inspectionStatus: "failed",

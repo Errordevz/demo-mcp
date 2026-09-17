@@ -81,7 +81,7 @@ const SENSITIVE_KEY =
  * Structured, redaction-safe console logging. Used instead of raw
  * `console.log` everywhere in the browser subsystem.
  */
-export function safeLog(level: "log" | "warn" | "error", label: string, data?: unknown): void {
+export function safeLog(level: "log" | "warn" | "error", label: string, data?: unknown, namespace = "browser"): void {
   const payload = data === undefined ? "" : data;
   const text =
     typeof payload === "string"
@@ -90,7 +90,7 @@ export function safeLog(level: "log" | "warn" | "error", label: string, data?: u
           redactValue(payload),
           (_key, value) => (typeof value === "bigint" ? value.toString() : value),
         );
-  const line = `[DEMO][browser:${label}]${text ? ` ${text}` : ""}`;
+  const line = `[DEMO][${namespace}:${label}]${text ? ` ${text}` : ""}`;
   if (level === "error") console.error(line);
   else if (level === "warn") console.warn(line);
   else console.log(line);

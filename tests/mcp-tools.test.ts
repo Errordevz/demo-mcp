@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import worker, { DEMO_TOOL_NAMES, TOOL_COUNT } from "../index.js";
 import platform from "../platform-entry.js";
@@ -140,6 +142,31 @@ describe("worker routes", () => {
     expect(listing.tools).toContain("browser_pause_for_human");
   });
 
+  it("reports one version everywhere, matching package.json", async () => {
+    const pkg = JSON.parse(readFileSync(path.resolve(__dirname, "../package.json"), "utf8")) as { version: string };
+    const health = (await (await platform.fetch(new Request("https://demo.test/health"), ENV as never, CTX)).json()) as Record<string, any>;
+    const stats = (await (await platform.fetch(new Request("https://demo.test/platform/stats"), ENV as never, CTX)).json()) as Record<string, any>;
+    const init = await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test-client", version: "1" } });
+    const ping = await callTool("demo_ping", {});
+    expect(health.version, "GET /health (index.ts)").toBe(pkg.version);
+    expect(stats.version, "GET /platform/stats (platform-entry.ts)").toBe(pkg.version);
+    expect(init.result?.serverInfo?.version, "MCP initialize").toBe(pkg.version);
+    expect(ping.parsed?.version, "demo_ping").toBe(pkg.version);
+    // The two Workers each keep their own constant; pin both to the package so a release
+    // cannot ship one surface on a stale version.
+    for (const file of ["index.ts", "platform-entry.ts"]) {
+      const source = readFileSync(path.resolve(__dirname, "..", file), "utf8");
+      const declared = [...source.matchAll(/const VERSION = "(\d+\.\d+\.\d+)"/g)].map((match) => match[1]);
+      expect(declared, `${file} declares exactly one version`).toEqual([pkg.version]);
+    }
+    // The outbound User-Agent is a version string too; a stale one is a silent lie to
+    // whoever is being called.
+    const oauth = readFileSync(path.resolve(__dirname, "../src/roblox/oauth.ts"), "utf8");
+    const agents = [...oauth.matchAll(/DEMO-MCP\/(\d+\.\d+\.\d+)/g)].map((match) => match[1]);
+    expect(agents.length, "the User-Agent must carry a version").toBeGreaterThan(0);
+    for (const declared of agents) expect(declared).toBe(pkg.version);
+  });
+
   it("serves telemetry without secrets", async () => {
     const response = await platform.fetch(new Request("https://demo.test/platform/stats"), ENV as never, CTX);
     const body = (await response.json()) as Record<string, any>;
@@ -147,6 +174,32 @@ describe("worker routes", () => {
     expect(body.capabilities).toHaveProperty("browserSessions");
     expect(body.endpoints.mcp).toBe("/mcp");
     expect(JSON.stringify(body)).not.toMatch(/api[_-]?key|authorization|bearer/i);
+  });
+
+  it("offers an obvious Connect Roblox entry point in the UI and the server instructions", async () => {
+    const root = await platform.fetch(new Request("https://demo.test/"), ENV as never, CTX);
+    expect(root.status).toBe(200);
+    const html = await root.text();
+    // The affordance a human looks for, wired to the real route.
+    expect(html).toContain("Connect Roblox account");
+    expect(html).toMatch(/location\.href='\/oauth\/roblox\/start'/);
+    expect(html).toContain("/oauth/roblox/status");
+    expect(html).toContain("/oauth/roblox/logout"); // disconnect/revoke is reachable too
+    expect(html).toContain("Disconnect");
+    // And nothing that could impersonate Roblox: no form, no credential field, no
+    // tokens in the page — the connect step is a plain navigation to Roblox.
+    expect(html).not.toMatch(/<form/i);
+    expect(html).not.toMatch(/type=["']?password/i);
+    expect(html).not.toMatch(/autocomplete=["']?(current-)?password/i);
+    expect(html).not.toMatch(/(access|refresh)[_-]?token\s*[:=]/i);
+
+    const init = await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test-client", version: "1" } });
+    const instructions = String(init.result?.instructions ?? "");
+    expect(instructions).toMatch(/Connect Roblox/i);
+    expect(instructions).toMatch(/\/oauth\/roblox\/start/);
+    expect(instructions).toMatch(/https:\/\/apis\.roblox\.com\/oauth\/v1\/authorize/);
+    expect(instructions).toMatch(/never build or link a Roblox login form/i);
+    expect(instructions).toMatch(/not_supported/i);
   });
 
   it("returns 404 for unknown routes", async () => {
