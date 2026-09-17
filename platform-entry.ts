@@ -119,11 +119,18 @@ function jevSurface(env: Env) {
 function robloxSurface(env: Env) {
   const clientId = String(env.ROBLOX_CLIENT_ID ?? "").trim();
   const secret = String(env.ROBLOX_CLIENT_SECRET ?? "").trim();
+  const tokenKey = String(env.ROBLOX_TOKEN_KEY ?? "").trim();
+  const hasValidTokenKey = tokenKey.length > 0;
+  // Effective storage keeps /health, /platform/stats and /oauth/roblox/status consistent:
+  // the Durable Object is only effective when encryption is available, otherwise the
+  // vault degrades to isolate memory and reports "memory"/"none".
+  const effectiveStorage = env.ROBLOX_AUTH && hasValidTokenKey ? "durable-object" : "memory";
+  const effectiveEncryption = hasValidTokenKey ? "aes-gcm-256" : "none";
   return {
     configured: Boolean(clientId && secret),
     reason: !clientId ? "ROBLOX_CLIENT_ID is not set" : !secret ? "ROBLOX_CLIENT_SECRET is not set" : null,
-    storage: env.ROBLOX_AUTH ? "durable-object" : "memory",
-    tokenEncryption: String(env.ROBLOX_TOKEN_KEY ?? "").trim() ? "aes-gcm-256" : "none",
+    storage: effectiveStorage,
+    tokenEncryption: effectiveEncryption,
     flows: ["GET /oauth/roblox/start", "GET /oauth/roblox/callback", "POST /oauth/roblox/logout", "GET /oauth/roblox/status"],
     passwordOrCookieFlow: false,
     tokensExposedToClients: false,

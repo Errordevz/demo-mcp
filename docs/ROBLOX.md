@@ -39,20 +39,19 @@ deployment can actually do right now.
 3. Copy the **Client ID**, then open the secret once and copy it — Roblox shows the
    secret only at creation time.
 4. **App Category**: choose **Account Linking Tools** (that is what this is: your Roblox
-   account mapped onto a DEMO session). Scopes available to you depend on the category.
-5. **Permissions / Scopes**: tick `openid` and `profile`. Add the optional ones from
-   [§3](#3-scopes-and-why) only if you want those tools.
+   account mapped onto a DEMO session). Only categories that permit third-party OAuth sign-in with a redirect callback can use this flow — Account Linking Tools is the correct one. Scopes available to you depend on the category; `openid` and `profile` must be enabled for DEMO.
+5. **Permissions / Scopes**: tick `openid` and `profile` (both must be enabled on the app and the account/app must be **13+ eligible** for third-party authorization). Add the optional ones from [§3](#3-scopes-and-why) only if you want those tools. After creation, verify the **Client ID** shown in the Roblox dashboard equals the `ROBLOX_CLIENT_ID` secret configured on the Worker — a client id from a different app produces the same "Redirect URI is invalid for this application" error as a mismatched URI.
 6. **Redirect URLs**: add the exact URL of *this* deployment's callback. The reliable way
    to get it: open `https://<your-worker-url>/oauth/roblox/status` once after deploying and
-   copy `configuration.redirectUri`. For a `workers.dev` Worker it looks like:
+   copy `configuration.redirectUri`. For this Worker the production value is:
 
    ```text
-   https://demo-mcp.<your-subdomain>.workers.dev/oauth/roblox/callback
+   https://demo-mcp.www-notamirrblx.workers.dev/oauth/roblox/callback
    ```
 
-   Rules Roblox enforces: plain HTTPS (localhost HTTP is allowed for local testing), max
-   256 characters, up to 10 URLs, and it must match **exactly** — no trailing slash, no
-   extra path segments.
+   For a `workers.dev` Worker it generally looks like `https://demo-mcp.<your-subdomain>.workers.dev/oauth/roblox/callback`.
+
+   Rules Roblox enforces (exact-match only): plain `https` scheme (plain `http` is allowed only for `localhost`/`127.0.0.1` for local testing), max 256 characters, **at most 10 URLs per app, no wildcards**, and the string must match **character-for-character** — `https` scheme, no trailing slash, no query string, no port, no `www` differences, and the Worker hostname must be the one actually serving traffic (e.g. preview vs production are different entries). For this deployment you must register `https://demo-mcp.www-notamirrblx.workers.dev/oauth/roblox/callback` exactly; if you use a preview host add that host's callback as its own entry rather than relying on host-derived values.
 7. Keep the app in **private mode** for personal use: it allows up to 10 unique users,
    which is enough for your own account and needs no review. Public distribution
    requires Roblox's review process (demo video + scope justification).
@@ -134,8 +133,8 @@ Already shipped in `wrangler.jsonc`; override only if you want different policy:
 | `ROBLOX_SESSION_TTL_SECONDS` | `1209600` | Browser session lifetime (14 days) |
 | `ROBLOX_RATE_LIMIT_PER_MINUTE` | `20` | Per client, per OAuth route |
 | `ROBLOX_OPEN_CLOUD_RATE_PER_MINUTE` | `10` | Self-imposed budget for Open Cloud calls (1–20) |
-| `ROBLOX_ALLOWED_HOSTS` | *(unset)* | Comma-separated hostnames allowed to mint/complete a flow. Set this to your Worker hostname once you have one, so a poisoned `Host` header can't redirect a code elsewhere |
-| `ROBLOX_REDIRECT_URI` | *(unset → derived)* | Pin it if the Worker sits behind a custom domain or a proxy that rewrites the origin |
+| `ROBLOX_ALLOWED_HOSTS` | *(unset)* | Comma-separated hostnames allowed to mint/complete a flow. **For this deployment set to `demo-mcp.www-notamirrblx.workers.dev` (add the preview host as a second entry if you use previews)**, so a poisoned `Host` header can't redirect a code elsewhere. Must be set in **both** Production and Preview environments. |
+| `ROBLOX_REDIRECT_URI` | *(unset → derived)* | **For this deployment pin to `https://demo-mcp.www-notamirrblx.workers.dev/oauth/roblox/callback`** so the redirect URI is not derived from the request `Host` header. Set as a plain variable (not a secret) in **both** Production and Preview where other `ROBLOX_*` vars live. If the Worker sits behind a custom domain or a proxy that rewrites the origin, pin that hostname instead; each real hostname needs its own entry on the Roblox app (at most 10, exact-match, no wildcards). |
 | `ROBLOX_ACCOUNT_KEY` | `default` | Account slot name this deployment links into |
 
 ### Bindings
@@ -302,7 +301,7 @@ and there is no code path in which it could.
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| Roblox shows *invalid redirect_uri* / the consent page refuses to load | The registered URL is not byte-identical to the one DEMO sends (scheme, host, trailing `/`, `preview.` vs production) | Copy `configuration.redirectUri` from `/oauth/roblox/status` and paste that exact string into the app's Redirect URLs |
+| Roblox shows *invalid redirect_uri* / "Authorization Error: Redirect URI is invalid for this application" | The registered URL is not byte-identical to the one DEMO sends (scheme `https` vs `http`, host, trailing `/`, `www` vs non-`www`, port, query string, `preview.` vs production, or a `ROBLOX_CLIENT_ID` from a different app than the one that has the URI registered — all produce the same error), or the app category does not permit third-party OAuth, or `openid`/`profile` are not enabled, or account/app is not 13+ eligible | Copy `configuration.redirectUri` from `/oauth/roblox/status` (for this Worker `https://demo-mcp.www-notamirrblx.workers.dev/oauth/roblox/callback`) and paste that exact string into the app's Redirect URLs (**exact https, no trailing slash, no query, no port, no `www` difference, max 10 entries, no wildcards**). Verify the Client ID in the dashboard equals `ROBLOX_CLIENT_ID` on the Worker, and that the app category is one that allows redirect callbacks with `openid`+`profile` enabled. If you have several hostnames (preview), add each hostname's callback as its own entry |
 | `503 not_configured` | `ROBLOX_CLIENT_ID` / `ROBLOX_CLIENT_SECRET` missing **in the environment you are hitting** | Secrets are per-environment: set them for Production *and* Preview. `/health` shows `robloxOAuthConfigured` |
 | `400 invalid_grant` right after approving | The code was already used or aged out (~1 min). Usually the Back button, a refresh, or a slow redirect | Start again at `/oauth/roblox/start`; keep the tab in the foreground until it lands |
 | `state_mismatch` on a fresh attempt | Flow started on another deployment/isolate (e.g. Preview vs Production), or the DO binding is missing so the state never reached the callback's isolate | Same origin for both requests; deploy the `ROBLOX_AUTH` binding |

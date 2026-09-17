@@ -70,13 +70,22 @@ function browserCapabilitiesFor(env: unknown, requestUrl: string | null) {
  * Synchronous Roblox surface summary for `demo_ping` / `/health`.
  *
  * Presence-only: whether the client id, the client secret and the token
- * encryption key are configured, and which storage backend is bound. No values,
- * no account records, no tokens — a linked account is per-browser and is reported
- * by `/oauth/roblox/status` or `roblox_account_status` instead.
+ * encryption key are configured, and which storage backend is *effective*.
+ * No values, no account records, no tokens — a linked account is per-browser
+ * and is reported by `/oauth/roblox/status` or `roblox_account_status` instead.
+ *
+ * Effective means the vault's view: durable storage is only reported when both
+ * the Durable Object binding and a valid ROBLOX_TOKEN_KEY are present, because
+ * the vault refuses to persist unencrypted tokens and degrades to isolate memory.
+ * This keeps /health and /oauth/roblox/status consistent.
  */
 function robloxFlags(env: Env) {
   const clientId = String(env.ROBLOX_CLIENT_ID ?? "").trim();
   const secret = String(env.ROBLOX_CLIENT_SECRET ?? "").trim();
+  const tokenKey = String(env.ROBLOX_TOKEN_KEY ?? "").trim();
+  const hasValidTokenKey = tokenKey.length > 0;
+  const effectiveStorage = env.ROBLOX_AUTH && hasValidTokenKey ? ("durable-object" as const) : ("memory" as const);
+  const effectiveEncryption = hasValidTokenKey ? ("aes-gcm-256" as const) : ("none" as const);
   return {
     robloxOAuthConfigured: Boolean(clientId && secret),
     robloxOAuthReason: !clientId
@@ -84,8 +93,8 @@ function robloxFlags(env: Env) {
       : !secret
         ? "ROBLOX_CLIENT_SECRET is not set on this Worker."
         : null,
-    robloxTokenStorage: env.ROBLOX_AUTH ? ("durable-object" as const) : ("memory" as const),
-    robloxTokenEncryption: String(env.ROBLOX_TOKEN_KEY ?? "").trim() ? ("aes-gcm-256" as const) : ("none" as const),
+    robloxTokenStorage: effectiveStorage,
+    robloxTokenEncryption: effectiveEncryption,
     robloxAccountToolsRequireApiKey: !env.DEMO_API_KEY,
     robloxOAuthRoutes: ["/oauth/roblox/start", "/oauth/roblox/callback", "/oauth/roblox/logout", "/oauth/roblox/status"],
     robloxCapabilitiesResource: ROBLOX_CAPABILITIES_URI,
