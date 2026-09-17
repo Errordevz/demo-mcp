@@ -24,6 +24,8 @@ DEMO MCP Worker  ─────────────────────
         ├── /screenshots/:id     R2-backed screenshot/frame    │
         ├── /frames/:id          alias for /screenshots/:id    │
         ├── /video-assets/:ref  expiring R2 video/audio artifact│
+        ├── /oauth/roblox/*   Roblox OAuth 2.0 + PKCE (state, callback, status, logout)
+        │        └── RobloxAuth Durable Object (encrypted tokens, single-use state)│
         ├── /                    inspector UI (demoUi asset)   │
         └── skills.sh (remote)                                 │
                                                               │
@@ -96,6 +98,56 @@ If `DEMO_API_KEY` is set, send `Authorization: Bearer <DEMO_API_KEY>`.
 Every result is JSON, bounded in size, and redacted (tokens, cookies, passwords,
 authorization headers, e-mails, phone numbers are stripped before logging or
 returning).
+
+## Roblox account (OAuth 2.0 + PKCE)
+
+On top of the public `roblox_user` / `roblox_game` lookups, DEMO can hold **your own
+Roblox account authorization** and answer questions about it through Roblox's official
+OAuth 2.0 + Open Cloud APIs. The whole setup and the whole sign-in flow happen in a
+browser — nothing to install, and it works from an iPhone (see
+[`docs/ROBLOX.md`](docs/ROBLOX.md)).
+
+| Tool | What it does |
+| --- | --- |
+| `roblox_account_status` | Connection state, granted scopes, token expiry, where tokens are kept. Never a credential. |
+| `roblox_account_profile` | Identity from `GET /oauth/v1/userinfo`; `extended: true` adds Open Cloud `GET /cloud/v2/users/{id}` when the scope allows. |
+| `roblox_account_inventory` | Owned items via `GET /cloud/v2/users/{id}/inventory-items`, or an explicit ownership verdict for the `assetIds` you pass. |
+| `roblox_account_avatar_thumbnail` | Your own avatar image through the documented Open Cloud long-running operation. |
+| `roblox_account_capabilities` | Per-action matrix: what Roblox's OAuth/Open Cloud APIs allow here, and the reason when they do not (`not_supported` — no scraping fallback, ever). |
+| `roblox_account_unlink` | `POST /oauth/v1/token/revoke` and delete the stored tokens. |
+
+HTTP surface (browser-friendly, JSON when asked for JSON):
+
+```text
+GET  /oauth/roblox/start      → 302 to apis.roblox.com with state + PKCE S256 challenge
+GET  /oauth/roblox/callback    → single-use state, code exchange, session cookie, HTML page
+GET  /oauth/roblox/status     → connected / configured / where tokens live (no secrets)
+POST /oauth/roblox/logout     → revoke at Roblox, clear the session
+```
+
+Security properties, all asserted by `tests/roblox-oauth.test.ts` and
+`tests/roblox-account.test.ts`:
+
+* Authorization-code + **PKCE `S256`**, random `state` stored only as a SHA-256 hash,
+  single-use with a replay tombstone, expiring, and bound to the browser by an
+  `HttpOnly; SameSite=Lax` cookie scoped to `Path=/oauth/roblox`.
+* Endpoints are pinned in code, so a misconfigured variable can never leak the client
+  secret elsewhere; the secret is only ever in a POST body and never in a URL.
+* Tokens are AES-256-GCM encrypted at rest in the `ROBLOX_AUTH` Durable Object (HKDF
+  from `ROBLOX_TOKEN_KEY`). Without a key DEMO keeps the session in isolate memory and
+  says so, rather than writing plaintext to durable storage.
+* Refresh happens before expiry under a single-flight lease, and the **rotated**
+  single-use refresh token is persisted atomically; a refused refresh marks the account
+  `reauthorization_required` instead of retrying with a burned token.
+* `401` → one forced refresh + one retry; `429`/`5xx` → one bounded retry honouring
+  `Retry-After`; Open Cloud calls are self-limited below Roblox's published per-client
+  limits. Scope is verified **before** any request goes out.
+* Every tool/user id comes from the stored `sub`; no tool accepts a target `user_id`, so
+  a linked token can never be pointed at somebody else's account.
+* No `.ROBLOSECURITY`, no password form, no unofficial endpoint: unsupported actions
+  return an explicit `not_supported` result.
+* The account tools refuse to run when `DEMO_API_KEY` is unset — an anonymous `/mcp`
+  endpoint must not read someone's linked account.
 
 ## Public video understanding
 
@@ -443,6 +495,7 @@ Bindings (`wrangler.jsonc`):
 | `BROWSER` | Browser Rendering (Browser Run) | The real browser. **Required** for any browser tool. |
 | `SCREENSHOTS` | R2 bucket (`demo-mcp-screenshots`) | Screenshot + frame storage. |
 | `BROWSER_SESSIONS` | Durable Object (`BrowserSession`) | Session/tab state across requests. |
+| `ROBLOX_AUTH` | Durable Object (`RobloxAuth`) | Encrypted Roblox tokens, single-use OAuth state, rate counters, refresh lease. Required for durable account links. |
 
 Variables (all optional):
 
@@ -463,6 +516,12 @@ Variables (all optional):
 | `VIDEO_TRANSCRIPTION_MODEL` | `@cf/openai/whisper` | Workers AI model used when optional `AI` is bound. |
 | `VIDEO_VISION_MODEL` | `@cf/llava-hf/llava-1.5-7b-hf` | Optional Workers AI vision model for `video_analyze`. |
 | `TRANSCRIPTION_ENDPOINT` | *(unset)* | Optional HTTPS speech-to-text endpoint; API key stays in the Worker secret `TRANSCRIPTION_API_KEY`. |
+| `ROBLOX_CLIENT_ID` / `ROBLOX_CLIENT_SECRET` | *(unset = feature off)* | Roblox OAuth app credentials. The secret is a Worker secret and is only ever POSTed to `apis.roblox.com`. |
+| `ROBLOX_TOKEN_KEY` | *(unset = memory only)* | 32+ random bytes (base64). AES-256-GCM key for tokens at rest; rotating it invalidates stored sessions on purpose. |
+| `ROBLOX_OAUTH_SCOPES` | `openid profile` | Scopes requested at consent. `openid` is required; see `docs/ROBLOX.md` for what each extra scope unlocks. |
+| `ROBLOX_REDIRECT_URI` / `ROBLOX_ALLOWED_HOSTS` | *(derived)* | Pin the callback origin, or restrict which hosts may run the flow. |
+| `OAUTH_STATE_TTL_SECONDS` / `ROBLOX_SESSION_TTL_SECONDS` | `600` / `1209600` | State lifetime; browser-session lifetime. |
+| `ROBLOX_RATE_LIMIT_PER_MINUTE` / `ROBLOX_OPEN_CLOUD_RATE_PER_MINUTE` | `20` / `10` | Per-client cap on the OAuth routes; self-imposed budget kept below Roblox's published per-authorization limits. |
 
 `AI` and `VIDEO_ARTIFACTS` are optional bindings. The current deployment reuses
 `SCREENSHOTS` for temporary video artifacts so adding these bindings is not
@@ -497,6 +556,11 @@ DEMO reports these limits through `browser_capabilities` and surfaces
   redactor that strips bearer tokens, cookies, `password`/`token`/`api_key`
   values, PEM blocks, e-mails and phone numbers. Screenshot ids are
   high-entropy and unguessable; the bucket is never listed.
+* **Third-party accounts** — Roblox sign-in is the official OAuth 2.0 authorization-code
+  + PKCE flow; `.ROBLOSECURITY` cookies and password forms are not supported anywhere in
+  the codebase. Tokens are encrypted at rest, never appear in a URL, HTML, log line, MCP
+  result or cookie, and `roblox_account_*` tools refuse to run on an unauthenticated
+  `/mcp` endpoint.
 * **Auth preserved** — `DEMO_API_KEY` behaviour, the `/mcp` endpoint, existing
   routes and every original tool are unchanged.
 
@@ -517,6 +581,12 @@ DEMO_MCP_LIVE=1 LIVE_WORKER_URL=https://demo-mcp.<sub>.workers.dev npm run test:
   `video_ingest`/`video_inspect_pipeline` pipeline — download-to-R2, frame
   mapping to MCP image blocks, admin gating and stage reporting
   (`tests/video-ingest.test.ts`).
+* Roblox OAuth + account (no network): the full flow against a stubbed
+  `apis.roblox.com` — state mismatch/expiry/replay/browser-binding, token exchange
+  400/429/5xx/network failure, refresh-on-expiry with single-use rotation, forced refresh
+  on 401, `Retry-After`, scope gating, revocation on logout, cookie flags, per-route rate
+  limiting, Durable Object atomicity, and a console spy proving no token is ever logged
+  (`tests/roblox-oauth.test.ts`, `tests/roblox-account.test.ts`).
 * Build gate: `wrangler deploy --dry-run` must succeed and must not pull any
   Node-only code into the Worker bundle.
 * Live: opt-in tests that drive the real Browser Run service; the video suite
@@ -524,7 +594,8 @@ DEMO_MCP_LIVE=1 LIVE_WORKER_URL=https://demo-mcp.<sub>.workers.dev npm run test:
   (SHA-256 checked) and distinguishes sandbox egress restrictions from real
   failures (`tests/video-live.test.ts`).
 
-See [`docs/BROWSER.md`](docs/BROWSER.md) for the subsystem design and
+See [`docs/BROWSER.md`](docs/BROWSER.md) for the subsystem design,
+[`docs/ROBLOX.md`](docs/ROBLOX.md) for the Roblox setup and verification walkthrough, and
 [`docs/TESTING.md`](docs/TESTING.md) for the test matrix.
 
 ## Skills

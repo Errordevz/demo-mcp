@@ -10,11 +10,14 @@ import { LIMITS } from "./src/core/limits.js";
 import { ScreenshotManager } from "./src/browser/screenshot.js";
 import { resolveScreenshotBase } from "./src/session/factory.js";
 import { registerVideoTools } from "./src/mcp/video-tools.js";
+import { registerRobloxAccountTools, ROBLOX_TOOL_NAMES } from "./src/mcp/roblox-tools.js";
+import { ROBLOX_CAPABILITIES_URI } from "./src/roblox/capabilities.js";
+import type { RobloxAuthEnv } from "./src/roblox/types.js";
 import { VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI, registerVideoResources, videoStatusFlags } from "./src/mcp/video-resources.js";
 import { describeVideoCapabilities } from "./src/video/capabilities.js";
 import type { VideoEnv } from "./src/video/types.js";
 
-type Env = SessionManagerEnv & VideoEnv & { DEMO_API_KEY?: string; SSRF_GUARD_HTTP_FETCH?: string };
+type Env = SessionManagerEnv & VideoEnv & RobloxAuthEnv & { DEMO_API_KEY?: string; SSRF_GUARD_HTTP_FETCH?: string };
 const VERSION = "0.7.0";
 const SKILLS_API = "https://skills.sh/api/v1";
 
@@ -53,6 +56,32 @@ function browserCapabilitiesFor(env: unknown, requestUrl: string | null) {
     videoFrames: capabilities.videoFrames,
     reason: capabilities.reason ?? null,
     screenshots: capabilities.screenshots,
+  };
+}
+
+/**
+ * Synchronous Roblox surface summary for `demo_ping` / `/health`.
+ *
+ * Presence-only: whether the client id, the client secret and the token
+ * encryption key are configured, and which storage backend is bound. No values,
+ * no account records, no tokens — a linked account is per-browser and is reported
+ * by `/oauth/roblox/status` or `roblox_account_status` instead.
+ */
+function robloxFlags(env: Env) {
+  const clientId = String(env.ROBLOX_CLIENT_ID ?? "").trim();
+  const secret = String(env.ROBLOX_CLIENT_SECRET ?? "").trim();
+  return {
+    robloxOAuthConfigured: Boolean(clientId && secret),
+    robloxOAuthReason: !clientId
+      ? "ROBLOX_CLIENT_ID is not set on this Worker."
+      : !secret
+        ? "ROBLOX_CLIENT_SECRET is not set on this Worker."
+        : null,
+    robloxTokenStorage: env.ROBLOX_AUTH ? ("durable-object" as const) : ("memory" as const),
+    robloxTokenEncryption: String(env.ROBLOX_TOKEN_KEY ?? "").trim() ? ("aes-gcm-256" as const) : ("none" as const),
+    robloxAccountToolsRequireApiKey: !env.DEMO_API_KEY,
+    robloxOAuthRoutes: ["/oauth/roblox/start", "/oauth/roblox/callback", "/oauth/roblox/logout", "/oauth/roblox/status"],
+    robloxCapabilitiesResource: ROBLOX_CAPABILITIES_URI,
   };
 }
 
@@ -217,6 +246,7 @@ function server(env: Env, requestUrl: string | null = null, authorization: strin
         humanHandoff: capabilities.handoff,
         accessibilitySnapshot: capabilities.accessibilitySnapshot,
         provider: capabilities.provider,
+        ...robloxFlags(env),
         toolCount: DEMO_TOOL_NAMES.length,
         // Flattened for existing clients, plus the nested report for new ones.
         ...videoFlags,
@@ -467,6 +497,10 @@ function server(env: Env, requestUrl: string | null = null, authorization: strin
 
   registerVideoTools(mcp, { env: env as Env & Record<string, unknown>, requestUrl });
 
+  /* -------------------------------------------- authenticated Roblox account */
+
+  registerRobloxAccountTools(mcp, { env: env as unknown as Record<string, unknown>, requestUrl });
+
   /* ----------------------------------------------------------- skills tools */
 
   mcp.registerTool(
@@ -614,6 +648,8 @@ export const DEMO_TOOL_NAMES = [
   "browser_session",
   "browser_close",
   "browser_capabilities",
+  // Authenticated Roblox account (OAuth 2.0 + PKCE, server-side tokens only)
+  ...ROBLOX_TOOL_NAMES,
   // Public video understanding
   "inspect_video",
   "video_resolve",
@@ -658,10 +694,11 @@ export default {
       screenshotLinks: capabilities.screenshots,
       liveView: capabilities.liveView,
       ...video,
+      ...robloxFlags(env),
       skillsSh: true,
       composio: false,
       toolCount: TOOL_COUNT,
-      resources: [VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI],
+      resources: [VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI, ROBLOX_CAPABILITIES_URI],
     };
     if (url.pathname === "/") return Response.json({ ...status, capabilities });
     if (url.pathname === "/health") return Response.json({ ok: true, ...status });

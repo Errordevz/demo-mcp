@@ -22,6 +22,14 @@
       {
         "name": "BROWSER_SESSIONS",
         "class_name": "BrowserSession"
+      },
+      // Roblox OAuth state + encrypted token envelope. A Durable Object rather
+      // than KV because /oauth/roblox/start and /oauth/roblox/callback are seconds
+      // apart on different isolates (KV is eventually consistent) and because
+      // Roblox refresh tokens are single-use, so a lost race is unrecoverable.
+      {
+        "name": "ROBLOX_AUTH",
+        "class_name": "RobloxAuth"
       }
     ]
   },
@@ -29,6 +37,10 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["BrowserSession"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["RobloxAuth"]
     }
   ],
   // Workers AI binding. Enables server-side speech-to-text (video_transcribe)
@@ -50,6 +62,18 @@
     "VIDEO_MAX_DURATION_SECONDS": "600",
     "VIDEO_ARTIFACT_TTL_SECONDS": "3600",
     "VIDEO_RATE_LIMIT_PER_MINUTE": "12",
+    // ── Roblox OAuth 2.0 (account linking) ─────────────────────────────────
+    // Non-secret policy only. ROBLOX_CLIENT_ID / ROBLOX_CLIENT_SECRET /
+    // ROBLOX_TOKEN_KEY must be set as secrets (see docs/ROBLOX.md) and are
+    // intentionally absent here — a committed client secret is a leaked one.
+    "ROBLOX_OAUTH_SCOPES": "openid profile",
+    "OAUTH_STATE_TTL_SECONDS": "600",
+    "ROBLOX_SESSION_TTL_SECONDS": "1209600",
+    "ROBLOX_RATE_LIMIT_PER_MINUTE": "20",
+    "ROBLOX_OPEN_CLOUD_RATE_PER_MINUTE": "10",
+    // Set this to the Worker's own hostname to reject poisoned Host headers:
+    // "ROBLOX_ALLOWED_HOSTS": "demo-mcp.<your-subdomain>.workers.dev",
+
     // Optional Workers AI model ids (only used when the AI binding exists).
     "VIDEO_TRANSCRIPTION_MODEL": "@cf/openai/whisper",
     "VIDEO_VISION_MODEL": "@cf/llava-hf/llava-1.5-7b-hf"
