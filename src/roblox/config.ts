@@ -192,6 +192,17 @@ export function resolveRobloxConfig(env: RobloxAuthEnv, requestUrl: string, opti
   const accountKey = normalizeAccountKey(env.ROBLOX_ACCOUNT_KEY ?? "default");
   const hasClientSecret = clientSecret.length > 0;
   const enabled = clientId.length > 0 && hasClientSecret;
+  // Effective storage keeps /health (robloxFlags) and /oauth/roblox/status (vault) consistent:
+  // durable storage is only effective when the binding exists *and* encryption is available,
+  // otherwise the vault degrades to isolate memory and reports "memory"/"none".
+  const hasTokenKey = String(env.ROBLOX_TOKEN_KEY ?? "").trim().length > 0;
+  const effectiveStorage: RobloxOAuthConfig["storageMode"] = env.ROBLOX_AUTH && hasTokenKey ? "durable-object" : "memory";
+  const effectiveEncryption: RobloxOAuthConfig["encryption"] = hasTokenKey ? "aes-gcm-256" : "none";
+  const effectiveReason = hasTokenKey
+    ? null
+    : env.ROBLOX_AUTH
+      ? "ROBLOX_TOKEN_KEY is not configured, so tokens cannot be written to durable storage. Sessions live in isolate memory and must be repeated after the Worker recycles."
+      : "The ROBLOX_AUTH Durable Object binding is not deployed, so sessions live only in this Worker isolate.";
 
   return {
     enabled,
@@ -211,10 +222,11 @@ export function resolveRobloxConfig(env: RobloxAuthEnv, requestUrl: string, opti
     openCloudRatePerMinute: numberFrom(env.ROBLOX_OPEN_CLOUD_RATE_PER_MINUTE, 10, 1, 20),
     tokenSkewSeconds: numberFrom(env.ROBLOX_TOKEN_SKEW_SECONDS, 60, 0, 300),
     accountKey,
-    storageMode: env.ROBLOX_AUTH ? "durable-object" : "memory",
-    // Filled in by the vault factory once the cipher is resolved.
-    encryption: "none",
-    encryptionReason: null,
+    storageMode: effectiveStorage,
+    // Filled in by the vault factory once the cipher is resolved; keep an effective
+    // default here so callers that don't await createVault still see the consistent value.
+    encryption: effectiveEncryption,
+    encryptionReason: hasTokenKey ? null : effectiveReason,
   };
 }
 
