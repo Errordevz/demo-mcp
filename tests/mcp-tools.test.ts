@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import worker, { DEMO_TOOL_NAMES, TOOL_COUNT } from "../index.js";
 import platform from "../platform-entry.js";
@@ -138,6 +140,31 @@ describe("worker routes", () => {
     const listing = (await tools.json()) as { count: number; tools: string[] };
     expect(listing.count).toBe(TOOL_COUNT);
     expect(listing.tools).toContain("browser_pause_for_human");
+  });
+
+  it("reports one version everywhere, matching package.json", async () => {
+    const pkg = JSON.parse(readFileSync(path.resolve(__dirname, "../package.json"), "utf8")) as { version: string };
+    const health = (await (await platform.fetch(new Request("https://demo.test/health"), ENV as never, CTX)).json()) as Record<string, any>;
+    const stats = (await (await platform.fetch(new Request("https://demo.test/platform/stats"), ENV as never, CTX)).json()) as Record<string, any>;
+    const init = await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test-client", version: "1" } });
+    const ping = await callTool("demo_ping", {});
+    expect(health.version, "GET /health (index.ts)").toBe(pkg.version);
+    expect(stats.version, "GET /platform/stats (platform-entry.ts)").toBe(pkg.version);
+    expect(init.result?.serverInfo?.version, "MCP initialize").toBe(pkg.version);
+    expect(ping.parsed?.version, "demo_ping").toBe(pkg.version);
+    // The two Workers each keep their own constant; pin both to the package so a release
+    // cannot ship one surface on a stale version.
+    for (const file of ["index.ts", "platform-entry.ts"]) {
+      const source = readFileSync(path.resolve(__dirname, "..", file), "utf8");
+      const declared = [...source.matchAll(/const VERSION = "(\d+\.\d+\.\d+)"/g)].map((match) => match[1]);
+      expect(declared, `${file} declares exactly one version`).toEqual([pkg.version]);
+    }
+    // The outbound User-Agent is a version string too; a stale one is a silent lie to
+    // whoever is being called.
+    const oauth = readFileSync(path.resolve(__dirname, "../src/roblox/oauth.ts"), "utf8");
+    const agents = [...oauth.matchAll(/DEMO-MCP\/(\d+\.\d+\.\d+)/g)].map((match) => match[1]);
+    expect(agents.length, "the User-Agent must carry a version").toBeGreaterThan(0);
+    for (const declared of agents) expect(declared).toBe(pkg.version);
   });
 
   it("serves telemetry without secrets", async () => {

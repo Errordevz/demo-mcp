@@ -8,3 +8,10 @@ dist-test/
 !.env.example
 *.log
 .DS_Store
+
+# Coding-agent skill installs (`npx skills add …`) land in these tool-specific
+# directories in the working tree. The repo instead ships the vendored copy at
+# skills/typesafe-ai/ and the provenance in skills-lock.json. See README → "Skills".
+.agents/
+.claude/
+agent/

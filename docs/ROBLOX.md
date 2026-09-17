@@ -320,5 +320,6 @@ Two things worth knowing before you report a bug:
   HTML, `Origin`/`Sec-Fetch-Site` checks, per-route rate limiting.
 * `src/mcp/roblox-tools.ts` — field-built payloads through the redaction layer, account
   tools gated behind `DEMO_API_KEY`, `not_supported` instead of workarounds.
-* `tests/roblox-oauth.test.ts`, `tests/roblox-account.test.ts` — 82 tests for the
-  above, including a console-capture test that no token ever reaches a log.
+* `tests/roblox-oauth.test.ts` (50 cases) and `tests/roblox-account.test.ts`
+  (35 cases) — 85 tests for the above, including a console-capture test that no
+  token ever reaches a log.

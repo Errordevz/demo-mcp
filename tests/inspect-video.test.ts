@@ -22,8 +22,13 @@
  * tests); everything else — intent detection, frame planning, the SSRF-guarded
  * resolver, frame decoding, R2 storage, analysis, the MCP surface — is real.
  */
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import worker, { DEMO_TOOL_NAMES, TOOL_COUNT } from "../index.js";
+
+/** The server version is the package version; tests must not pin a stale literal. */
+const PACKAGE_VERSION = (JSON.parse(readFileSync(path.resolve(__dirname, "../package.json"), "utf8")) as { version: string }).version;
 import { VideoProcessor } from "../src/video/processor.js";
 import { detectVideoIntent } from "../src/video/intent.js";
 import { planFrameCount, planFrameTimestamps } from "../src/video/frame-plan.js";
@@ -552,7 +557,7 @@ describe("MCP surface: inspect_video", () => {
       clientInfo: { name: "test-client", version: "1.0" },
     });
     const instructions = String(response.result?.instructions ?? "");
-    expect(response.result?.serverInfo?.version).toBe("0.7.0");
+    expect(response.result?.serverInfo?.version).toBe(PACKAGE_VERSION);
     expect(instructions).toMatch(/inspect_video/);
     expect(instructions).toMatch(/automatically call/i);
     expect(instructions).toMatch(/React to this/);
@@ -650,11 +655,11 @@ describe("MCP surface: inspect_video", () => {
     expect(bad.error?.code ?? bad.result?.isError).toBeTruthy();
   });
 
-  it("reports the 0.7.0 automatic video inspection capability via demo_ping", async () => {
+  it("reports the automatic video inspection capability via demo_ping", async () => {
     const response = await rpc("tools/call", { name: "demo_ping", arguments: {} }, {});
     const text = (response.result?.content ?? []).map((entry: { text?: string }) => entry.text ?? "").join("\n");
     const payload = JSON.parse(text) as Record<string, any>;
-    expect(payload.version).toBe("0.7.0");
+    expect(payload.version).toBe(PACKAGE_VERSION);
     expect(payload.automaticVideoInspection).toBe(true);
     expect(payload.toolCount).toBe(TOOL_COUNT);
   });

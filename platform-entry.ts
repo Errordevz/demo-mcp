@@ -1,4 +1,5 @@
 import demoWorker, { TOOL_COUNT } from "./index";
+import { resolveJevConfig } from "./src/jev/config.js";
 import { demoUi } from "./ui";
 import { handleRobloxOAuthRoute, isRobloxOAuthPath } from "./src/roblox/routes.js";
 import { SessionManager } from "./src/session/manager.js";
@@ -32,9 +33,17 @@ type Env = {
   ROBLOX_RATE_LIMIT_PER_MINUTE?: string | number;
   ROBLOX_OPEN_CLOUD_RATE_PER_MINUTE?: string | number;
   ROBLOX_AUTH?: unknown;
+  /** TypeSafe / Jev decision engine: the credential is a secret, never a var. */
+  TYPESAFE_API_KEY?: string;
+  TYPESAFE_ENABLED?: string;
+  TYPESAFE_MODEL?: string;
+  TYPESAFE_DECISION_TIMEOUT_MS?: string | number;
+  TYPESAFE_REVIEW_THRESHOLD?: string | number;
+  TYPESAFE_ACCEPT_THRESHOLD?: string | number;
 };
 
-const VERSION = "0.6.1";
+/** Kept equal to the Worker's own version in index.ts so both surfaces agree. */
+const VERSION = "0.8.2";
 const DEFAULT_PLATFORM_ORIGIN = "https://demo-platform.pages.dev";
 const LOCAL_ORIGINS = new Set(["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:3000", "http://127.0.0.1:5173"]);
 const startedAt = Date.now();
@@ -86,6 +95,27 @@ function unauthorized(request: Request, env: Env): Response | null {
  * and it never reads an account record (a linked account is only reported as
  * "a session may exist", because "is this browser connected" is per-browser).
  */
+/** Decision-engine surface for telemetry: presence and policy only, never the credential. */
+function jevSurface(env: Env) {
+  const config = resolveJevConfig(env as unknown as Record<string, unknown>);
+  return {
+    available: config.available,
+    enabled: config.enabled,
+    credentialConfigured: config.apiKeyPresent,
+    model: config.model,
+    reviewThreshold: config.reviewThreshold,
+    acceptThreshold: config.acceptThreshold,
+    // Public telemetry must not carry a string that looks like a credential name
+    // (tests/mcp-tools.test.ts asserts that on the whole payload), so when the key is
+    // missing we point at the route that documents it instead of quoting the variable.
+    reason: config.available
+      ? null
+      : !config.apiKeyPresent
+        ? "No TypeSafe credential is configured on this Worker. See GET /capabilities/jev for the secret name and how to set it; DEMO's own rules decide until then."
+        : config.disabledReason,
+  };
+}
+
 function robloxSurface(env: Env) {
   const clientId = String(env.ROBLOX_CLIENT_ID ?? "").trim();
   const secret = String(env.ROBLOX_CLIENT_SECRET ?? "").trim();
@@ -111,7 +141,7 @@ function telemetry(env: Env) {
     uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
     requestCountSinceIsolateStart: requestCount,
     toolCount: TOOL_COUNT,
-    skillCount: 8,
+    skillCount: 9,
     architecture: { surface: "DEMO Platform", execution: "DEMO MCP", credentials: "server-only" },
     capabilities: {
       mcp: true,
@@ -131,6 +161,8 @@ function telemetry(env: Env) {
       skillsSh: true,
       composio: false,
       robloxOAuth: robloxSurface(env),
+      jevDecisionEngine: jevSurface(env),
+      typedDecisions: jevSurface(env).available,
     },
     connections: [
       { name: "DEMO MCP", type: "Execution Worker", connected: true },
@@ -140,6 +172,7 @@ function telemetry(env: Env) {
       { name: "Screenshot storage", type: "Cloudflare R2", connected: capabilities.screenshots },
       { name: "Roblox OAuth", type: "Roblox Open Cloud (official OAuth 2.0)", connected: robloxSurface(env).configured },
       { name: "Roblox session store", type: "Durable Object (RobloxAuth)", connected: robloxSurface(env).storage === "durable-object" },
+      { name: "TypeSafe Jev", type: "Structured decision engine (HTTP API)", connected: jevSurface(env).available },
     ],
     endpoints: {
       ui: "/",
@@ -149,6 +182,7 @@ function telemetry(env: Env) {
       telemetry: "/platform/stats",
       screenshots: "/screenshots/:id",
       robloxOAuth: "/oauth/roblox/{start,callback,logout,status}",
+      jevCapabilities: "/capabilities/jev",
     },
     telemetry: { scope: "worker-isolate", containsSecrets: false, containsUserContent: false },
   };

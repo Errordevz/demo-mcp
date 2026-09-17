@@ -8,6 +8,7 @@ import { accessStatusGuidance } from "../video/access.js";
 import { describeStream, QUALITY_PREFERENCES, type QualityPreference } from "../video/streams.js";
 import { notAVideoMessage } from "../video/probe.js";
 import { VideoProcessor, type FrameCaptureResult } from "../video/processor.js";
+import { resolveVideoIntentWithJev } from "../jev/decisions.js";
 import type {
   VideoAnalysisMode,
   VideoAnalyzeResult,
@@ -60,7 +61,13 @@ const inputFields = {
 };
 
 function processor(ctx: VideoToolContext): VideoProcessor {
-  return new VideoProcessor(ctx.env, ctx.requestUrl ?? null);
+  // The Jev decision hook is injected here rather than imported by the video module, so
+  // `src/video` keeps no provider dependency and stays unit-testable offline. The hook
+  // is a no-op unless TYPESAFE_API_KEY is configured, and its result can only change
+  // which analysis focus is used — never a permission, confirmation or safety check.
+  return new VideoProcessor(ctx.env, ctx.requestUrl ?? null, {
+    intentHook: (input, deterministic) => resolveVideoIntentWithJev({ env: ctx.env }, input, deterministic),
+  });
 }
 
 function inputFrom(args: { url?: string; video_reference?: string; audio_reference?: string }): VideoInput {

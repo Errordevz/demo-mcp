@@ -126,6 +126,16 @@ Automatic behaviour:
   `ending` ("what happens at the end?"), `beginning`, `scary`, `humor`, `people`,
   `game`, `summary`. The focus biases frame allocation and adds a *curated*
   hint to the vision prompt — raw user text is never injected into the prompt.
+* **Optional Jev tie-breaker** (since 0.8.2): when the message *had* text and no
+  pattern matched, `src/video/intent-hook.ts` may ask TypeSafe's Jev for a typed
+  `choice` over exactly those 11 focus values. It replaces `focus` only when the
+  answer is inside the set and the confidence clears the configured band; the hint
+  still comes from `analysisHintFor(focus)`, so the model can never write prompt
+  text. A bare link, a message the patterns already understood, a low-confidence
+  answer, or any provider failure (missing key, 401, 429, timeout, malformed)
+  means no call or no change: the regex verdict stands and the inspection still
+  completes. `intent.decision` reports what happened (`source`, `certainty`,
+  `policy`, `fallbackUsed`). See [`JEV.md`](JEV.md).
 * **Dynamic frame plan** (`src/video/frame-plan.ts`): under 10 s → 5–8 frames;
   10–60 s → 8–12; longer → up to 16 with strict caps; unknown duration → 8 and
   even sampling once the browser decodes the real duration. The first and final

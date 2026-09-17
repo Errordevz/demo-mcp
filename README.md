@@ -26,6 +26,7 @@ DEMO MCP Worker  ─────────────────────
         ├── /video-assets/:ref  expiring R2 video/audio artifact│
         ├── /oauth/roblox/*   Roblox OAuth 2.0 + PKCE (state, callback, status, logout)
         │        └── RobloxAuth Durable Object (encrypted tokens, single-use state)│
+        ├── /capabilities/jev  Jev decision-engine report (presence + policy only)
         ├── /                    inspector UI (demoUi asset)   │
         └── skills.sh (remote)                                 │
                                                               │
@@ -38,6 +39,7 @@ DEMO MCP Worker  ─────────────────────
         ├── ScreenshotManager    capture bounds + R2 storage
         ├── MediaInspector       metadata + rendered video frame sampling
         ├── VideoPipeline         safe resolve/download/audio/transcript orchestration
+        ├── JevDecisionEngine     TypeSafe structured decisions (advisory, opt-in)
         └── UrlGuard             SSRF protection
 ```
 
@@ -482,6 +484,39 @@ browser via `puppeteer.connect(env.BROWSER, sessionId)`.
   identified as bot traffic, so some pages will block it regardless of what we
   do — the tools report that rather than hiding it.
 
+## Jev Decision Engine (TypeSafe)
+
+DEMO can ask **Jev** — TypeSafe's System One decision model — for narrow typed judgments
+inside its workflows. It is a **decision capability, not a chat model**: it produces no
+user-facing prose, it is not selectable in any model picker, it cannot name a tool to run,
+and it cannot satisfy or skip a permission check. The full contract, every question, the
+thresholds and the fallback matrix live in [`docs/JEV.md`](docs/JEV.md).
+
+| Tool | What it does |
+| --- | --- |
+| `jev_decide` | Run one of the **three decision templates defined in code** (`tool_route`, `result_review`, `video_intent_focus`) over bounded state and return the typed answer with its `probabilities`, the `certainty` the model reported, the `policy` band DEMO applied, and DEMO's own deterministic value alongside. Refuses caller-supplied instructions or option sets, and refuses to run at all when `DEMO_API_KEY` is unset — an open endpoint must not be able to spend your API quota. |
+| `jev_capabilities` | Live report: configured/enabled state, model id, thresholds, limits, the templates, documented status codes, and what this is *not*. Presence-only — it never reads or echoes the credential, and it names no endpoint the operator can redirect. |
+| `skill_builtin_typesafe` | The bundled TypeSafe guidance note for a connected AI, same shape as `skill_builtin_caveman`. Documentation only: DEMO does not install or execute skill code. |
+
+One workflow calls it automatically, and only as a tie-breaker: `inspect_video` asks Jev to
+classify the **analysis focus** when the user wrote something *and* DEMO's intent regexes
+matched nothing. High confidence applies, the middle band applies with `requiresReview`,
+low confidence or any failure (missing key, 401, rate limit, timeout, malformed answer)
+falls back to the deterministic rules — and the video inspection still completes. The
+engine's answer stays visible in `intent.decision`, so nothing is quietly overridden.
+
+Set it up with one dashboard field:
+
+```text
+TYPESAFE_API_KEY   Worker secret (Cloudflare dashboard → Settings → Variables and
+                   secrets → Encrypt). Not a var, never in a URL, log or result.
+```
+
+Verify from a browser: `GET /capabilities/jev` (or `/health`, which reports
+`jevDecisionEngine`, `jevApiKeyConfigured`, `jevModel`). Disable everything with
+`TYPESAFE_ENABLED=false`: the code path returns DEMO's own rules with zero network calls.
+`jev_decide` is also reachable from a browser-free client only — see `docs/JEV.md` §6.
+
 ## Configuration
 
 See `.env.example` for a copyable template covering both the live test suite
@@ -522,6 +557,11 @@ Variables (all optional):
 | `ROBLOX_REDIRECT_URI` / `ROBLOX_ALLOWED_HOSTS` | *(derived)* | Pin the callback origin, or restrict which hosts may run the flow. |
 | `OAUTH_STATE_TTL_SECONDS` / `ROBLOX_SESSION_TTL_SECONDS` | `600` / `1209600` | State lifetime; browser-session lifetime. |
 | `ROBLOX_RATE_LIMIT_PER_MINUTE` / `ROBLOX_OPEN_CLOUD_RATE_PER_MINUTE` | `20` / `10` | Per-client cap on the OAuth routes; self-imposed budget kept below Roblox's published per-authorization limits. |
+| `TYPESAFE_ENABLED` | on when the key exists | Jev decision-engine switch. `false`/`0`/`off`/`no` short-circuits every decision path to DEMO's own rules with **no network call**. |
+| `TYPESAFE_MODEL` | `jev-latest` | The `model` id sent to the API. `jev-latest` tracks the newest stable release; pin `jev-1.13.0` if you tune thresholds against a fixed version. |
+| `TYPESAFE_DECISION_TIMEOUT_MS` | `2500` | Per-request budget (250–15 000 ms). Past it the decision is abandoned and the fallback used, never queued. |
+| `TYPESAFE_REVIEW_THRESHOLD` / `TYPESAFE_ACCEPT_THRESHOLD` | `0.5` / `0.7` | Confidence bands: below review → recorded but not acted on; between → applied with `requiresReview`; at or above accept → applied. `accept` is clamped to `≥ review`. Validate both on your own traffic. |
+| `TYPESAFE_API_KEY` | *(unset = engine off)* | TypeSafe key. **Worker secret only** — never a `vars` value, never in a URL, log, tool result or error message. |
 
 `AI` and `VIDEO_ARTIFACTS` are optional bindings. The current deployment reuses
 `SCREENSHOTS` for temporary video artifacts so adding these bindings is not
@@ -561,13 +601,17 @@ DEMO reports these limits through `browser_capabilities` and surfaces
   the codebase. Tokens are encrypted at rest, never appear in a URL, HTML, log line, MCP
   result or cookie, and `roblox_account_*` tools refuse to run on an unauthenticated
   `/mcp` endpoint.
+* **Structured decisions** — the TypeSafe key is a Worker secret read at call time, never
+  stored on a config object, never in a URL or result, and the API origin is pinned in code.
+  Jev answers only from option sets DEMO enumerated in code; an out-of-set answer is rejected
+  rather than mapped, and no decision can widen a limit, skip a confirmation or enable a tool.
 * **Auth preserved** — `DEMO_API_KEY` behaviour, the `/mcp` endpoint, existing
   routes and every original tool are unchanged.
 
 ## Testing
 
 ```bash
-npm test              # 120+ unit/integration tests, including a wrangler build gate
+npm test              # 400+ offline unit/integration tests, including a wrangler build gate
 npm run typecheck     # tsc --noEmit (src + tests)
 DEMO_MCP_LIVE=1 CLOUDFLARE_ACCOUNT_ID=… CLOUDFLARE_API_TOKEN=… npm run test:live
 # video acceptance only:
@@ -604,6 +648,20 @@ DEMO continues to search, fetch, audit and apply skills from skills.sh. Skills
 are treated as instruction material and cannot override system, developer,
 safety or user instructions. DEMO does not execute arbitrary installer commands
 merely because a skill requests them.
+
+The **TypeSafe agent skill** was installed with the provider's documented one method —
+`npx skills add typesafe-ai/skills --skill typesafe-ai` — and then read and followed while
+this feature was built. The installer wrote `.agents/skills/typesafe-ai/` (the real files),
+symlinks for the other agent directories, and `skills-lock.json` with the source and content
+hash (tracked, so an unrefreshed copy is checkable). `skills/typesafe-ai/{SKILL.md,LICENSE}`
+is the vendored copy that ships with the repo,
+next to `skills/caveman/SKILL.md`, so the guidance survives a fresh clone; the agent-specific
+install dirs stay git-ignored. Refresh with `npx skills update`.
+
+None of that is runtime execution: a Worker cannot install or run skill code. Nothing was
+added to `src/`, `index.ts` or the bundle; `skill_install_info` prints the command instead of
+running it, `skill_builtin_typesafe` returns the guidance text, and the capability that *is*
+runtime is `jev_decide` (`docs/JEV.md`).
 
 ## Screenshot delivery
 

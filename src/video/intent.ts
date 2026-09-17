@@ -29,6 +29,21 @@ export type IntentFocus =
   | "summary"
   | "general";
 
+/** Every focus this module knows, in one list. Anything else must be rejected. */
+export const FOCUS_VALUES: readonly IntentFocus[] = [
+  "reaction",
+  "authenticity",
+  "humor",
+  "text_ocr",
+  "ending",
+  "beginning",
+  "scary",
+  "people",
+  "game",
+  "summary",
+  "general",
+];
+
 export interface DetectedIntent {
   userIntent: string | null;
   question: string | null;
@@ -118,6 +133,15 @@ const FOCUS_HINTS: Record<IntentFocus, string | null> = {
   reaction: "Focus on tone, surprise, and the most visually striking or emotionally salient moments.",
   general: null,
 };
+
+/**
+ * The curated vision-prompt hint for a focus. Exported so a focus chosen elsewhere
+ * (for example by the Jev decision engine) can only ever select from this same map —
+ * raw user text is never injected into the prompt.
+ */
+export function analysisHintFor(focus: IntentFocus): string | null {
+  return FOCUS_HINTS[focus] ?? null;
+}
 
 const MAX_INTENT_CHARS = 2_000;
 

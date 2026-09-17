@@ -12,13 +12,18 @@ import { resolveScreenshotBase } from "./src/session/factory.js";
 import { registerVideoTools } from "./src/mcp/video-tools.js";
 import { registerRobloxAccountTools, ROBLOX_TOOL_NAMES } from "./src/mcp/roblox-tools.js";
 import { ROBLOX_CAPABILITIES_URI } from "./src/roblox/capabilities.js";
+import { registerJevTools, JEV_TOOL_NAMES, jevCapabilitiesReport } from "./src/mcp/jev-tools.js";
+import { JEV_CAPABILITIES_URI } from "./src/jev/capabilities.js";
+import { jevFlags, type JevEnv } from "./src/jev/config.js";
 import type { RobloxAuthEnv } from "./src/roblox/types.js";
 import { VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI, registerVideoResources, videoStatusFlags } from "./src/mcp/video-resources.js";
 import { describeVideoCapabilities } from "./src/video/capabilities.js";
 import type { VideoEnv } from "./src/video/types.js";
 
-type Env = SessionManagerEnv & VideoEnv & RobloxAuthEnv & { DEMO_API_KEY?: string; SSRF_GUARD_HTTP_FETCH?: string };
-const VERSION = "0.7.0";
+type Env = SessionManagerEnv & VideoEnv & RobloxAuthEnv & JevEnv & { DEMO_API_KEY?: string; SSRF_GUARD_HTTP_FETCH?: string };
+/** Release version. Reported by `demo_ping`, `/health`, `/tools`, the MCP initialize
+ * result and `/platform/stats` — one constant, so those can never disagree. */
+const VERSION = "0.8.2";
 const SKILLS_API = "https://skills.sh/api/v1";
 
 /**
@@ -247,6 +252,7 @@ function server(env: Env, requestUrl: string | null = null, authorization: strin
         accessibilitySnapshot: capabilities.accessibilitySnapshot,
         provider: capabilities.provider,
         ...robloxFlags(env),
+        ...jevFlags(env as unknown as Record<string, unknown>),
         toolCount: DEMO_TOOL_NAMES.length,
         // Flattened for existing clients, plus the nested report for new ones.
         ...videoFlags,
@@ -501,6 +507,10 @@ function server(env: Env, requestUrl: string | null = null, authorization: strin
 
   registerRobloxAccountTools(mcp, { env: env as unknown as Record<string, unknown>, requestUrl });
 
+  /* -------------------------------------- Jev decision engine (TypeSafe) */
+
+  registerJevTools(mcp, { env: env as unknown as Record<string, unknown>, requestUrl });
+
   /* ----------------------------------------------------------- skills tools */
 
   mcp.registerTool(
@@ -597,6 +607,21 @@ function server(env: Env, requestUrl: string | null = null, authorization: strin
     async ({ installUrl }) => textResult({ command: `npx skills add ${installUrl}`, source: installUrl, note: "Review the skill and audit before installing or applying it." }),
   );
   mcp.registerTool(
+    "skill_builtin_typesafe",
+    { title: "Use Built-in TypeSafe Skill", description: "Return DEMO's bundled TypeSafe/Jev skill guidance for the current task.", inputSchema: z.object({}) },
+    async () =>
+      textResult({
+        name: "typesafe-ai",
+        source: "github:typesafe-ai/skills → skills/typesafe-ai (installed for the coding agent with `npx skills add typesafe-ai/skills --skill typesafe-ai`)",
+        instructions:
+          "Use TypeSafe's System One models (Jev) as typed decision primitives, not as a chat model: keep deterministic rules, permissions and execution in code; ask one narrow question per judgment with the allowed answers enumerated in code (choice), rated (score) or yes/no (noul); read probabilities and confidence as evidence about the answer rather than proof it is right; act above the accept bar, record between the bars, and fall back to code below the review floor; never let a judgment authorize a write, a spend, an account change or a bypass; keep questions and thresholds in one reviewable file. Read the live docs (docs.typesafe.ai) before changing the contract.",
+        appliesTo: ["jev_decide", "jev_capabilities", "inspect_video focus resolution", "any new TypeSafe/Jev work in this repository"],
+        runtimeNote:
+          "DEMO does not install or execute skill code. This is the guidance the coding agent (or a connected AI editing this project) follows; the runtime capability is the jev_* tools and the hook in src/video/processor.ts. Full skill text: skills/typesafe-ai/SKILL.md (vendored) and docs/JEV.md.",
+      }),
+  );
+
+  mcp.registerTool(
     "skill_builtin_caveman",
     { title: "Use Built-in Caveman Skill", description: "Return DEMO's bundled Caveman skill instructions for the current task.", inputSchema: z.object({}) },
     async () =>
@@ -673,6 +698,9 @@ export const DEMO_TOOL_NAMES = [
   "skills_curated",
   "skill_install_info",
   "skill_builtin_caveman",
+  "skill_builtin_typesafe",
+  // Jev decision engine (TypeSafe)
+  ...JEV_TOOL_NAMES,
 ] as const;
 
 export const TOOL_COUNT = DEMO_TOOL_NAMES.length;
@@ -695,14 +723,16 @@ export default {
       liveView: capabilities.liveView,
       ...video,
       ...robloxFlags(env),
+      ...jevFlags(env as unknown as Record<string, unknown>),
       skillsSh: true,
       composio: false,
       toolCount: TOOL_COUNT,
-      resources: [VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI, ROBLOX_CAPABILITIES_URI],
+      resources: [VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI, ROBLOX_CAPABILITIES_URI, JEV_CAPABILITIES_URI],
     };
     if (url.pathname === "/") return Response.json({ ...status, capabilities });
     if (url.pathname === "/health") return Response.json({ ok: true, ...status });
     if (url.pathname === "/tools") return Response.json({ count: TOOL_COUNT, tools: DEMO_TOOL_NAMES, resources: [VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI] });
+    if (url.pathname === "/capabilities/jev") return Response.json(jevCapabilitiesReport(env as unknown as Record<string, unknown>));
     if (url.pathname === "/capabilities/video") {
       return Response.json(describeVideoCapabilities(env as Env & Record<string, unknown>, browserCapabilitiesFor(env, request.url)));
     }

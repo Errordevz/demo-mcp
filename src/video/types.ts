@@ -9,6 +9,7 @@
 import type { AccessStatusInfo, VideoAccessStatus } from "./access.js";
 import type { MediaSignature } from "./probe.js";
 import type { QualityPreference, StreamCandidate } from "./streams.js";
+import type { DetectedIntent, IntentInput } from "./intent.js";
 import type { TikTokAccessFlags, TikTokMusic, TikTokStats } from "../browser/tiktok.js";
 
 export type VideoPlatform = "tiktok" | "instagram" | "youtube" | "x" | "reddit" | "generic";
@@ -321,6 +322,31 @@ export interface InspectVideoSource {
 }
 
 /** Result of the high-level `inspect_video` pipeline. */
+/**
+ * Optional decision hook the tool layer may inject so this module never depends on a
+ * decision provider. It receives the deterministic verdict and may return a refined one
+ * plus the record of what the engine actually said.
+ */
+export type IntentDecisionHook = (
+  input: IntentInput,
+  deterministic: DetectedIntent,
+) => Promise<{ intent: DetectedIntent | Partial<DetectedIntent>; decision?: unknown }>;
+
+/** What a decision engine contributed, reported verbatim so it can be audited. */
+export interface IntentDecisionRecord {
+  template: string;
+  decision: string;
+  source: string;
+  policy: string;
+  certainty: number | null;
+  thresholds: { review: number; accept: number };
+  requiresReview: boolean;
+  reviewReason: string | null;
+  proposedDecision: string | null;
+  model: string | null;
+  note: string | null;
+}
+
 export interface InspectVideoResult {
   inspectionStatus: "complete" | "partial" | "failed";
   source: InspectVideoSource;
@@ -329,6 +355,12 @@ export interface InspectVideoResult {
     question: string | null;
     reactionMode: boolean;
     focus: string;
+    /**
+     * Present only when a decision engine is configured *and* DEMO's own rules could
+     * not decide the focus. Advisory: it refined which frames to look at and nothing
+     * else — it granted no permission and skipped no confirmation.
+     */
+    decision?: IntentDecisionRecord | null;
   };
   frames: InspectVideoFrame[];
   detectedScenes: InspectVideoScene[] | null;
