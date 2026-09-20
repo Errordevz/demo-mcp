@@ -35,6 +35,7 @@ type Env = {
   ROBLOX_AUTH?: unknown;
   /** TypeSafe / Jev decision engine: the credential is a secret, never a var. */
   TYPESAFE_API_KEY?: string;
+  YOUTUBE_API_KEY?: string;
   TYPESAFE_ENABLED?: string;
   TYPESAFE_MODEL?: string;
   TYPESAFE_DECISION_TIMEOUT_MS?: string | number;
@@ -43,7 +44,7 @@ type Env = {
 };
 
 /** Kept equal to the Worker's own version in index.ts so both surfaces agree. */
-const VERSION = "0.8.2";
+const VERSION = "0.8.3 beta";
 const DEFAULT_PLATFORM_ORIGIN = "https://demo-platform.pages.dev";
 const LOCAL_ORIGINS = new Set(["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:3000", "http://127.0.0.1:5173"]);
 const startedAt = Date.now();
@@ -137,6 +138,17 @@ function robloxSurface(env: Env) {
   };
 }
 
+/** YouTube surface for telemetry: presence only, never the credential. */
+function youtubeSurface(env: Env) {
+  const apiKey = String(env.YOUTUBE_API_KEY ?? "").trim();
+  return {
+    available: apiKey.length > 0,
+    tools: ["youtube_search", "youtube_video", "youtube_channel", "youtube_playlist"],
+    scope: "public_only",
+    noOAuth: true,
+  };
+}
+
 function telemetry(env: Env) {
   const capabilities = new SessionManager(env as never).capabilities();
   return {
@@ -170,6 +182,7 @@ function telemetry(env: Env) {
       robloxOAuth: robloxSurface(env),
       jevDecisionEngine: jevSurface(env),
       typedDecisions: jevSurface(env).available,
+      youtube: youtubeSurface(env),
     },
     connections: [
       { name: "DEMO MCP", type: "Execution Worker", connected: true },
@@ -180,6 +193,7 @@ function telemetry(env: Env) {
       { name: "Roblox OAuth", type: "Roblox Open Cloud (official OAuth 2.0)", connected: robloxSurface(env).configured },
       { name: "Roblox session store", type: "Durable Object (RobloxAuth)", connected: robloxSurface(env).storage === "durable-object" },
       { name: "TypeSafe Jev", type: "Structured decision engine (HTTP API)", connected: jevSurface(env).available },
+      { name: "YouTube Data API", type: "Public metadata (Data API v3)", connected: youtubeSurface(env).available },
     ],
     endpoints: {
       ui: "/",
@@ -190,6 +204,7 @@ function telemetry(env: Env) {
       screenshots: "/screenshots/:id",
       robloxOAuth: "/oauth/roblox/{start,callback,logout,status}",
       jevCapabilities: "/capabilities/jev",
+      youtubeCapabilities: "/capabilities/youtube",
     },
     telemetry: { scope: "worker-isolate", containsSecrets: false, containsUserContent: false },
   };

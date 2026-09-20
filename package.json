@@ -1,6 +1,6 @@
 {
   "name": "demo-cloudflare-mcp",
-  "version": "0.8.2",
+  "version": "0.8.3 beta",
   "private": true,
   "type": "module",
   "scripts": {

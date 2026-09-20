@@ -643,7 +643,7 @@ describe("Jev MCP tools", () => {
 
     const health = await worker.fetch(new Request("https://demo.test/health"), {} as never, CTX);
     const flags = (await health.json()) as Record<string, unknown>;
-    expect(flags).toMatchObject({ version: "0.8.2", jevDecisionEngine: false, jevApiKeyConfigured: false, jevModel: "jev-latest" });
+    expect(flags).toMatchObject({ version: "0.8.3 beta", jevDecisionEngine: false, jevApiKeyConfigured: false, jevModel: "jev-latest" });
     expect((flags.resources as string[])).toContain("demo://capabilities/jev");
   });
 });
