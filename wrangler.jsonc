@@ -53,10 +53,10 @@
     // ── Secrets are deliberately NOT declared here ─────────────────────────────
     // Set them in the dashboard (Workers → Settings → Variables and secrets →
     // Encrypt) or with `wrangler secret put <NAME>`, per environment:
-    //   DEMO_API_KEY          — bearer token required on /mcp. Unset means /mcp is
-    //                           open, which in turn disables the roblox_account_* and
-    //                           jev_decide tools on purpose (an anonymous endpoint must
-    //                           not read a linked account or spend a paid API quota).
+    //   DEMO_API_KEY          — existing private-tool bearer for roblox_account_*
+    //                           and jev_decide only. /mcp transport is always public.
+    //                           Keep this secret: anonymous callers must not read
+    //                           linked accounts or invoke the paid decision tool.
     //   ROBLOX_CLIENT_SECRET  — Roblox OAuth app secret (ROBLOX_CLIENT_ID may be a var)
     //   ROBLOX_TOKEN_KEY      — 32+ random bytes; encrypts tokens at rest
     //   TYPESAFE_API_KEY      — TypeSafe/Jev decision API key

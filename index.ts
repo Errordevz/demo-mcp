@@ -106,11 +106,6 @@ function robloxFlags(env: Env) {
   };
 }
 
-function authorized(request: Request, env: Env) {
-  if (!env.DEMO_API_KEY) return true;
-  return (request.headers.get("Authorization") ?? "") === `Bearer ${env.DEMO_API_KEY}`;
-}
-
 async function retry<T>(fn: () => Promise<T>, attempts = 2, delayMs = 350): Promise<T> {
   let last: unknown;
   for (let i = 0; i < attempts; i++) {
@@ -523,11 +518,11 @@ function server(env: Env, requestUrl: string | null = null, authorization: strin
 
   /* -------------------------------------------- authenticated Roblox account */
 
-  registerRobloxAccountTools(mcp, { env: env as unknown as Record<string, unknown>, requestUrl });
+  registerRobloxAccountTools(mcp, { env: env as unknown as Record<string, unknown>, requestUrl, authorization });
 
   /* -------------------------------------- Jev decision engine (TypeSafe) */
 
-  registerJevTools(mcp, { env: env as unknown as Record<string, unknown>, requestUrl });
+  registerJevTools(mcp, { env: env as unknown as Record<string, unknown>, requestUrl, authorization });
 
   /* ---------------------------------------------- public YouTube Data API v3 */
 
@@ -766,8 +761,9 @@ export default {
       return Response.json(describeVideoCapabilities(env as Env & Record<string, unknown>, browserCapabilitiesFor(env, request.url)));
     }
     if (url.pathname !== "/mcp") return new Response("Not Found", { status: 404 });
-    if (!authorized(request, env)) return Response.json({ error: "Unauthorized" }, { status: 401 });
-    return createMcpHandler((mcpContext) => server(env, mcpContext.requestInfo?.url ?? request.url ?? null))(request, env, ctx);
+    // MCP transport is public. Only private account/paid tools validate the
+    // optional bearer; protocol validation remains owned by the MCP transport.
+    return createMcpHandler((mcpContext) => server(env, mcpContext.requestInfo?.url ?? request.url ?? null, request.headers.get("Authorization")))(request, env, ctx);
   },
 };
 

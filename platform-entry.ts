@@ -81,13 +81,6 @@ function withCors(response: Response, request: Request, env: Env): Response {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
-function unauthorized(request: Request, env: Env): Response | null {
-  if (!env.DEMO_API_KEY) return null;
-  const provided = request.headers.get("Authorization") || "";
-  if (provided === `Bearer ${env.DEMO_API_KEY}`) return null;
-  return Response.json({ error: "Unauthorized" }, { status: 401 });
-}
-
 /**
  * Non-secret Roblox surface summary for telemetry.
  *
@@ -338,9 +331,6 @@ export default {
       const id = url.pathname.slice("/frames/".length).replace(/^.*\//, "");
       return withCors(await screenshotObject(request, env, id), request, env);
     }
-
-    const authError = unauthorized(request, env);
-    if (authError && url.pathname === "/mcp") return withCors(authError, request, env);
 
     const forwardedHeaders = new Headers(request.headers);
     if (origin) forwardedHeaders.delete("Origin");

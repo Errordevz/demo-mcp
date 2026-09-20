@@ -580,7 +580,7 @@ describe("MCP surface: video_ingest and video_inspect_pipeline", () => {
     expect(bad.error?.code ?? bad.result?.isError).toBeTruthy();
   });
 
-  it("runs video_inspect_pipeline without any key and keeps the existing /mcp auth intact", async () => {
+  it("runs video_inspect_pipeline without a bearer even when DEMO_API_KEY is configured", async () => {
     const bucket = createBucket();
     stubFetch(mp4Bytes(10));
     const provider = new FakeProvider();
@@ -598,9 +598,8 @@ describe("MCP surface: video_ingest and video_inspect_pipeline", () => {
     expect(report.first_failure).toBe("browser_access");
     expect(report.stages.length).toBe(9);
 
-    // Existing behaviour preserved: when DEMO_API_KEY IS configured, the
-    // /mcp endpoint itself still requires the bearer before any tool runs.
-    const rejected = await worker.fetch(
+    // A private-tool credential must not gate the public diagnostic.
+    const accepted = await worker.fetch(
       new Request("https://demo.test/mcp", {
         method: "POST",
         headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
@@ -609,6 +608,9 @@ describe("MCP surface: video_ingest and video_inspect_pipeline", () => {
       { SCREENSHOTS: bucket, DEMO_API_KEY: "demo-endpoint-key", SSRF_DNS_CHECK: "false" } as never,
       CTX,
     );
-    expect(rejected.status).toBe(401);
+    expect(accepted.status).toBe(200);
+    const payload = await accepted.text();
+    expect(payload).not.toContain("Unauthorized");
+    expect(payload).toContain("browser_access");
   }, 30_000);
 });

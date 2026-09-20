@@ -14,9 +14,8 @@
  *  - the account slot is chosen by the *deployment* (`ROBLOX_ACCOUNT_KEY`) or an
  *    explicit validated label; a tool may never point a stored token at an
  *    arbitrary user id, so `user_id` is never an argument;
- *  - `DEMO_API_KEY` must protect `/mcp`, otherwise anyone who found the worker URL
- *    could read the linked profile — so the account tools refuse to run when it is
- *    unset;
+ *  - private account calls must present `DEMO_API_KEY`, otherwise anyone who
+ *    found the public worker URL could read the linked profile;
  *  - every result passes through `redactValue` and is built field by field, so no
  *    access token, refresh token, ID token, cookie or client secret can ride out
  *    in a payload even if Roblox adds a field to a response;
@@ -47,6 +46,8 @@ export const ROBLOX_TOOL_NAMES = [
 export interface RobloxToolContext {
   env: Record<string, unknown>;
   requestUrl?: string | null;
+  /** Optional request credential for private tools, never required by the transport. */
+  authorization?: string | null;
 }
 
 /** Resolve the per-request auth surface (config, vault, API client). */
@@ -64,18 +65,22 @@ export async function robloxContext(ctx: RobloxToolContext) {
 }
 
 /**
- * The account tools are only safe when the MCP endpoint itself is authenticated.
- * Without `DEMO_API_KEY`, `/mcp` is open to the internet — so a linked Roblox
- * account must not be readable through it.
+ * The MCP transport is public. Authenticate each private tool call before
+ * reading or changing a linked account, even if a deployment secret is present.
  */
 function guardMcpEndpoint(ctx: RobloxToolContext): ToolResult | null {
   const key = String(ctx.env.DEMO_API_KEY ?? "").trim();
-  if (key) return null;
+  if (key && ctx.authorization === `Bearer ${ctx.env.DEMO_API_KEY}`) return null;
+  if (key) return errorResult(JSON.stringify({
+    error: "unauthorized",
+    message: "Linked Roblox account tools require the configured private-tool bearer credential. Public MCP requests do not.",
+    retryable: false,
+  }));
   return errorResult(
     JSON.stringify(
       {
         error: "not_configured",
-        message: "DEMO's account tools are disabled because the /mcp endpoint is open (DEMO_API_KEY is not set).",
+        message: "DEMO's private account tools are disabled because DEMO_API_KEY is not set.",
         hint: "Set the DEMO_API_KEY secret (`wrangler secret put DEMO_API_KEY`, or the Cloudflare dashboard under Workers → Settings → Variables and secrets), then reconnect your MCP client with that bearer token. Public tools such as roblox_user are unaffected.",
         retryable: false,
       },
@@ -380,7 +385,9 @@ export function registerRobloxAccountTools(mcp: McpServer, ctx: RobloxToolContex
 async function buildCapabilities(ctx: RobloxToolContext, accountKey: string) {
   try {
     const { config, vault } = await robloxContext(ctx);
-    const record = await vault.getAccount(accountKey);
+    // The public resource may describe policy, but must not inspect a linked
+    // account. Authenticated private capability calls retain their account view.
+    const record = guardMcpEndpoint(ctx) ? null : await vault.getAccount(accountKey);
     const report = describeRobloxCapabilities({
       config,
       account: record ? { connected: !record.reauthorizationRequired, grantedScopes: record.scopes } : null,
