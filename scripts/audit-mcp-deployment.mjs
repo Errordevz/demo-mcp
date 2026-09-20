@@ -21,7 +21,7 @@ const settings = await (await get("/settings")).json();
 assert.equal(settings.success, true, "Cloudflare settings audit failed");
 const bindings = settings.result.bindings;
 assert(Array.isArray(bindings));
-const content = await (await get("/content")).text();
+const content = await (await get("")).text();
 const expected = {
   BROWSER_KEEPALIVE_MS: "300000",
   BROWSER_PROVIDER: "cloudflare",
