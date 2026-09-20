@@ -73,7 +73,11 @@ Then point ChatGPT (or any MCP client) at:
 https://<your-worker>.workers.dev/mcp
 ```
 
-If `DEMO_API_KEY` is set, send `Authorization: Bearer <DEMO_API_KEY>`.
+`/mcp` is public: initialization, discovery and ordinary tools (including
+`demo_ping`) require no Authorization header, even if `DEMO_API_KEY` is set.
+The existing credential is checked only by private `roblox_account_*` and
+`jev_decide` tool calls; those still require `Authorization: Bearer <DEMO_API_KEY>`.
+Roblox browser OAuth is separate and unchanged.
 
 ## Browser tools (persistent sessions)
 
@@ -148,8 +152,8 @@ Security properties, all asserted by `tests/roblox-oauth.test.ts` and
   a linked token can never be pointed at somebody else's account.
 * No `.ROBLOSECURITY`, no password form, no unofficial endpoint: unsupported actions
   return an explicit `not_supported` result.
-* The account tools refuse to run when `DEMO_API_KEY` is unset — an anonymous `/mcp`
-  endpoint must not read someone's linked account.
+* The account tools require a matching `DEMO_API_KEY` bearer on each call — an
+  anonymous caller must not read or unlink someone's linked account.
 
 ## Public video understanding
 
@@ -179,7 +183,7 @@ walls, cracks signed URLs, circumvents DRM, or accesses private accounts.
 | `video_transcribe` | Use an optional server-side Workers AI Whisper binding or configured HTTPS provider and return timestamped segments; no speech is `no_speech_detected`. |
 | `video_extract_frames` extras | **(0.7.0)** `interval_seconds` / `max_frames` aliases and an optional `resize` bound (applied by scaling the Browser Rendering viewport — no Worker-side image codec); every frame reports the pixel size it actually has. |
 | `video_get_frame` | Return one actual frame at a requested timestamp as an MCP image content block when it fits the inline cap. |
-| `video_inspect_pipeline` | **Diagnostic**: runs URL validation → redirect resolution → media discovery → browser access → media retrieval (64 KiB sample) → frame extraction → R2 round trip → artifact URL generation → MCP serialization, and reports exactly which stage failed. No separate key required (standard `/mcp` auth still applies if configured). Never returns secrets. |
+| `video_inspect_pipeline` | **Diagnostic**: runs URL validation → redirect resolution → media discovery → browser access → media retrieval (64 KiB sample) → frame extraction → R2 round trip → artifact URL generation → MCP serialization, and reports exactly which stage failed. No key or Authorization header required. Never returns secrets. |
 
 ### Automatic video viewing & reactions (`inspect_video`, DEMO 0.6.1)
 
@@ -494,7 +498,7 @@ thresholds and the fallback matrix live in [`docs/JEV.md`](docs/JEV.md).
 
 | Tool | What it does |
 | --- | --- |
-| `jev_decide` | Run one of the **three decision templates defined in code** (`tool_route`, `result_review`, `video_intent_focus`) over bounded state and return the typed answer with its `probabilities`, the `certainty` the model reported, the `policy` band DEMO applied, and DEMO's own deterministic value alongside. Refuses caller-supplied instructions or option sets, and refuses to run at all when `DEMO_API_KEY` is unset — an open endpoint must not be able to spend your API quota. |
+| `jev_decide` | Run one of the **three decision templates defined in code** (`tool_route`, `result_review`, `video_intent_focus`) over bounded state and return the typed answer with its `probabilities`, the `certainty` the model reported, the `policy` band DEMO applied, and DEMO's own deterministic value alongside. Refuses caller-supplied instructions or option sets, and requires the existing `DEMO_API_KEY` bearer on the tool call — an open endpoint must not be able to spend your API quota. |
 | `jev_capabilities` | Live report: configured/enabled state, model id, thresholds, limits, the templates, documented status codes, and what this is *not*. Presence-only — it never reads or echoes the credential, and it names no endpoint the operator can redirect. |
 | `skill_builtin_typesafe` | The bundled TypeSafe guidance note for a connected AI, same shape as `skill_builtin_caveman`. Documentation only: DEMO does not install or execute skill code. |
 
@@ -536,7 +540,7 @@ Variables (all optional):
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `DEMO_API_KEY` | *(unset)* | Bearer token required on `/mcp`. Unset = open. Set with `wrangler secret put DEMO_API_KEY`. |
+| `DEMO_API_KEY` | *(unset)* | Existing bearer for private `roblox_account_*` / `jev_decide` calls only; never gates `/mcp` transport. Keep configured for private tools. |
 | `DEMO_PLATFORM_ORIGIN` | `https://demo-platform.pages.dev` | CORS allowlist for Platform. |
 | `BROWSER_PROVIDER` | `cloudflare` | `cloudflare` or `node` (node = local dev only). |
 | `BROWSER_KEEPALIVE_MS` | `300000` | Session keep-alive heartbeat (10 s – 10 min). |
@@ -599,14 +603,14 @@ DEMO reports these limits through `browser_capabilities` and surfaces
 * **Third-party accounts** — Roblox sign-in is the official OAuth 2.0 authorization-code
   + PKCE flow; `.ROBLOSECURITY` cookies and password forms are not supported anywhere in
   the codebase. Tokens are encrypted at rest, never appear in a URL, HTML, log line, MCP
-  result or cookie, and `roblox_account_*` tools refuse to run on an unauthenticated
-  `/mcp` endpoint.
+  result or cookie, and `roblox_account_*` tools refuse unauthenticated calls, even
+  though `/mcp` transport is public.
 * **Structured decisions** — the TypeSafe key is a Worker secret read at call time, never
   stored on a config object, never in a URL or result, and the API origin is pinned in code.
   Jev answers only from option sets DEMO enumerated in code; an out-of-set answer is rejected
   rather than mapped, and no decision can widen a limit, skip a confirmation or enable a tool.
-* **Auth preserved** — `DEMO_API_KEY` behaviour, the `/mcp` endpoint, existing
-  routes and every original tool are unchanged.
+* **Auth separation** — `/mcp` transport is public. Existing private-tool checks
+  and Roblox OAuth remain enforced; all tools remain registered.
 
 ## Testing
 

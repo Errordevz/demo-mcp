@@ -45,17 +45,25 @@ jobs:
       - name: Offline suite (gate the deploy on it)
         run: npm test
 
+      - name: Audit deployed MCP code and binding names (no secret values)
+        run: node scripts/audit-mcp-deployment.mjs
+
       - name: Ensure R2 bucket exists
         run: npx wrangler r2 bucket create demo-mcp-screenshots || echo "bucket already exists (continuing)"
 
       - name: Deploy to Cloudflare
         id: deploy
         run: |
-          npx wrangler deploy 2>&1 | tee deploy.log
+          npx wrangler deploy --keep-vars 2>&1 | tee deploy.log
           URL=$(grep -oE 'https://[a-z0-9-]+\.[a-z0-9-]+\.workers\.dev' deploy.log | head -n 1)
           if [ -z "$URL" ]; then echo "Could not find the workers.dev URL in deploy output"; exit 1; fi
           echo "worker_url=$URL" >> "$GITHUB_OUTPUT"
           echo "Deployed to $URL"
+          VERSION=$(sed -n 's/.*Current Version ID: //p' deploy.log | head -n 1)
+          echo "::notice title=Worker deployment::URL=$URL version=$VERSION"
+
+      - name: Verify unauthenticated MCP handshake and ping
+        run: node scripts/verify-mcp.mjs '${{ steps.deploy.outputs.worker_url }}'
 
       - name: Apply video-artifacts lifecycle rule
         run: >

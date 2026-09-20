@@ -32,6 +32,8 @@ export const JEV_DECISION_TEMPLATES = ["tool_route", "video_intent_focus", "resu
 export interface JevToolContext {
   env: Record<string, unknown>;
   requestUrl?: string | null;
+  /** Optional request credential for private tools, never required by the transport. */
+  authorization?: string | null;
 }
 
 function jevContext(ctx: JevToolContext): JevDecisionContext {
@@ -39,20 +41,23 @@ function jevContext(ctx: JevToolContext): JevDecisionContext {
 }
 
 /**
- * Refuse paid upstream calls on an unauthenticated endpoint.
- *
- * `/mcp` is open whenever `DEMO_API_KEY` is unset, so an anonymous caller could loop
- * `jev_decide` and bill the account that owns the credential. Read-only capability
- * reporting is unaffected.
+ * Authenticate the paid tool call, not the public MCP transport. A configured
+ * secret alone must not let anonymous callers spend the account owner's quota.
+ * Read-only capability reporting is unaffected.
  */
 function guardPaidEndpoint(ctx: JevToolContext): ToolResult | null {
   const key = String(ctx.env.DEMO_API_KEY ?? "").trim();
-  if (key) return null;
+  if (key && ctx.authorization === `Bearer ${ctx.env.DEMO_API_KEY}`) return null;
+  if (key) return errorResult(JSON.stringify({
+    error: "unauthorized",
+    message: "jev_decide requires the configured private-tool bearer credential. Public MCP requests do not.",
+    retryable: false,
+  }));
   return errorResult(
     JSON.stringify(
       {
         error: "not_configured",
-        message: "jev_decide is disabled because the /mcp endpoint is open (DEMO_API_KEY is not set).",
+        message: "jev_decide is disabled because DEMO_API_KEY is not set.",
         hint: "Each decision is a paid TypeSafe API call. Set the DEMO_API_KEY secret (`wrangler secret put DEMO_API_KEY`) and reconnect your MCP client with that bearer token. jev_capabilities stays available without it.",
         retryable: false,
       },

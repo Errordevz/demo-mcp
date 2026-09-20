@@ -213,26 +213,3 @@ describe("worker routes", () => {
     expect(short.status).toBe(400);
   });
 });
-
-describe("authentication", () => {
-  it("protects /mcp with DEMO_API_KEY when configured", async () => {
-    const env = { DEMO_API_KEY: "secret-token" } as never;
-    const unauthorized = await worker.fetch(
-      new Request("https://demo.test/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }),
-      env,
-      CTX,
-    );
-    expect(unauthorized.status).toBe(401);
-
-    const authorized = await worker.fetch(
-      new Request("https://demo.test/mcp", {
-        method: "POST",
-        headers: { "content-type": "application/json", authorization: "Bearer secret-token", accept: "application/json, text/event-stream" },
-        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
-      }),
-      env,
-      CTX,
-    );
-    expect(authorized.status).toBe(200);
-  });
-});

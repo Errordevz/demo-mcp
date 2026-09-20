@@ -444,9 +444,13 @@ describe("Worker routing", () => {
     expect(body.robloxOAuthConfigured).toBe(false);
     expect(body.toolCount).toBe(TOOL_COUNT);
 
-    // The MCP endpoint keeps requiring its bearer token.
-    const mcp = await platform.fetch(new Request(`${WORKER_ORIGIN}/mcp`, { method: "POST", body: "{}" }), env, CTX);
-    expect(mcp.status).toBe(401);
+    // OAuth stays separate; ordinary MCP requests need no bearer.
+    const mcp = await platform.fetch(new Request(`${WORKER_ORIGIN}/mcp`, {
+      method: "POST",
+      headers: { Host: new URL(WORKER_ORIGIN).host, "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+    }), env, CTX);
+    expect(mcp.status).toBe(200);
   });
 
   it("gives the inspector UI a connect control that only ever talks to this Worker", async () => {
