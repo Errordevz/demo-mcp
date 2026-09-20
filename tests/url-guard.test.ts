@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { checkUrl, checkUrlSync, isPrivateIp, isPrivateIpv4, isPrivateIpv6 } from "../src/core/url-guard.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { checkUrl, checkUrlSync, createDohResolver, isPrivateIp, isPrivateIpv4, isPrivateIpv6, resetDohCache } from "../src/core/url-guard.js";
 
 const publicResolver = { resolve: async () => ["93.184.216.34"] };
 const privateResolver = { resolve: async () => ["10.0.0.5"] };
@@ -100,6 +100,130 @@ describe("url guard — DNS resolution", () => {
     const failing = { resolve: async () => { throw new Error("DNS lookup failed"); } };
     const closed = await checkUrl("https://example.com/", { dns: failing, dnsFailOpen: false });
     expect(closed.ok).toBe(false);
+  });
+
+  it("names the lookup failure when failing closed so environment limits are diagnosable", async () => {
+    const failing = { resolve: async () => { throw new Error("Too many subrequests."); } };
+    const closed = await checkUrl("https://example.com/", { dns: failing, dnsFailOpen: false });
+    expect(closed.ok).toBe(false);
+    expect(!closed.ok && closed.code).toBe("blocked_url");
+    expect(!closed.ok && closed.reason).toContain("DNS lookup failed: Too many subrequests.");
+  });
+});
+
+describe("url guard — DoH resolver", () => {
+  type DnsAnswer = { type: number; data: string; TTL?: number };
+  const dnsJson = (answers: DnsAnswer[], status = 0) =>
+    new Response(JSON.stringify({ Status: status, Answer: answers }), {
+      status: 200,
+      headers: { "content-type": "application/dns-json" },
+    });
+  const stubFetch = (handler: (name: string, type: string) => Response | Promise<Response>) => {
+    const calls: string[] = [];
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      const name = url.searchParams.get("name") ?? "";
+      const type = url.searchParams.get("type") ?? "";
+      calls.push(`${name}/${type}`);
+      return handler(name, type);
+    }) as typeof fetch;
+    return { fetchImpl, calls };
+  };
+
+  beforeEach(() => {
+    resetDohCache();
+    vi.useRealTimers();
+  });
+  afterEach(() => {
+    resetDohCache();
+    vi.useRealTimers();
+  });
+
+  it("queries A and AAAA and merges the answers", async () => {
+    const { fetchImpl, calls } = stubFetch((_name, type) =>
+      type === "A"
+        ? dnsJson([{ type: 1, data: "93.184.216.34", TTL: 300 }])
+        : dnsJson([{ type: 28, data: "2606:2800:220:1:248:1893:25c8:1946", TTL: 300 }]),
+    );
+    const resolver = createDohResolver(fetchImpl);
+    await expect(resolver.resolve("example.com")).resolves.toEqual(["93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946"]);
+    expect(calls.sort()).toEqual(["example.com/A", "example.com/AAAA"]);
+  });
+
+  it("reuses a positive answer within its TTL and re-queries after it expires", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-20T12:00:00Z"));
+    const { fetchImpl, calls } = stubFetch((_name, type) =>
+      type === "A" ? dnsJson([{ type: 1, data: "93.184.216.34", TTL: 30 }]) : dnsJson([]),
+    );
+    const resolver = createDohResolver(fetchImpl);
+    await resolver.resolve("example.com");
+    await resolver.resolve("EXAMPLE.com");
+    await createDohResolver(fetchImpl).resolve("example.com");
+    expect(calls).toHaveLength(2);
+
+    vi.setSystemTime(new Date("2026-09-20T12:00:31Z"));
+    await expect(resolver.resolve("example.com")).resolves.toEqual(["93.184.216.34"]);
+    expect(calls).toHaveLength(4);
+  });
+
+  it("caps the reuse window even when the record advertises a long TTL", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-20T12:00:00Z"));
+    const { fetchImpl, calls } = stubFetch((_name, type) =>
+      type === "A" ? dnsJson([{ type: 1, data: "93.184.216.34", TTL: 86_400 }]) : dnsJson([]),
+    );
+    const resolver = createDohResolver(fetchImpl);
+    await resolver.resolve("example.com");
+    vi.setSystemTime(new Date("2026-09-20T12:00:59Z"));
+    await resolver.resolve("example.com");
+    expect(calls).toHaveLength(2);
+    vi.setSystemTime(new Date("2026-09-20T12:01:01Z"));
+    await resolver.resolve("example.com");
+    expect(calls).toHaveLength(4);
+  });
+
+  it("never caches failures, TTL-less answers or empty answers", async () => {
+    let mode: "error" | "no-ttl" | "empty" = "error";
+    const { fetchImpl, calls } = stubFetch((_name, type) => {
+      if (mode === "error") return new Response("rate limited", { status: 429 });
+      if (mode === "no-ttl") return type === "A" ? dnsJson([{ type: 1, data: "93.184.216.34" }]) : dnsJson([]);
+      return dnsJson([], 3);
+    });
+    const resolver = createDohResolver(fetchImpl);
+    await expect(resolver.resolve("example.com")).rejects.toThrow("DNS lookup failed with status 429");
+    await expect(resolver.resolve("example.com")).rejects.toThrow("DNS lookup failed with status 429");
+    expect(calls).toHaveLength(4);
+
+    mode = "no-ttl";
+    await expect(resolver.resolve("example.com")).resolves.toEqual(["93.184.216.34"]);
+    await resolver.resolve("example.com");
+    expect(calls).toHaveLength(8);
+
+    mode = "empty";
+    await expect(resolver.resolve("missing.example.com")).resolves.toEqual([]);
+    await resolver.resolve("missing.example.com");
+    expect(calls).toHaveLength(12);
+  });
+
+  it("still blocks a hostname whose cached answer is private", async () => {
+    const { fetchImpl, calls } = stubFetch((_name, type) =>
+      type === "A" ? dnsJson([{ type: 1, data: "10.0.0.5", TTL: 300 }]) : dnsJson([]),
+    );
+    const dns = createDohResolver(fetchImpl);
+    const first = await checkUrl("https://internal.example.com/", { dns, dnsFailOpen: false });
+    const second = await checkUrl("https://internal.example.com/", { dns, dnsFailOpen: false });
+    expect(first.ok).toBe(false);
+    expect(second.ok).toBe(false);
+    expect(!second.ok && second.reason).toContain("private/internal address");
+    expect(calls).toHaveLength(2);
+  });
+
+  it("fails closed with the DoH error when configured to and the endpoint rejects the query", async () => {
+    const { fetchImpl } = stubFetch(() => new Response("Too many subrequests.", { status: 429 }));
+    const verdict = await checkUrl("https://example.com/", { dns: createDohResolver(fetchImpl), dnsFailOpen: false });
+    expect(verdict.ok).toBe(false);
+    expect(!verdict.ok && verdict.reason).toContain("DNS lookup failed: DNS lookup failed with status 429");
   });
 });
 

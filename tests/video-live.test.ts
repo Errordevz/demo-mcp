@@ -33,11 +33,15 @@
  *      fallback (resize could not be applied, default viewport) instead of
  *      silently ignoring the request.
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
+  type CallResult,
+  DEFAULT_PUBLIC_VIDEO_URL,
   assertWorkerReachable,
   connectLive,
+  fixtureAccessSkipNote,
   liveEnv,
+  skipForEnvironment,
   workerEgressSkipNote,
   startDevWorker,
 } from "./helpers/live.js";
@@ -83,6 +87,8 @@ describe.skipIf(!liveEnv().enabled)("public video acceptance (live)", () => {
         });
         const egressNote = workerEgressSkipNote(result, url);
         if (egressNote) skip(egressNote);
+        const fixtureNote = fixtureAccessSkipNote(result, url);
+        if (fixtureNote) skipForEnvironment(skip, fixtureNote);
         const payload = result.parsed as Record<string, any>;
         expect(payload, `expected a JSON payload, got: ${result.text.slice(0, 500)}`).toBeTruthy();
 
@@ -224,6 +230,8 @@ describe.skipIf(!liveEnv().enabled)("public video acceptance (live)", () => {
         const result = await client.call("inspect_video", { url });
         const egressNote = workerEgressSkipNote(result, url);
         if (egressNote) skip(egressNote);
+        const fixtureNote = fixtureAccessSkipNote(result, url);
+        if (fixtureNote) skipForEnvironment(skip, fixtureNote);
         const parsedPayload = result.parsed as Record<string, any> | null;
         if (!parsedPayload) throw new Error(`expected a JSON payload, got: ${result.text.slice(0, 500)}`);
         const payload = parsedPayload;
@@ -330,10 +338,19 @@ describe.skipIf(!liveEnv().enabled)("public video acceptance (live)", () => {
       const client = connectLive(origin);
       try {
         // 1. The SSRF guard must reject a private address before any request.
+        //    Contract (tests/video.test.ts, src/mcp/results.ts): a normal MCP
+        //    result carrying a structured `blocked_url` payload — not a
+        //    protocol-level isError — with no frames, no artifact and nothing
+        //    marked analysis-ready.
         const blocked = await client.call("video_ingest", { url: "http://127.0.0.1:9/secret.mp4" });
-        const blockedPayload = blocked.parsed as Record<string, any>;
-        expect(blocked.isError).toBe(true);
+        const blockedPayload = blocked.parsed as Record<string, any> | null;
+        expect(blockedPayload, `expected a JSON payload, got: ${blocked.text.slice(0, 500)}`).toBeTruthy();
         expect(blockedPayload?.error).toBe("blocked_url");
+        expect(blockedPayload?.success).toBe(false);
+        expect(blockedPayload?.frames ?? []).toEqual([]);
+        expect(blockedPayload?.analysis_ready).toBe(false);
+        expect(blockedPayload?.video_artifact ?? null).toBeNull();
+        expect(blocked.imageCount).toBe(0);
 
         // 2. A public URL that serves no video must fail with a stable code
         //    and zero frames — never with fake or thumbnail-derived frames.
@@ -361,13 +378,26 @@ describe.skipIf(!liveEnv().enabled)("public video acceptance (live)", () => {
         const result = await client.call("video_resolve", { url, verify_bytes: true, include_signed_urls: false });
         const egressNote = workerEgressSkipNote(result, url);
         if (egressNote) skip(egressNote);
+        const fixtureNote = fixtureAccessSkipNote(result, url);
+        if (fixtureNote) skipForEnvironment(skip, fixtureNote);
         const payload = result.parsed as Record<string, any>;
         expect(payload?.tool).toBe("video_resolve");
         expect(payload?.access_status).toBe("public");
         expect(payload?.source_url).toBe(url);
         expect(payload?.may_describe_content).toBe(false); // resolution is metadata, never evidence
-        expect(payload?.verification).toBe("bytes");
+        // A direct media URL that answers a public HEAD with a video content
+        // type is accepted on that basis (src/video/http.ts, direct fast path)
+        // and reports verification "content_type" — even with verify_bytes —
+        // together with a limitation that says so and points at video_fetch,
+        // which proves the container from real bytes. Either verdict is fine;
+        // an undisclosed content-type acceptance is not.
+        expect(["bytes", "content_type"]).toContain(payload?.verification);
+        if (payload?.verification === "content_type") {
+          expect((payload.limitations ?? []).join(" ")).toMatch(/content type|verify_bytes|video_fetch/i);
+        }
         expect(payload?.stream_count ?? 0).toBeGreaterThan(0);
+        expect(payload?.streams?.length).toBe(payload?.stream_count);
+        expect(payload?.streams?.[0]?.reachable).toBe(true);
         expect(payload?.next_steps?.length ?? 0).toBeGreaterThan(0);
         expect(result.text).not.toMatch(/x-signature=[A-Za-z0-9]/);
         expect(result.imageCount).toBe(0); // resolve downloads and renders nothing
@@ -387,6 +417,8 @@ describe.skipIf(!liveEnv().enabled)("public video acceptance (live)", () => {
         const result = await client.call("video_fetch", { url });
         const egressNote = workerEgressSkipNote(result, url);
         if (egressNote) skip(egressNote);
+        const fixtureNote = fixtureAccessSkipNote(result, url);
+        if (fixtureNote) skipForEnvironment(skip, fixtureNote);
         const payload = result.parsed as Record<string, any>;
         expect(payload?.tool).toBe("video_fetch");
         expect(payload?.success, payload?.message ?? payload?.error).toBe(true);
@@ -522,7 +554,7 @@ describe.skipIf(!liveEnv().enabled)("public video acceptance (live)", () => {
       const url = liveEnv().tiktokUrl;
       const client = connectLive(origin);
       try {
-        const result = await client.call("video_resolve", { url, verify_bytes: true });
+        const result = await client.call("video_resolve", { url, verify_bytes: true, include_signed_urls: false });
         const egressNote = workerEgressSkipNote(result, url);
         if (egressNote) skip(egressNote);
         const payload = result.parsed as Record<string, any>;
@@ -556,8 +588,34 @@ describe.skipIf(!liveEnv().enabled)("public video acceptance (live)", () => {
             "unavailable",
             "unknown",
           ]).toContain(payload?.access_status);
-          expect(payload?.streams ?? []).toEqual([]);
+          // Documented contract (video_resolve description, src/mcp/video-tools.ts):
+          // every literal stream URL the page published is returned WITH its
+          // per-stream probe result, so the caller can see *why* nothing was
+          // retrievable. Honesty invariants: no stream may be presented as a
+          // verified video, every probed stream carries a reason, and the
+          // chosen-stream fields stay empty.
+          const streams: Array<Record<string, any>> = payload?.streams ?? [];
+          expect(payload?.stream_count ?? 0).toBe(streams.length);
+          expect(payload?.best_stream_url ?? null).toBeNull();
+          for (const stream of streams) {
+            expect(stream.verified_video, `stream ${stream.kind}/${stream.source} must not be presented as verified`).toBe(false);
+            expect(stream.verified_container ?? null).toBeNull();
+            expect([true, false, null]).toContain(stream.reachable);
+            if (stream.reachable !== null) {
+              expect(typeof stream.reason, `probed stream ${stream.kind}/${stream.source} needs a reason`).toBe("string");
+              expect(stream.reason.length).toBeGreaterThan(0);
+            }
+          }
         }
+        // include_signed_urls=false: signed/expiring query strings are stripped
+        // from every returned stream URL (kept as `?signed_query_removed=true`)
+        // whatever the access verdict was. The documented scope is stream URLs
+        // (thumbnail_url is metadata and not covered by the flag).
+        for (const stream of payload?.streams ?? []) {
+          if (stream.signed === true) expect(stream.url).toMatch(/\?signed_query_removed=true$/);
+          expect(stream.url).not.toMatch(/[?&](?:x-signature|signature|x-expires|expires|token)=/i);
+        }
+        if (payload?.best_stream_url) expect(payload.best_stream_url).toMatch(/\?signed_query_removed=true$/);
       } finally {
         await client.close();
       }
@@ -647,5 +705,81 @@ describe("live video test helper", () => {
     if (liveEnv().enabled) expect(liveEnv().enabled).toBe(true);
     expect(liveEnv().publicVideoUrl).toMatch(/^https:\/\//);
     expect(liveEnv().tiktokUrl).toMatch(/^https:\/\/(?:www|vm|vt|m)\.tiktok\.com\//);
+  });
+
+  it("honours LIVE_PUBLIC_VIDEO_URL and falls back to the default when it is blank", () => {
+    const previous = process.env.LIVE_PUBLIC_VIDEO_URL;
+    try {
+      process.env.LIVE_PUBLIC_VIDEO_URL = " https://fixtures.example.com/clip.mp4 ";
+      expect(liveEnv().publicVideoUrl).toBe("https://fixtures.example.com/clip.mp4");
+      process.env.LIVE_PUBLIC_VIDEO_URL = "   ";
+      expect(liveEnv().publicVideoUrl).toBe(DEFAULT_PUBLIC_VIDEO_URL);
+    } finally {
+      if (previous === undefined) delete process.env.LIVE_PUBLIC_VIDEO_URL;
+      else process.env.LIVE_PUBLIC_VIDEO_URL = previous;
+    }
+  });
+
+  describe("fixtureAccessSkipNote", () => {
+    const fixture = liveEnv().publicVideoUrl;
+    const asResult = (parsed: Record<string, unknown> | null): CallResult => ({
+      isError: false,
+      text: parsed ? JSON.stringify(parsed) : "",
+      parsed,
+      imageCount: 0,
+      imageMimeTypes: [],
+      imageBlocks: [],
+    });
+    const denied = {
+      tool: "video_resolve",
+      success: false,
+      access_status: "challenge_required",
+      http_status: 403,
+      challenge: { detected: true, kind: "bot_challenge_or_access_denied", reason: "HTTP 403" },
+      error: "PLATFORM_BLOCKED",
+      message: "The source answered HTTP 403 (access denied or bot challenge).",
+    };
+
+    it("labels a fixture-host 403/bot-challenge as an explicit environment skip, with the reason", () => {
+      const note = fixtureAccessSkipNote(asResult(denied), fixture);
+      expect(note).toMatch(/^ENVIRONMENT SKIP \(fixture host denied the Worker\)/);
+      expect(note).toContain(fixture);
+      expect(note).toContain("HTTP 403");
+      expect(note).toContain("bot_challenge_or_access_denied");
+      expect(note).toContain("LIVE_PUBLIC_VIDEO_URL");
+    });
+
+    it("recognises the ingest/inspect shape (PLATFORM_BLOCKED + 403 message, no challenge object)", () => {
+      const ingestDenied = { success: false, error: "PLATFORM_BLOCKED", message: "Access denied by the host (HTTP 403).", frames: [] };
+      expect(fixtureAccessSkipNote(asResult(ingestDenied), fixture)).toMatch(/^ENVIRONMENT SKIP/);
+    });
+
+    it("never applies to a URL other than the configured fixture", () => {
+      expect(fixtureAccessSkipNote(asResult(denied), "https://www.tiktok.com/@tiktok/video/7106594312292453675")).toBeNull();
+      expect(fixtureAccessSkipNote(asResult(denied), `${fixture}?variant=1`)).toBeNull();
+    });
+
+    it("never masks a success, a non-access failure or a missing payload", () => {
+      expect(fixtureAccessSkipNote(asResult({ ...denied, success: true, access_status: "public" }), fixture)).toBeNull();
+      expect(fixtureAccessSkipNote(asResult({ ...denied, access_status: "public" }), fixture)).toBeNull();
+      expect(fixtureAccessSkipNote(asResult({ success: false, error: "FRAMES_UNAVAILABLE", message: "No frames could be decoded." }), fixture)).toBeNull();
+      expect(fixtureAccessSkipNote(asResult({ success: false, error: "PLATFORM_BLOCKED", message: "Rate limited (HTTP 429)." }), fixture)).toBeNull();
+      expect(fixtureAccessSkipNote(asResult({ success: false, access_status: "not_found", http_status: 404, error: "VIDEO_NOT_FOUND", message: "HTTP 404" }), fixture)).toBeNull();
+      expect(fixtureAccessSkipNote(asResult(null), fixture)).toBeNull();
+    });
+
+    it("prints the reason before skipping so the skip is never silent", () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const skip = vi.fn((note?: string): never => {
+        throw new Error(`skipped: ${note}`);
+      });
+      try {
+        expect(() => skipForEnvironment(skip, "ENVIRONMENT SKIP (test)")).toThrow("skipped: ENVIRONMENT SKIP (test)");
+        expect(skip).toHaveBeenCalledWith("ENVIRONMENT SKIP (test)");
+        expect(warn).toHaveBeenCalledWith("[live] ENVIRONMENT SKIP (test)");
+      } finally {
+        warn.mockRestore();
+      }
+    });
   });
 });

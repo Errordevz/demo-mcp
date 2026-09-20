@@ -7,6 +7,15 @@
 #   CLOUDFLARE_API_TOKEN   (Dashboard → My Profile → API Tokens → Create Token,
 #                           "Edit Cloudflare Workers" template + R2 Storage Edit)
 #   CLOUDFLARE_ACCOUNT_ID  (Dashboard → Workers & Pages → Account ID)
+#
+# Live-suite fixture: the direct-MP4 live tests need a small public MP4 that the
+# *Worker* (Cloudflare egress, not the runner) can fetch. This workflow publishes
+# tests/fixtures/live-public-video.mp4 to a dedicated public R2 bucket
+# (demo-mcp-live-fixtures, r2.dev URL) and exports it as LIVE_PUBLIC_VIDEO_URL;
+# a preflight step asks the deployed Worker whether it can reach it. If either
+# step fails, the suite falls back to the default in tests/helpers/live.ts and
+# a denied fixture becomes an explicit, labelled ENVIRONMENT SKIP — never a
+# silent pass.
 name: Deploy + live video tests
 
 on:
@@ -71,8 +80,44 @@ jobs:
           demo-video-artifacts-expiry "video-artifacts/" --expire-days 2
           || echo "rule already exists (continuing)"
 
+      - name: Publish the live-test video fixture to R2 (public r2.dev URL)
+        id: fixture
+        if: inputs.skip_live != 'true'
+        run: |
+          BUCKET=demo-mcp-live-fixtures
+          FILE=tests/fixtures/live-public-video.mp4
+          KEY="live-fixtures/demo-live-public-video-$(sha256sum "$FILE" | cut -c1-16).mp4"
+          # No output is written on failure: an unset step output is an empty
+          # string, which makes tests/helpers/live.ts fall back to its default.
+          npx wrangler r2 bucket create "$BUCKET" || echo "bucket already exists (continuing)"
+          npx wrangler r2 bucket dev-url enable "$BUCKET" --force || echo "could not enable the r2.dev URL (continuing)"
+          PUBLIC=$(npx wrangler r2 bucket dev-url get "$BUCKET" 2>&1 | grep -oE 'https://pub-[a-z0-9]+\.r2\.dev' | head -n 1)
+          if [ -z "$PUBLIC" ]; then
+            echo "::warning title=Live fixture not published::No public r2.dev URL for bucket $BUCKET. The live suite falls back to the default fixture in tests/helpers/live.ts; if the Worker cannot reach that one, the direct-MP4 tests report an explicit ENVIRONMENT SKIP."
+            exit 0
+          fi
+          if npx wrangler r2 object put "$BUCKET/$KEY" --file "$FILE" --content-type video/mp4 --cache-control "public, max-age=86400" --remote; then
+            echo "url=$PUBLIC/$KEY" >> "$GITHUB_OUTPUT"
+            echo "Published $FILE ($(stat -c %s "$FILE") bytes) as $PUBLIC/$KEY"
+          else
+            echo "::warning title=Live fixture not published::Upload to $BUCKET failed. The live suite falls back to the default fixture in tests/helpers/live.ts; if the Worker cannot reach that one, the direct-MP4 tests report an explicit ENVIRONMENT SKIP."
+          fi
+
+      - name: Preflight — can the Worker reach the live fixture?
+        if: inputs.skip_live != 'true'
+        env:
+          FIXTURE_URL: ${{ steps.fixture.outputs.url }}
+        run: |
+          if [ -z "$FIXTURE_URL" ]; then
+            FIXTURE_URL=$(grep -oE 'DEFAULT_PUBLIC_VIDEO_URL = "[^"]+"' tests/helpers/live.ts | cut -d'"' -f2)
+            echo "Using the default fixture from tests/helpers/live.ts: $FIXTURE_URL"
+          fi
+          node scripts/probe-live-fixture.mjs '${{ steps.deploy.outputs.worker_url }}' "$FIXTURE_URL"
+
       - name: Live video suite (15 tests)
         if: inputs.skip_live != 'true'
+        env:
+          LIVE_PUBLIC_VIDEO_URL: ${{ steps.fixture.outputs.url }}
         run: DEMO_MCP_LIVE=1 LIVE_WORKER_URL='${{ steps.deploy.outputs.worker_url }}' npm run test:live:video
 
       - name: Summary
@@ -83,3 +128,6 @@ jobs:
           echo "Worker: ${{ steps.deploy.outputs.worker_url }}" >> "$GITHUB_STEP_SUMMARY"
           echo "Capabilities: ${{ steps.deploy.outputs.worker_url }}/capabilities/video" >> "$GITHUB_STEP_SUMMARY"
           echo "Health: ${{ steps.deploy.outputs.worker_url }}/health" >> "$GITHUB_STEP_SUMMARY"
+          echo "Live fixture (LIVE_PUBLIC_VIDEO_URL): ${{ steps.fixture.outputs.url || 'not published — default from tests/helpers/live.ts' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Live-suite skips are always labelled: a fixture the Worker cannot reach prints an \"ENVIRONMENT SKIP (fixture host denied the Worker)\" note in the suite log; nothing passes silently." >> "$GITHUB_STEP_SUMMARY"

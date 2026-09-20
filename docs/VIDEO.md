@@ -623,7 +623,9 @@ DEMO_MCP_LIVE=1 LIVE_WORKER_URL=https://demo-mcp.<sub>.workers.dev npm run test:
 `tests/video-live.test.ts` proves, in order:
 
 1. `video_ingest` on a **stable public MP4**
-   (`LIVE_PUBLIC_VIDEO_URL`, default a small Google sample bucket clip):
+   (`LIVE_PUBLIC_VIDEO_URL`; the deploy workflow publishes
+   `tests/fixtures/live-public-video.mp4` to R2 for this, the local default is
+   a 10 s Big Buck Bunny clip):
    the response must contain decoded frames with timestamps + image MIME,
    MCP image blocks and/or retrievable HTTPS references, and a `video_artifact`
    whose `/video-assets/video_<sha256>` URL is fetched back with a matching

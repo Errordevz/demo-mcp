@@ -22,20 +22,33 @@ export interface LiveConfig {
   baseUrl: string;
   apiKey: string | null;
   tiktokUrl: string;
-  /** Stable public MP4 (small, short, no DRM, no auth) used for the
-   * video_ingest round-trip acceptance test. Override for other fixtures. */
+  /** Stable public MP4 (small, short, no DRM, no auth) used by the direct-MP4
+   * acceptance tests (video_ingest, inspect_video, video_resolve, video_fetch).
+   * Override with LIVE_PUBLIC_VIDEO_URL; the deploy workflow points it at a
+   * copy of `tests/fixtures/live-public-video.mp4` published to R2. */
   publicVideoUrl: string;
   local: boolean;
 }
 
+/**
+ * Local-development default when LIVE_PUBLIC_VIDEO_URL is unset: a 10 s,
+ * ~1 MB Big Buck Bunny clip from a long-lived public test-video host. CI does
+ * not depend on it — `.github/workflows/live-deploy.yml` uploads the tracked
+ * fixture to R2 and exports its public URL instead. The previous default
+ * (`commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4`)
+ * now answers 403 AccessDenied from every network, not only from the Worker.
+ */
+export const DEFAULT_PUBLIC_VIDEO_URL = "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4";
+
 export function liveEnv(): LiveConfig {
   const remote = process.env.LIVE_WORKER_URL;
+  const publicVideoOverride = process.env.LIVE_PUBLIC_VIDEO_URL?.trim();
   return {
     enabled: LIVE_SKIP_REASON === null,
     baseUrl: (remote ?? process.env.LIVE_BASE_URL ?? "http://127.0.0.1:8799").replace(/\/$/, ""),
     apiKey: process.env.LIVE_API_KEY ?? process.env.DEMO_API_KEY ?? null,
     tiktokUrl: process.env.LIVE_TIKTOK_URL ?? "https://www.tiktok.com/@tiktok/video/7106594312292453675",
-    publicVideoUrl: process.env.LIVE_PUBLIC_VIDEO_URL ?? "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
+    publicVideoUrl: publicVideoOverride || DEFAULT_PUBLIC_VIDEO_URL,
     local: !remote,
   };
 }
@@ -87,6 +100,49 @@ export function workerEgressSkipNote(result: CallResult, target: string): string
   const message = String(payload.message ?? payload.error ?? "");
   if (!/fetch failed|network|unreachable|enotfound|econnrefused|econnreset|dns|getaddrinfo|tls|certificate|ssl|handshake|aborted/i.test(message)) return null;
   return `Worker egress to ${target} failed (${message}). The deployed worker has normal outbound access; this failure comes from the restricted network of the environment running the test. Re-run from a host with internet egress, or against LIVE_WORKER_URL.`;
+}
+
+/**
+ * Classify a tool result in which the *fixture host itself* refused the
+ * Worker (HTTP 403 / bot challenge / access denied) — an environment problem
+ * of the test fixture, not of the pipeline under test. Returns an explicit,
+ * labelled skip note, or null when the test must assert on the result.
+ *
+ * Deliberately narrow: it applies only to the configured public fixture URL
+ * (`liveEnv().publicVideoUrl`), never to a user-supplied or platform URL, and
+ * only to the access-denied classification. Any other failure — a wrong
+ * payload shape, a pipeline error, a successful result — still reaches the
+ * assertions, so this can never turn a real regression into a pass.
+ */
+export function fixtureAccessSkipNote(result: CallResult, target: string): string | null {
+  if (target !== liveEnv().publicVideoUrl) return null;
+  const payload = result.parsed as Record<string, any> | null;
+  if (!payload) return null;
+  if (payload.success === true || payload.access_status === "public" || payload.visualEvidenceDelivered === true) return null;
+  const challenge = payload.challenge && typeof payload.challenge === "object" ? (payload.challenge as Record<string, any>) : null;
+  const message = String(payload.message ?? "");
+  const denied =
+    challenge?.kind === "bot_challenge_or_access_denied" ||
+    payload.access_status === "challenge_required" ||
+    (payload.error === "PLATFORM_BLOCKED" && /\b403\b|access denied|challenge/i.test(message));
+  if (!denied) return null;
+  const status = typeof payload.http_status === "number" ? ` HTTP ${payload.http_status}` : "";
+  return (
+    `ENVIRONMENT SKIP (fixture host denied the Worker): ${target} answered${status} ` +
+    `${challenge?.kind ?? payload.access_status ?? payload.error} to the Worker's egress` +
+    `${message ? ` (${message})` : ""}. The tool classified it honestly; the test cannot exercise the ` +
+    `pipeline without a reachable fixture. Point LIVE_PUBLIC_VIDEO_URL at a small public MP4 the Worker can ` +
+    `fetch (the deploy workflow publishes tests/fixtures/live-public-video.mp4 to R2 for this).`
+  );
+}
+
+/**
+ * Skip a live test for an environment reason, printing the reason so a skip is
+ * never silent in CI logs, then delegating to vitest's `skip(note)`.
+ */
+export function skipForEnvironment(skip: (note?: string) => never, note: string): never {
+  console.warn(`[live] ${note}`);
+  return skip(note);
 }
 
 export interface CallResult {
