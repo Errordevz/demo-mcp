@@ -148,7 +148,7 @@ async function postForm(endpoint: string, form: Record<string, string>, fetchImp
   try {
     response = await fetchImpl(endpoint, {
       method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json", "user-agent": "DEMO-MCP/0.8.2 (Cloudflare Workers)" },
+      headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json", "user-agent": "DEMO-MCP/0.8.3-beta (Cloudflare Workers)" },
       body,
       signal: AbortSignal.timeout(TOKEN_TIMEOUT_MS),
     });

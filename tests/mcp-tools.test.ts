@@ -65,7 +65,7 @@ describe("MCP surface", () => {
     const { parsed, isError } = await callTool("demo_ping", {});
     expect(isError).toBeFalsy();
     expect(parsed?.name).toBe("DEMO");
-    expect(parsed?.version).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(parsed?.version).toMatch(/^\d+\.\d+\.\d+(\s+\w+)?$/);
     expect(parsed?.toolCount).toBe(TOOL_COUNT);
     expect(parsed).toHaveProperty("browser");
     expect(parsed).toHaveProperty("browserSessions");
@@ -156,15 +156,16 @@ describe("worker routes", () => {
     // cannot ship one surface on a stale version.
     for (const file of ["index.ts", "platform-entry.ts"]) {
       const source = readFileSync(path.resolve(__dirname, "..", file), "utf8");
-      const declared = [...source.matchAll(/const VERSION = "(\d+\.\d+\.\d+)"/g)].map((match) => match[1]);
+      const declared = [...source.matchAll(/const VERSION = "([^"]+)"/g)].map((match) => match[1]);
       expect(declared, `${file} declares exactly one version`).toEqual([pkg.version]);
     }
     // The outbound User-Agent is a version string too; a stale one is a silent lie to
-    // whoever is being called.
+    // whoever is being called. The User-Agent uses a URL-safe form (hyphen instead of space).
     const oauth = readFileSync(path.resolve(__dirname, "../src/roblox/oauth.ts"), "utf8");
-    const agents = [...oauth.matchAll(/DEMO-MCP\/(\d+\.\d+\.\d+)/g)].map((match) => match[1]);
+    const agents = [...oauth.matchAll(/DEMO-MCP\/([^\s(]+)/g)].map((match) => match[1]);
     expect(agents.length, "the User-Agent must carry a version").toBeGreaterThan(0);
-    for (const declared of agents) expect(declared).toBe(pkg.version);
+    // Normalize: "0.8.3-beta" in User-Agent matches "0.8.3 beta" in package.json
+    for (const declared of agents) expect(declared.replace(/-/g, " ")).toBe(pkg.version);
   });
 
   it("serves telemetry without secrets", async () => {

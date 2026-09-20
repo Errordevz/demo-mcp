@@ -60,6 +60,7 @@
     //   ROBLOX_CLIENT_SECRET  — Roblox OAuth app secret (ROBLOX_CLIENT_ID may be a var)
     //   ROBLOX_TOKEN_KEY      — 32+ random bytes; encrypts tokens at rest
     //   TYPESAFE_API_KEY      — TypeSafe/Jev decision API key
+    //   YOUTUBE_API_KEY       — YouTube Data API v3 key for public YouTube operations
     //   TRANSCRIPTION_API_KEY — optional external speech-to-text provider
     "DEMO_PLATFORM_ORIGIN": "https://demo-platform.pages.dev",
     "BROWSER_PROVIDER": "cloudflare",

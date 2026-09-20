@@ -19,11 +19,16 @@ import type { RobloxAuthEnv } from "./src/roblox/types.js";
 import { VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI, registerVideoResources, videoStatusFlags } from "./src/mcp/video-resources.js";
 import { describeVideoCapabilities } from "./src/video/capabilities.js";
 import type { VideoEnv } from "./src/video/types.js";
+import { registerYouTubeTools, YOUTUBE_TOOL_NAMES, youTubeCapabilitiesReport, YOUTUBE_CAPABILITIES_URI } from "./src/mcp/youtube-tools.js";
+import { youTubeFlags, type YouTubeEnv } from "./src/youtube/config.js";
+import { registerCommand, routeCommand, listCommands } from "./src/commands/router.js";
+import { createMcpCommand } from "./src/commands/mcp-command.js";
+import { createJevCommand } from "./src/commands/jev-command.js";
 
-type Env = SessionManagerEnv & VideoEnv & RobloxAuthEnv & JevEnv & { DEMO_API_KEY?: string; SSRF_GUARD_HTTP_FETCH?: string };
+type Env = SessionManagerEnv & VideoEnv & RobloxAuthEnv & JevEnv & YouTubeEnv & { DEMO_API_KEY?: string; SSRF_GUARD_HTTP_FETCH?: string };
 /** Release version. Reported by `demo_ping`, `/health`, `/tools`, the MCP initialize
  * result and `/platform/stats` — one constant, so those can never disagree. */
-const VERSION = "0.8.2";
+const VERSION = "0.8.3 beta";
 const SKILLS_API = "https://skills.sh/api/v1";
 
 /**
@@ -264,11 +269,13 @@ function server(env: Env, requestUrl: string | null = null, authorization: strin
         provider: capabilities.provider,
         ...robloxFlags(env),
         ...jevFlags(env as unknown as Record<string, unknown>),
+        ...youTubeFlags(env as unknown as Record<string, unknown>),
         toolCount: DEMO_TOOL_NAMES.length,
         // Flattened for existing clients, plus the nested report for new ones.
         ...videoFlags,
         video: videoFlags,
         videoResources: [VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI],
+        youtubeResources: [YOUTUBE_CAPABILITIES_URI],
         ...(capabilities.reason ? { browserReason: capabilities.reason } : {}),
       }),
   );
@@ -522,6 +529,10 @@ function server(env: Env, requestUrl: string | null = null, authorization: strin
 
   registerJevTools(mcp, { env: env as unknown as Record<string, unknown>, requestUrl });
 
+  /* ---------------------------------------------- public YouTube Data API v3 */
+
+  registerYouTubeTools(mcp, { env: env as unknown as Record<string, unknown> & YouTubeEnv, requestUrl });
+
   /* ----------------------------------------------------------- skills tools */
 
   mcp.registerTool(
@@ -712,6 +723,8 @@ export const DEMO_TOOL_NAMES = [
   "skill_builtin_typesafe",
   // Jev decision engine (TypeSafe)
   ...JEV_TOOL_NAMES,
+  // Public YouTube Data API v3
+  ...YOUTUBE_TOOL_NAMES,
 ] as const;
 
 export const TOOL_COUNT = DEMO_TOOL_NAMES.length;
@@ -735,15 +748,20 @@ export default {
       ...video,
       ...robloxFlags(env),
       ...jevFlags(env as unknown as Record<string, unknown>),
+      ...youTubeFlags(env as unknown as Record<string, unknown>),
       skillsSh: true,
       composio: false,
       toolCount: TOOL_COUNT,
-      resources: [VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI, ROBLOX_CAPABILITIES_URI, JEV_CAPABILITIES_URI],
+      resources: [VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI, ROBLOX_CAPABILITIES_URI, JEV_CAPABILITIES_URI, YOUTUBE_CAPABILITIES_URI],
     };
+    // Register commands for the /mcp and /jev command system
+    registerCommand(createMcpCommand({ version: VERSION, toolNames: DEMO_TOOL_NAMES, commands: listCommands() }));
+    registerCommand(createJevCommand());
     if (url.pathname === "/") return Response.json({ ...status, capabilities });
     if (url.pathname === "/health") return Response.json({ ok: true, ...status });
-    if (url.pathname === "/tools") return Response.json({ count: TOOL_COUNT, tools: DEMO_TOOL_NAMES, resources: [VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI] });
+    if (url.pathname === "/tools") return Response.json({ count: TOOL_COUNT, tools: DEMO_TOOL_NAMES, resources: [VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI, YOUTUBE_CAPABILITIES_URI] });
     if (url.pathname === "/capabilities/jev") return Response.json(jevCapabilitiesReport(env as unknown as Record<string, unknown>));
+    if (url.pathname === "/capabilities/youtube") return Response.json(youTubeCapabilitiesReport(env as unknown as Record<string, unknown>));
     if (url.pathname === "/capabilities/video") {
       return Response.json(describeVideoCapabilities(env as Env & Record<string, unknown>, browserCapabilitiesFor(env, request.url)));
     }
