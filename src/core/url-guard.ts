@@ -162,27 +162,86 @@ export function isPrivateIp(ip: string): boolean {
 }
 
 /**
- * DNS-over-HTTPS resolver. Uses Cloudflare's public resolver, which is
- * reachable from a Worker without extra configuration.
+ * Positive DoH answers, shared by every resolver instance in the isolate and
+ * kept no longer than the record's own TTL (capped at DOH_CACHE_MAX_TTL_MS).
+ *
+ * Why a cache: the video pipeline validates the same hostnames many times
+ * inside one tool call (the page host, the referer on every probe, each
+ * redirect hop, every probed stream), and on Cloudflare Workers each DoH
+ * query is a subrequest that counts toward the per-invocation budget (50 on
+ * the Free plan, redirects included). Without the cache a single
+ * `video_resolve` of a stream-rich page could exhaust that budget and every
+ * later lookup would then fail closed as "DNS lookup failed" — exactly what
+ * the deployed Worker reported for hostnames it had verified moments earlier.
+ *
+ * The cache never widens access: a cached answer produces exactly the verdict
+ * the live answer produced (private hits are recomputed from the same IPs),
+ * a record is never trusted beyond its advertised TTL, and lookup failures
+ * are never cached. Only plain strings/numbers are stored, never I/O objects.
  */
-export function createDohResolver(fetchImpl: typeof fetch = fetch, endpoint = "https://cloudflare-dns.com/dns-query"): DnsResolver {
+interface DohCacheEntry {
+  ips: string[];
+  expiresAt: number;
+}
+
+const DOH_CACHE_MAX_TTL_MS = 60_000;
+const DOH_CACHE_MAX_ENTRIES = 256;
+const dohCache = new Map<string, DohCacheEntry>();
+
+/** Drop every cached DoH answer (tests, or an operator forcing re-resolution). */
+export function resetDohCache(): void {
+  dohCache.clear();
+}
+
+/**
+ * DNS-over-HTTPS resolver. Uses Cloudflare's public resolver, which is
+ * reachable from a Worker without extra configuration. `fetchImpl` is looked
+ * up per call when omitted so a long-lived resolver always uses the current
+ * global `fetch`.
+ */
+export function createDohResolver(fetchImpl?: typeof fetch, endpoint = "https://cloudflare-dns.com/dns-query"): DnsResolver {
   return {
     async resolve(hostname: string): Promise<string[]> {
+      const cacheKey = `${endpoint}\u0000${hostname.toLowerCase()}`;
+      const now = Date.now();
+      const cached = dohCache.get(cacheKey);
+      if (cached && cached.expiresAt > now) return [...cached.ips];
+      if (cached) dohCache.delete(cacheKey);
+
+      const doFetch = fetchImpl ?? fetch;
       const types = ["A", "AAAA"];
       const answers = await Promise.all(
         types.map(async (type) => {
           const url = `${endpoint}?name=${encodeURIComponent(hostname)}&type=${type}`;
-          const response = await fetchImpl(url, { headers: { accept: "application/dns-json" } });
+          const response = await doFetch(url, { headers: { accept: "application/dns-json" } });
           if (!response.ok) throw new Error(`DNS lookup failed with status ${response.status}`);
           const data = (await response.json()) as {
             Status?: number;
-            Answer?: Array<{ type?: number; data?: string }>;
+            Answer?: Array<{ type?: number; data?: string; TTL?: number }>;
           };
-          if (data.Status !== 0 || !Array.isArray(data.Answer)) return [];
-          return data.Answer.map((answer) => String(answer.data ?? "").trim()).filter((entry) => entry.length > 0);
+          if (data.Status !== 0 || !Array.isArray(data.Answer)) return { ips: [] as string[], ttlSeconds: 0 };
+          const ips = data.Answer.map((answer) => String(answer.data ?? "").trim()).filter((entry) => entry.length > 0);
+          // The shortest TTL in the answer section bounds how long the whole
+          // answer may be reused; a missing TTL disables caching (0).
+          const ttlSeconds = data.Answer.reduce((min, answer) => {
+            const ttl = typeof answer.TTL === "number" && Number.isFinite(answer.TTL) ? Math.max(0, answer.TTL) : 0;
+            return Math.min(min, ttl);
+          }, Number.POSITIVE_INFINITY);
+          return { ips, ttlSeconds: Number.isFinite(ttlSeconds) ? ttlSeconds : 0 };
         }),
       );
-      return [...new Set(answers.flat())];
+      const ips = [...new Set(answers.flatMap((answer) => answer.ips))];
+      // Cache only answers that carried at least one record with a positive
+      // TTL; empty/NXDOMAIN answers and TTL 0 records are re-queried every time.
+      const ttlSeconds = Math.min(...answers.filter((answer) => answer.ips.length > 0).map((answer) => answer.ttlSeconds));
+      if (ips.length > 0 && Number.isFinite(ttlSeconds) && ttlSeconds > 0) {
+        if (dohCache.size >= DOH_CACHE_MAX_ENTRIES) {
+          const oldest = dohCache.keys().next().value;
+          if (oldest !== undefined) dohCache.delete(oldest);
+        }
+        dohCache.set(cacheKey, { ips: [...ips], expiresAt: now + Math.min(ttlSeconds * 1_000, DOH_CACHE_MAX_TTL_MS) });
+      }
+      return ips;
     },
   };
 }
@@ -290,8 +349,12 @@ export async function checkUrl(input: string, options: UrlGuardOptions = {}): Pr
     if (options.dnsFailOpen ?? true) {
       return { ...sync, warnings: [...sync.warnings, "dns-unverified"] };
     }
+    // Fail closed, but say why the lookup failed (HTTP status from the DoH
+    // endpoint, a platform limit such as "Too many subrequests", a network
+    // error) so an operator can tell an environment problem from a real deny.
+    const cause = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, " ").trim().slice(0, 160);
     return deny(
-      `Unable to verify "${hostname}" against private IP ranges (DNS lookup failed).`,
+      `Unable to verify "${hostname}" against private IP ranges (DNS lookup failed${cause ? `: ${cause}` : ""}).`,
       "blocked_url",
       hostname,
     );

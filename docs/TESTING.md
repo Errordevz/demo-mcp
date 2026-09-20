@@ -89,17 +89,42 @@ Requirements for a meaningful run:
   is a public TikTok video URL. TikTok may block Browser Run traffic — the test
   accepts an honest structured error (stable code, `frames: []`,
   `analysis_ready: false`) as a pass, never a thumbnail.
-* `LIVE_PUBLIC_VIDEO_URL` can point the `video_ingest` round-trip test at a
-  different fixture; the default is a small, short, DRM-free public MP4.
+* `LIVE_PUBLIC_VIDEO_URL` points the direct-MP4 tests (`video_ingest`,
+  `inspect_video`, `video_resolve`, `video_fetch`, and the analyze/react/resize
+  tests) at a small, short, DRM-free public MP4 that the **Worker** can fetch.
+  * The deploy workflow (`.github/workflows/live-deploy.yml`) uploads the
+    tracked fixture `tests/fixtures/live-public-video.mp4` (≈44 KB, 10 s,
+    640×360 H.264/AAC, synthetic pattern with a burned-in timecode — no
+    licensing or third-party availability concerns) to the public R2 bucket
+    `demo-mcp-live-fixtures` and exports its `r2.dev` URL, then runs
+    `scripts/probe-live-fixture.mjs`, which asks the deployed Worker (via
+    `video_resolve`) whether it can actually reach the fixture and prints the
+    verdict. A blank/unset value falls back to the local-development default in
+    `tests/helpers/live.ts` (a 10 s Big Buck Bunny clip from test-videos.co.uk).
+  * The fixture was rendered with ffmpeg from synthetic lavfi sources only
+    (a moving red square and a timecode over a plain background, sine tone).
+    An equivalent recipe, should it ever need regenerating:
+    `ffmpeg -f lavfi -i "color=c=0x1e2a44:s=640x360:r=20:d=10" -f lavfi -i
+    "sine=f=440:d=10" -vf "drawbox=x=40+t*40:y=120:w=80:h=80:c=red:t=fill,
+    drawtext=text='DEMO live fixture t=%{pts\:hms}':x=20:y=20:fontsize=24:
+    fontcolor=white" -c:v libx264 -profile:v main -crf 30 -pix_fmt yuv420p
+    -c:a aac -ar 22050 -b:a 8k -ac 1 -shortest -movflags +faststart
+    tests/fixtures/live-public-video.mp4` (≈40 KB). The workflow keys the R2
+    object by the file's SHA-256, so a regenerated fixture gets a new URL.
 
-The video live suite prefights the Worker via `/health` and classifies three
+The video live suite preflights the Worker via `/health` and classifies four
 kinds of failure: the **test host** cannot reach the Worker (aborts with an
 unambiguous sandbox-egress message), the **Worker** cannot reach the public
 source (the test **skips** with a note, since the deployed Worker has normal
-outbound access), and the **platform** blocks the Worker (asserted as an honest
+outbound access), the **fixture host** answers the Worker with HTTP 403 / a bot
+challenge (`fixtureAccessSkipNote`: the test **skips** with an
+`ENVIRONMENT SKIP (fixture host denied the Worker)` note that is also printed
+to the log — it applies only to `LIVE_PUBLIC_VIDEO_URL`, never to a
+user-supplied or platform URL, and never to a successful or non-access
+failure), and the **platform** blocks the Worker (asserted as an honest
 structured error). Tests otherwise skip (not fail) when a capability the
 environment cannot provide is missing (`capability_unavailable`,
-`rate_limited`).
+`rate_limited`). No skip is ever silent: every skip carries its reason.
 
 ## Verifying Cloudflare compatibility
 
