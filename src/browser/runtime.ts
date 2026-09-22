@@ -12,10 +12,26 @@
  * browser alive according to its `keep_alive` window.
  */
 
-import { BrowserError, asBrowserError } from "../core/errors.js";
+import { BrowserError, asBrowserError, isBrowserError } from "../core/errors.js";
 import { LIMITS, clamp, clampKeepAlive, clampTimeout } from "../core/limits.js";
 import { safeLog } from "../core/redact.js";
 import type { ChallengeStatus, ChallengeVerdict } from "./challenge.js";
+import {
+  collectHandoffCues,
+  createHandoffRecord,
+  detectInteraction,
+  challengeCleared,
+  failHandoff,
+  isHandoffTrigger,
+  isActivePhase,
+  outcomeFor,
+  projectHandoff,
+  pushEvent,
+  transition,
+  HANDOFF_LIMITS,
+  type CaptchaHandoffRecord,
+  type HandoffOutcome,
+} from "./handoff.js";
 import type { MediaInspector, FrameSamplingOptions, MediaReport } from "./media.js";
 import * as ops from "./ops.js";
 import type { ScreenshotManager } from "./screenshot.js";
@@ -65,8 +81,39 @@ export interface SessionState {
   tabs: TabRecord[];
   activeTabId: string | null;
   paused: PauseRecord | null;
+  /** Active (or finished) CAPTCHA human-handoff state machine record. */
+  captchaHandoff: CaptchaHandoffRecord | null;
   guardrails: { allowedDomains?: string[]; allowedDomainSets?: string[] } | null;
   lastError: string | null;
+}
+
+/**
+ * Fill fields added after a session state was persisted by an older version.
+ * Called on every load path so a stored pre-handoff state keeps working.
+ */
+export function normaliseSessionState(state: SessionState): SessionState {
+  if (!state.captchaHandoff) state.captchaHandoff = null;
+  return state;
+}
+
+/* ------------------------------------------------- captcha handoff types -- */
+
+export type CaptchaHandoffProjection = ReturnType<typeof projectHandoff>;
+
+export interface CaptchaHandoffStartResult extends CaptchaHandoffProjection {
+  action: "handoff_started" | "already_active" | "no_challenge_detected" | "not_handoff_eligible";
+  tab: TabRecord | null;
+  next: string;
+}
+
+export interface CaptchaHandoffPollResult extends CaptchaHandoffProjection {
+  waitedMs: number;
+  next: string;
+}
+
+export interface CaptchaHandoffCancelResult extends CaptchaHandoffProjection {
+  action: "cancelled" | "no_active_handoff";
+  next: string;
 }
 
 export interface RuntimeHooks {
@@ -92,6 +139,7 @@ export interface SessionSummary {
   activeTabId: string | null;
   tabs: TabSummary[];
   paused: PauseRecord | null;
+  captchaHandoff: { phase: string; outcome: HandoffOutcome; pageId: string | null; url: string | null; liveViewUrl: string | null; deadline: number | null } | null;
   lastError: string | null;
   capabilities: ReturnType<BrowserProvider["capabilities"]>;
   limits: Awaited<ReturnType<BrowserProvider["limits"]>> | null;
@@ -110,6 +158,7 @@ export function createSessionState(sessionId: string, provider: ProviderName, ke
     tabs: [],
     activeTabId: null,
     paused: null,
+    captchaHandoff: null,
     guardrails: null,
     lastError: null,
   };
@@ -128,7 +177,9 @@ export class BrowserRuntime {
     private state: SessionState,
     private readonly managers: ops.ManagerContext,
     private readonly hooks: RuntimeHooks,
-  ) {}
+  ) {
+    normaliseSessionState(this.state);
+  }
 
   get sessionState(): SessionState {
     return this.state;
@@ -158,6 +209,10 @@ export class BrowserRuntime {
         this.state.tabs = [];
         this.state.activeTabId = null;
         this.state.paused = null;
+        if (this.state.captchaHandoff && isActivePhase(this.state.captchaHandoff.phase)) {
+          failHandoff(this.state.captchaHandoff, "The browser session expired while the CAPTCHA handoff was open.", "browser_session_lost");
+          safeLog("warn", "browser_session_lost", { sessionId: this.state.sessionId, pageId: this.state.captchaHandoff.pageId });
+        }
         this.state.lastError = "Previous browser session expired; a new one will be acquired.";
       }
     }
@@ -223,12 +278,26 @@ export class BrowserRuntime {
       this.state.tabs = [];
       this.state.activeTabId = null;
       this.state.lastError = "Browser session expired while waiting for a human.";
+      if (this.state.captchaHandoff && isActivePhase(this.state.captchaHandoff.phase)) {
+        failHandoff(this.state.captchaHandoff, "The browser session ended while waiting for the challenge to be completed.", "browser_session_lost");
+        safeLog("warn", "browser_session_lost", { sessionId: this.state.sessionId, pageId: this.state.captchaHandoff.pageId });
+      }
       await this.persist();
     }
     return { alive, sessionId: providerSessionId };
   }
 
   async summary(): Promise<SessionSummary> {
+    const handoff = this.state.captchaHandoff
+      ? {
+          phase: this.state.captchaHandoff.phase,
+          outcome: outcomeFor(this.state.captchaHandoff),
+          pageId: this.state.captchaHandoff.pageId,
+          url: this.state.captchaHandoff.url,
+          liveViewUrl: this.state.captchaHandoff.liveViewUrl,
+          deadline: this.state.captchaHandoff.deadline,
+        }
+      : null;
     return {
       sessionId: this.state.sessionId,
       provider: this.state.provider,
@@ -239,6 +308,7 @@ export class BrowserRuntime {
       activeTabId: this.state.activeTabId,
       tabs: this.state.tabs.map((tab) => ({ ...tab, active: tab.id === this.state.activeTabId })),
       paused: this.state.paused,
+      captchaHandoff: handoff,
       lastError: this.state.lastError,
       capabilities: this.provider.capabilities(),
       limits: await this.provider.limits(),
@@ -804,6 +874,328 @@ export class BrowserRuntime {
           : status === "waiting_for_human"
             ? "The human handoff is still open. Finish the step in the live view, then call browser_resume again."
             : "The page still looks blocked. DEMO will not attempt to bypass it; a human can use browser_pause_for_human.",
+    };
+  }
+
+  /* ------------------------------------------------- captcha human handoff -- */
+
+  /**
+   * CAPTCHA / bot-verification human handoff — start.
+   *
+   * Detects a challenge on the current tab, immediately suspends automation,
+   * preserves the *existing* session/tab/page state plus a resumable task
+   * snapshot, opens a Live View for the user and returns the handoff state
+   * machine. The session is never rotated and the page is never reloaded to
+   * shake the challenge off; the human completes it in the live browser.
+   */
+  async captchaHandoffStart(
+    pageId: string | undefined | null,
+    options: {
+      instructions?: string;
+      timeoutMs?: number;
+      screenshot?: boolean;
+      mode?: "tab" | "devtools" | "full";
+      task?: { workflow?: string; step?: string; context?: Record<string, string> } | null;
+    } = {},
+  ): Promise<CaptchaHandoffStartResult> {
+    const timeoutMs = clamp(options.timeoutMs ?? HANDOFF_LIMITS.handoffDefaultMs, HANDOFF_LIMITS.handoffMinMs, HANDOFF_LIMITS.handoffMaxMs);
+
+    const existing = this.state.captchaHandoff;
+    if (existing && isActivePhase(existing.phase)) {
+      return {
+        ...projectHandoff(existing, this.state.sessionId),
+        action: "already_active",
+        tab: this.state.tabs.find((candidate) => candidate.id === existing.pageId) ?? null,
+        next: "A CAPTCHA handoff is already running for this session. Call browser_captcha_wait to monitor it, or browser_captcha_cancel to abandon it.",
+      };
+    }
+
+    const { result, tab } = await this.withTab(pageId ?? null, async ({ page, browser, tab: currentTab }) => {
+      const challenge = await this.managers.challenge.inspect(page);
+      if (!isHandoffTrigger(challenge.status)) {
+        return { started: false as const, challenge, tabId: currentTab.id };
+      }
+
+      let screenshotUrl: string | null = null;
+      if (options.screenshot !== false && this.managers.screenshots.available) {
+        try {
+          const capture = await ops.captureScreenshot(page, { type: "png", fullPage: false }, this.managers);
+          screenshotUrl = capture.image.url;
+        } catch (error) {
+          safeLog("warn", "handoff-screenshot-failed", String(error));
+        }
+      }
+
+      const url = page.url();
+      const instructions = options.instructions?.trim() || this.managers.challenge.buildInstructions(challenge, url);
+
+      let liveViewUrl: string | null = null;
+      let liveViewExpiresAtMs: number | null = null;
+      if (this.provider.capabilities().liveView) {
+        const link = await browser.liveView(page, { mode: options.mode ?? "tab", expiresInMs: 300_000 }).catch(() => null);
+        if (link) {
+          liveViewUrl = link.url;
+          liveViewExpiresAtMs = link.expiresAtMs;
+        }
+      }
+
+      let handoffId: string | null = null;
+      if (this.provider.capabilities().handoff) {
+        const handoff = await browser.requestHandoff(page, { instructions, timeoutMs }).catch(() => null);
+        if (handoff) handoffId = handoff.handoffId;
+      }
+
+      // Baseline interaction cues so we can tell, later, that a human is working.
+      const cues = await page.evaluate(collectHandoffCues).catch(() => null);
+
+      const record = createHandoffRecord(
+        {
+          pageId: currentTab.id,
+          url,
+          vendor: challenge.vendor ?? null,
+          signals: challenge.signals,
+          challengeStatus: challenge.status,
+          confidence: challenge.confidence,
+          timeoutMs,
+          liveViewUrl,
+          liveViewExpiresAtMs,
+          handoffId,
+          instructions,
+          screenshotUrl,
+          task: options.task ?? null,
+        },
+        this.state.sessionId,
+      );
+      record.interaction.cues = cues;
+      this.state.captchaHandoff = record;
+      // Keep the legacy pause bookkeeping in sync: the alarm uses it to keep the
+      // platform session warm while the human works.
+      this.state.paused = {
+        status: challenge.status,
+        url,
+        pageId: currentTab.id,
+        detectedAt: Date.now(),
+        handoffId,
+        liveViewUrl,
+        liveViewExpiresAtMs,
+        instructions,
+        pauseUntil: record.deadline,
+        screenshotUrl,
+      };
+      this.state.keepAliveMs = clampKeepAlive(Math.max(this.state.keepAliveMs, LIMITS.keepAliveMaxMs));
+      if (this.hooks.scheduleHeartbeat) {
+        await this.hooks.scheduleHeartbeat(Date.now() + Math.min(LIMITS.heartbeatIntervalMs, Math.max(30_000, this.state.keepAliveMs - 60_000)));
+      }
+      safeLog("log", "captcha_detected", { sessionId: this.state.sessionId, pageId: currentTab.id, challenge: challenge.status, ...(challenge.vendor ? { vendor: challenge.vendor } : {}) });
+      return { started: true as const, challenge, tabId: currentTab.id };
+    });
+    await this.persist();
+
+    if (!result.started) {
+      const eligible = result.challenge.requiresHuman;
+      return {
+        ...projectHandoff(null, this.state.sessionId),
+        action: eligible ? "not_handoff_eligible" : "no_challenge_detected",
+        tab,
+        next: eligible
+          ? "This blocking state (login/consent) is not a CAPTCHA: use browser_pause_for_human, or dismiss it with browser_click where appropriate."
+          : result.challenge.status === "loading"
+            ? "The page may still be loading. Call browser_wait, then try browser_captcha_handoff again."
+            : "No CAPTCHA or bot-verification detected. Continue automation normally.",
+      };
+    }
+
+    const record = this.state.captchaHandoff!;
+    return {
+      ...projectHandoff(record, this.state.sessionId),
+      action: "handoff_started",
+      tab,
+      next: "Give the liveViewUrl to the user. Monitor with browser_captcha_wait (repeat until a terminal outcome); Demo resumes the task automatically once the challenge is gone. The user can also signal completion with browser_resume, or abandon with browser_captcha_cancel.",
+    };
+  }
+
+  /**
+   * Monitor the handoff for up to `waitMs` (bounded window): polls session
+   * liveness, page cues and the challenge verdict until the challenge is gone
+   * (automatic resume), the platform handoff fails, the deadline passes or the
+   * session dies. Never reloads the page and never rotates the session.
+   */
+  async captchaHandoffPoll(
+    pageId: string | undefined | null,
+    options: { waitMs?: number; intervalMs?: number } = {},
+  ): Promise<CaptchaHandoffPollResult> {
+    const startedAt = Date.now();
+    const record = this.state.captchaHandoff;
+    if (!record) {
+      return {
+        ...projectHandoff(null, this.state.sessionId),
+        waitedMs: 0,
+        next: "No CAPTCHA handoff exists for this session. Call browser_captcha_handoff when a challenge appears.",
+      };
+    }
+    const targetPageId = pageId ?? record.pageId;
+    const windowMs = clamp(options.waitMs ?? HANDOFF_LIMITS.monitorWindowDefaultMs, 0, HANDOFF_LIMITS.monitorWindowMaxMs);
+    const intervalMs = clamp(options.intervalMs ?? HANDOFF_LIMITS.pollIntervalMs, HANDOFF_LIMITS.pollIntervalMinMs, HANDOFF_LIMITS.pollIntervalMaxMs);
+    const windowDeadline = startedAt + windowMs;
+
+    let projection = await this.captchaHandoffTick(targetPageId);
+    while (projection.outcome === "waiting_for_human" && Date.now() < windowDeadline) {
+      await ops.settle(Math.min(intervalMs, Math.max(0, windowDeadline - Date.now())));
+      projection = await this.captchaHandoffTick(targetPageId);
+    }
+    await this.persist();
+
+    const next =
+      projection.outcome === "completed_and_resumed"
+        ? "Challenge cleared and control is back. Continue the original task from the stored task step — the tab, session, cookies and page state were preserved."
+        : projection.outcome === "waiting_for_human"
+          ? "The challenge is still on the page. Call browser_captcha_wait again to keep monitoring until the deadline, or browser_captcha_cancel to abandon."
+          : projection.outcome === "failed"
+            ? "The human attempt ended without clearing the challenge. A new browser_captcha_handoff can be started once, explicitly — Demo never retries on its own."
+            : projection.outcome === "timed_out"
+              ? "The handoff deadline passed. Start a new browser_captcha_handoff if the user wants another window, or close the session."
+              : projection.outcome === "cancelled"
+                ? "The handoff was abandoned by the user. The session is still usable for other work."
+                : "The browser session is gone. Re-open the page with browser_open to start fresh; the task context above describes where the old session stopped.";
+    return { ...projection, waitedMs: Date.now() - startedAt, next };
+  }
+
+  /** One completion check. Cheap enough for the Durable Object alarm. */
+  async captchaHandoffTick(pageId: string | undefined | null): Promise<CaptchaHandoffProjection> {
+    const record = this.state.captchaHandoff;
+    if (!record) return projectHandoff(null, this.state.sessionId);
+    if (!isActivePhase(record.phase)) return projectHandoff(record, this.state.sessionId);
+    const targetPageId = pageId ?? record.pageId;
+
+    // 1) Liveness first: a dead session can never resume.
+    const providerSessionId = this.state.providerSessionId;
+    const alive = providerSessionId ? await this.provider.ping(providerSessionId).catch(() => false) : false;
+    if (!providerSessionId || !alive) {
+      failHandoff(record, "The browser session ended while waiting for the challenge to be completed.", "browser_session_lost");
+      this.state.providerSessionId = null;
+      this.state.paused = null;
+      this.state.tabs = [];
+      this.state.activeTabId = null;
+      this.state.lastError = "Browser session expired while waiting for a human (CAPTCHA handoff).";
+      safeLog("warn", "browser_session_lost", { sessionId: this.state.sessionId, pageId: record.pageId });
+      await this.persist();
+      return projectHandoff(record, this.state.sessionId);
+    }
+
+    try {
+      await this.withTab(targetPageId, async ({ page, browser }) => {
+        // 2) Coarse interaction cues + challenge verdict. No reload: the human
+        // completes the challenge in the live page, and repeatedly reloading to
+        // evict a challenge is exactly the evasion Demo refuses to do.
+        const cues = await page.evaluate(collectHandoffCues).catch(() => null);
+        const challenge = await this.managers.challenge.inspect(page);
+        record.currentUrl = page.url();
+        record.lastCheckedAt = Date.now();
+
+        let platformActive = false;
+        if (record.handoffId && this.provider.capabilities().handoff) {
+          const state = await browser.handoffState(page).catch(() => null);
+          platformActive = Boolean(state?.active);
+        }
+        if (platformActive && record.interaction.platformSeenAt === null) {
+          record.interaction.platformSeenAt = Date.now();
+        }
+
+        // 3) Human visible? Flip to USER_INTERACTING once, carrying the
+        // `human_handoff_active` event.
+        if (cues) {
+          const interaction = detectInteraction(record.interaction.cues, cues, platformActive);
+          if (interaction.interacting) {
+            record.interaction.cues = cues;
+            record.interaction.detectedAt = record.interaction.detectedAt ?? Date.now();
+            record.interaction.reasons = interaction.reasons;
+            if (record.phase === "HUMAN_HANDOFF") {
+              transition(record, "USER_INTERACTING", "human_handoff_active", { reasons: interaction.reasons.slice(0, 4).join(",") });
+              record.interaction.eventEmitted = true;
+            } else if (!record.interaction.eventEmitted) {
+              pushEvent(record, "human_handoff_active", { reasons: interaction.reasons.slice(0, 4).join(",") });
+              record.interaction.eventEmitted = true;
+            }
+          }
+        }
+
+        // 4) Completion check: verdict no longer blocking (this covers both an
+        // in-place solve and the page having navigated past the challenge).
+        if (challengeCleared(challenge.status)) {
+          record.challengeStatus = challenge.status;
+          record.completedAt = Date.now();
+          transition(record, "CAPTCHA_COMPLETED", "captcha_completed", { url: record.currentUrl });
+          transition(record, "RESUMING", "automation_resumed");
+          record.resumedAt = Date.now();
+          transition(record, "RUNNING");
+          this.state.paused = null;
+          safeLog("log", "captcha_completed", { sessionId: this.state.sessionId, pageId: record.pageId, url: record.currentUrl });
+          return;
+        }
+
+        record.challengeStatus = challenge.status;
+        if (challenge.vendor) record.vendor = challenge.vendor;
+
+        // 5) Failure: a human was seen on the platform handoff, the handoff
+        // closed again, and the challenge is still there.
+        if (record.interaction.platformSeenAt !== null && record.handoffId && this.provider.capabilities().handoff && !platformActive) {
+          failHandoff(record, "The human handoff ended but the challenge is still on the page.", "captcha_failed", { challenge: challenge.status, url: record.currentUrl });
+          this.state.paused = null;
+          safeLog("warn", "captcha_failed", { sessionId: this.state.sessionId, pageId: record.pageId, challenge: challenge.status });
+          return;
+        }
+
+        // 6) Timeout: deadline passed, challenge still present.
+        if (Date.now() >= record.deadline) {
+          failHandoff(record, "Timed out waiting for the challenge to be completed.", "captcha_timeout", { waitedMs: Date.now() - record.detectedAt, url: record.currentUrl });
+          this.state.paused = null;
+          safeLog("warn", "captcha_timeout", { sessionId: this.state.sessionId, pageId: record.pageId });
+        }
+      });
+    } catch (error) {
+      // The handoff tab disappearing (closed by the human, crashed, navigated
+      // into a dead page) is a terminal outcome, not a reason to retry.
+      if (isBrowserError(error) && (error.code === "page_not_found" || error.code === "session_not_found")) {
+        failHandoff(record, "The handoff tab is no longer open in the browser session.", "captcha_failed", { pageId: targetPageId });
+        this.state.paused = null;
+        safeLog("warn", "captcha_failed", { sessionId: this.state.sessionId, pageId: targetPageId, reason: "tab_lost" });
+      } else {
+        safeLog("warn", "handoff-tick-failed", String(error));
+      }
+    }
+    await this.persist();
+    return projectHandoff(record, this.state.sessionId);
+  }
+
+  /** Read-only view of the handoff state machine (plus liveness). */
+  async captchaHandoffStatus(): Promise<CaptchaHandoffProjection & { sessionAlive: boolean }> {
+    const record = this.state.captchaHandoff;
+    const providerSessionId = this.state.providerSessionId;
+    const sessionAlive = providerSessionId ? await this.provider.ping(providerSessionId).catch(() => false) : false;
+    return { ...projectHandoff(record, this.state.sessionId), sessionAlive };
+  }
+
+  /**
+   * Explicit user fallback: abandon the handoff. The session, tab and page
+   * state stay untouched — only automation control is returned.
+   */
+  async captchaHandoffCancel(options: { reason?: string } = {}): Promise<CaptchaHandoffCancelResult> {
+    const record = this.state.captchaHandoff;
+    if (!record || !isActivePhase(record.phase)) {
+      return {
+        ...projectHandoff(record ?? null, this.state.sessionId),
+        action: "no_active_handoff",
+        next: "There is no active CAPTCHA handoff to cancel.",
+      };
+    }
+    failHandoff(record, options.reason?.trim() || "The user cancelled the handoff.", "human_handoff_cancelled");
+    this.state.paused = null;
+    safeLog("log", "human_handoff_cancelled", { sessionId: this.state.sessionId, pageId: record.pageId });
+    await this.persist();
+    return {
+      ...projectHandoff(record, this.state.sessionId),
+      action: "cancelled",
+      next: "Handoff cancelled. The browser session and its tabs are still open; you can continue other automation or start a new handoff explicitly.",
     };
   }
 

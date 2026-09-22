@@ -19,9 +19,11 @@ import type { ElementTarget, ScreenshotType, WaitUntil } from "../browser/types.
 import type { FrameSamplingOptions } from "../browser/media.js";
 import type { CaptureOptions, OpenOptions, ReadOptions, ScrollDirection, SnapshotOptions, WaitSpec } from "../browser/ops.js";
 import type { SessionState } from "../browser/runtime.js";
+import { normaliseSessionState } from "../browser/runtime.js";
 import { LIMITS, clampKeepAlive } from "../core/limits.js";
 import { safeLog } from "../core/redact.js";
 import { encodeForRpc } from "../core/errors.js";
+import { isActivePhase } from "../browser/handoff.js";
 import { SessionFacade } from "./facade.js";
 import {
   createBrowserDependencies,
@@ -55,12 +57,13 @@ export class BrowserSession extends DurableObject<BrowserSessionEnv> {
     }
     const stored = (await this.ctx.storage.get<SessionState>(STATE_KEY)) ?? null;
     if (stored) {
-      this.cached = stored;
-      if (sessionId && stored.sessionId !== sessionId) {
-        stored.sessionId = sessionId;
+      this.cached = normaliseSessionState(stored);
+      const normalized = this.cached;
+      if (sessionId && normalized.sessionId !== sessionId) {
+        normalized.sessionId = sessionId;
         await this.save();
       }
-      return stored;
+      return normalized;
     }
     const created = newSessionState(sessionId ?? this.ctx.id.toString(), this.env);
     if (this.deps().guardrails) created.guardrails = this.deps().guardrails;
@@ -120,6 +123,25 @@ export class BrowserSession extends DurableObject<BrowserSessionEnv> {
 
   async alarm(): Promise<void> {
     const state = await this.load();
+    if (!state) return;
+    // While a CAPTCHA handoff is open, the alarm doubles as the automatic
+    // completion detector: each wake-up runs one completion check so Demo can
+    // resume the moment the challenge disappears, even when no MCP call is
+    // in flight. Terminal handoffs stop the wake-ups.
+    if (state.captchaHandoff && isActivePhase(state.captchaHandoff.phase)) {
+      const facade = await this.facade();
+      try {
+        await facade.captchaHandoffTick(null);
+      } catch (error) {
+        safeLog("warn", "handoff-alarm-tick-failed", String(error));
+      }
+      const record = state.captchaHandoff;
+      if (record && isActivePhase(record.phase) && Date.now() < record.deadline) {
+        await this.ctx.storage.setAlarm(Date.now() + Math.min(HEARTBEAT_MS, Math.max(5_000, record.deadline - Date.now())));
+      }
+      await this.save();
+      return;
+    }
     if (!state?.paused || !state.providerSessionId) return;
     if (Date.now() > state.paused.pauseUntil) {
       safeLog("log", "pause-expired", { sessionId: state.sessionId, pageId: state.paused.pageId });
@@ -195,6 +217,35 @@ export class BrowserSession extends DurableObject<BrowserSessionEnv> {
 
   async resume(pageId: string | null | undefined, options: { screenshot?: boolean; reload?: boolean; waitMs?: number } = {}) {
     return await this.run(null, (facade) => facade.resume(pageId, options));
+  }
+
+  async captchaHandoffStart(
+    pageId: string | null | undefined,
+    options: {
+      instructions?: string;
+      timeoutMs?: number;
+      screenshot?: boolean;
+      mode?: "tab" | "devtools" | "full";
+      task?: { workflow?: string; step?: string; context?: Record<string, string> } | null;
+    } = {},
+  ) {
+    return await this.run(null, (facade) => facade.captchaHandoffStart(pageId, options));
+  }
+
+  async captchaHandoffWait(pageId: string | null | undefined, options: { waitMs?: number; intervalMs?: number } = {}) {
+    return await this.run(null, (facade) => facade.captchaHandoffPoll(pageId, options));
+  }
+
+  async captchaHandoffTick(pageId: string | null | undefined) {
+    return await this.run(null, (facade) => facade.captchaHandoffTick(pageId));
+  }
+
+  async captchaHandoffStatus() {
+    return await this.run(null, (facade) => facade.captchaHandoffStatus());
+  }
+
+  async captchaHandoffCancel(options: { reason?: string } = {}) {
+    return await this.run(null, (facade) => facade.captchaHandoffCancel(options));
   }
 
   async listTabs() {

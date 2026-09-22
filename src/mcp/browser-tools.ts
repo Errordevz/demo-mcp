@@ -639,6 +639,141 @@ export function registerBrowserTools(mcp: McpServer, ctx: ToolContext): void {
       }),
   );
 
+  /* ----------------------------------------------------- browser_captcha_handoff */
+
+  mcp.registerTool(
+    "browser_captcha_handoff",
+    {
+      title: "Browser CAPTCHA Handoff",
+      description:
+        "CAPTCHA/bot-verification workflow: detect the challenge, immediately pause automation, keep the SAME browser session alive, open a Live View for the user and store a resumable task snapshot. Demo never solves or bypasses the challenge — the human completes it in the live browser and Demo resumes the task automatically.",
+      inputSchema: {
+        ...sessionFields,
+        timeout_ms: z.number().int().min(5_000).max(LIMITS.pauseMaxMs).default(LIMITS.pauseDefaultMs).describe("How long to keep the handoff open before reporting a timeout."),
+        instructions: z.string().max(4_000).optional().describe("Optional extra instructions shown to the human operator."),
+        mode: z.enum(["tab", "devtools", "full"]).default("tab"),
+        task_workflow: z.string().max(64).optional().describe("Name of the suspended workflow (stored in the resumable task snapshot)."),
+        task_step: z.string().max(500).optional().describe("Exact step automation stopped on, so the task can resume there after the handoff."),
+        task_context: z.record(z.string(), z.string().max(200)).optional().describe("Small key/value task context preserved across the handoff."),
+      },
+    },
+    (args) =>
+      runTool(async () => {
+        const sessionId = ctx.sessions.sessionId(args.session_id ?? null);
+        const client = await ctx.sessions.client(sessionId);
+        const result = await client.captchaHandoffStart(ctx.sessions.pageId(args.page_id ?? null), {
+          timeoutMs: args.timeout_ms,
+          ...(args.instructions ? { instructions: args.instructions } : {}),
+          mode: args.mode,
+          task: {
+            ...(args.task_workflow ? { workflow: args.task_workflow } : {}),
+            ...(args.task_step ? { step: args.task_step } : {}),
+            ...(args.task_context ? { context: args.task_context } : {}),
+          },
+        });
+        return textResult({
+          success: result.action === "handoff_started" || result.action === "already_active",
+          action: result.action,
+          sessionId,
+          pageId: result.pageId,
+          phase: result.phase,
+          outcome: result.outcome,
+          url: result.url,
+          challengeStatus: result.challengeStatus,
+          vendor: result.vendor,
+          signals: result.signals,
+          liveViewUrl: result.liveViewUrl,
+          handoffId: result.handoffId,
+          userNotice: result.userNotice,
+          task: result.task,
+          deadline: result.deadline,
+          safetyNote: result.safetyNote,
+          next: result.next,
+        });
+      }),
+  );
+
+  /* ------------------------------------------------------- browser_captcha_wait */
+
+  mcp.registerTool(
+    "browser_captcha_wait",
+    {
+      title: "Browser CAPTCHA Wait",
+      description:
+        "Monitor an open CAPTCHA handoff for up to 30s: polls the live page (no reloads, no session rotation) and returns as soon as the challenge is completed (automatic resume), failed, timed out, cancelled or the session died. Repeat calls to keep monitoring until a terminal outcome.",
+      inputSchema: {
+        ...sessionFields,
+        wait_ms: z.number().int().min(0).max(30_000).default(10_000).describe("How long this call should watch the page before returning (0 = single check)."),
+        interval_ms: z.number().int().min(250).max(5_000).default(1_000).describe("Polling interval inside the watch window."),
+      },
+    },
+    (args) =>
+      runTool(async () => {
+        const sessionId = ctx.sessions.sessionId(args.session_id ?? null);
+        const client = await ctx.sessions.client(sessionId);
+        const result = await client.captchaHandoffPoll(ctx.sessions.pageId(args.page_id ?? null), {
+          waitMs: args.wait_ms,
+          intervalMs: args.interval_ms,
+        });
+        return textResult({
+          success: result.outcome === "completed_and_resumed" || result.outcome === "waiting_for_human" || result.outcome === "no_handoff",
+          outcome: result.outcome,
+          sessionId,
+          pageId: result.pageId,
+          phase: result.phase,
+          url: result.url,
+          currentUrl: result.currentUrl,
+          challengeStatus: result.challengeStatus,
+          vendor: result.vendor,
+          userNotice: result.userNotice,
+          task: result.task,
+          interaction: result.interaction,
+          failure: result.failure,
+          completedAt: result.completedAt,
+          resumedAt: result.resumedAt,
+          deadline: result.deadline,
+          waitedMs: result.waitedMs,
+          liveViewUrl: result.liveViewUrl,
+          events: result.events.map((event) => ({ event: event.event, phase: event.phase, at: event.at, ...(event.detail ? { detail: event.detail } : {}) })),
+          safetyNote: result.safetyNote,
+          next: result.next,
+        });
+      }),
+  );
+
+  /* ----------------------------------------------------- browser_captcha_cancel */
+
+  mcp.registerTool(
+    "browser_captcha_cancel",
+    {
+      title: "Browser CAPTCHA Cancel",
+      description:
+        "Explicitly abandon an open CAPTCHA handoff (user fallback). Keeps the browser session, tab and page state; marks the handoff CANCELLED and returns automation control without touching the challenge.",
+      inputSchema: {
+        ...sessionFields,
+        reason: z.string().max(300).optional().describe("Why the handoff is being abandoned (recorded in the event log)."),
+      },
+    },
+    (args) =>
+      runTool(async () => {
+        const sessionId = ctx.sessions.sessionId(args.session_id ?? null);
+        const client = await ctx.sessions.client(sessionId);
+        const result = await client.captchaHandoffCancel({ ...(args.reason ? { reason: args.reason } : {}) });
+        return textResult({
+          success: true,
+          action: result.action,
+          sessionId,
+          pageId: result.pageId,
+          phase: result.phase,
+          outcome: result.outcome,
+          task: result.task,
+          failure: result.failure,
+          events: result.events.map((event) => ({ event: event.event, phase: event.phase, at: event.at })),
+          next: result.next,
+        });
+      }),
+  );
+
   /* --------------------------------------------------------- browser_media_info */
 
   mcp.registerTool(
@@ -829,6 +964,9 @@ export const BROWSER_TOOL_NAMES = [
   "browser_challenge_status",
   "browser_pause_for_human",
   "browser_resume",
+  "browser_captcha_handoff",
+  "browser_captcha_wait",
+  "browser_captcha_cancel",
   "browser_media_info",
   "browser_video_frames",
   "browser_session",
