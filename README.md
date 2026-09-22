@@ -47,7 +47,7 @@ Two independent browser layers live side by side:
 
 | Layer | Tools | Use |
 | --- | --- | --- |
-| **Persistent sessions** (new) | `browser_open`, `browser_screenshot`, `browser_read`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_scroll`, `browser_wait`, `browser_tabs`, `browser_challenge_status`, `browser_pause_for_human`, `browser_resume`, `browser_media_info`, `browser_video_frames`, `browser_session`, `browser_close`, `browser_capabilities` | Multi-step work: open once, then click, type, scroll, wait and re-inspect the *same* rendered page. |
+| **Persistent sessions** (new) | `browser_open`, `browser_screenshot`, `browser_read`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_scroll`, `browser_wait`, `browser_tabs`, `browser_challenge_status`, `browser_pause_for_human`, `browser_resume`, `browser_captcha_handoff`, `browser_captcha_wait`, `browser_captcha_cancel`, `browser_media_info`, `browser_video_frames`, `browser_session`, `browser_close`, `browser_capabilities` | Multi-step work: open once, then click, type, scroll, wait and re-inspect the *same* rendered page. |
 | **One-shot helpers** (original) | `browser_inspect`, `browser_fill`, `browser_press`, `browser_evaluate`, `browser_console`, `browser_run`, `browser_watch`, `browser_task` | Single request = one browser session. Unchanged behaviour; now shares the same provider/limits underneath. |
 
 Both layers talk to the same `BrowserProvider`, so a change in the environment
@@ -95,6 +95,9 @@ Roblox browser OAuth is separate and unchanged.
 | `browser_challenge_status` | Current challenge state (login wall, consent, CAPTCHA, access denied, rate limit) plus the last screenshot and current URL. |
 | `browser_pause_for_human` | Human-in-the-loop: keep the session alive and return a **Live View** URL (and optional handoff) so a person can solve a CAPTCHA or accept a cookie banner. |
 | `browser_resume` | Continue after the human finished (`auto` / `completed` / `abandoned`), re-checking the page state. |
+| `browser_captcha_handoff` | Start the structured CAPTCHA/bot-check handoff: pause automation, keep the **same** session/tab alive, open a Live View, store a resumable task snapshot and switch on the `RUNNING → CAPTCHA_DETECTED → HUMAN_HANDOFF → …` state machine. |
+| `browser_captcha_wait` | Watch the open handoff (bounded window per call, no reloads, no session rotation) until the challenge is completed (automatic resume), failed, timed out, cancelled or the session died. |
+| `browser_captcha_cancel` | Explicitly abandon an open handoff; the session and its tabs stay untouched. |
 | `browser_media_info` | Public media metadata: OpenGraph/Twitter/meta tags, JSON-LD, `<video>`/`<audio>`/`<source>` elements, images, plus a TikTok-specific extractor. Always lists what it could **not** see. |
 | `browser_video_frames` | Samples a bounded number of frames (default 4, max 8) from a *publicly accessible, non-DRM* video element and stores them in R2. |
 | `browser_session` | Inspect/refresh/extend/close the current session. |
@@ -446,6 +449,44 @@ handoff cleanly and the tool says so. Sessions are kept alive with
 `keep_alive` heartbeats (default 5 min, max 10 min per Cloudflare), and the state
 lives in a Durable Object so the next MCP request can re-attach to the same
 browser via `puppeteer.connect(env.BROWSER, sessionId)`.
+
+### CAPTCHA human handoff (structured workflow)
+
+For CAPTCHA / bot-verification pages specifically, `browser_captcha_handoff`
+runs the full suspend → handoff → auto-resume workflow on top of the primitives
+above. The same Durable Object session, Live View and handoff systems are used —
+there is no second browser implementation.
+
+```text
+browser_captcha_handoff → { phase: "HUMAN_HANDOFF", liveViewUrl, task, deadline,
+                            userNotice: "CAPTCHA detected. Demo is paused. Please complete
+                            the verification in the live browser." }
+        … the user completes the challenge in the live browser; the DO alarm and
+          browser_captcha_wait keep checking (no reloads, no identity changes) …
+browser_captcha_wait    → { outcome: "completed_and_resumed", phase: "RUNNING",
+                            task: { workflow, step, context } }   ← resume the task here
+```
+
+State machine (`src/browser/handoff.ts`):
+`RUNNING → CAPTCHA_DETECTED → HUMAN_HANDOFF → USER_INTERACTING → CAPTCHA_COMPLETED → RESUMING → RUNNING`,
+with terminal states `FAILED` (human attempt ended, challenge still present),
+`TIMEOUT` (deadline passed), `CANCELLED` (explicit `browser_captcha_cancel`) and
+`SESSION_LOST` (browser died mid-handoff). Every transition is recorded as a
+structured event (`captcha_detected`, `human_handoff_started`,
+`human_handoff_active`, `captcha_completed`, `automation_resumed`,
+`captcha_failed`, `captcha_timeout`, `human_handoff_cancelled`,
+`browser_session_lost`) — challenge contents and anything the user typed are
+never logged or stored.
+
+Guarantees:
+
+* The browser session, tab, cookies and page state are preserved; automation
+  resumes from the stored task step, not from scratch.
+* Completion is detected automatically (challenge verdict cleared or the page
+  navigated past it); `browser_resume` remains available as an explicit fallback.
+* Failure, timeout, cancel and session loss each return a clear status — no
+  silent retries, no reload loops, no fingerprint/session rotation to evade the
+  challenge.
 
 ### TikTok
 

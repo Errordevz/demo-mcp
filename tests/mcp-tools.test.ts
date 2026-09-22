@@ -164,7 +164,7 @@ describe("worker routes", () => {
     const oauth = readFileSync(path.resolve(__dirname, "../src/roblox/oauth.ts"), "utf8");
     const agents = [...oauth.matchAll(/DEMO-MCP\/([^\s(]+)/g)].map((match) => match[1]);
     expect(agents.length, "the User-Agent must carry a version").toBeGreaterThan(0);
-    // Normalize: "0.8.3-beta" in User-Agent matches "0.8.3 beta" in package.json
+    // Normalize: "0.8.4-beta" in User-Agent matches "0.8.4 beta" in package.json
     for (const declared of agents) expect(declared.replace(/-/g, " ")).toBe(pkg.version);
   });
 

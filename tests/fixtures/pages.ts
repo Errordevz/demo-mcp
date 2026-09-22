@@ -40,6 +40,41 @@ export const TIKTOK_VERIFICATION = `<!doctype html><html><head><title>Verify to 
 <h2>Security check</h2><div class="tiktok-captcha"></div><p>Please verify you are human to continue</p>
 </div></body></html>`;
 
+/**
+ * Controlled CAPTCHA simulation for the human-handoff end-to-end tests.
+ *
+ * The widget is deliberately realistic (`.g-recaptcha` + sitekey) so the
+ * challenge detector classifies the page as `captcha`. The
+ * `SOLVE_CAPTCHA_SIMULATION` script wires the page's "I am human" control so
+ * that pressing it removes the challenge in place — exactly what a human
+ * completing the challenge inside a Live View looks like to the detector. In
+ * the tests the *human* (the test harness) presses it; Demo never touches it.
+ */
+export const CAPTCHA_SIMULATION_PAGE = `<!doctype html><html><head><title>Security check · Example App</title></head>
+<body><div id="challenge-panel"><h1>Quick security check</h1>
+<div class="g-recaptcha" data-sitekey="6LeSIMULATION000000"></div>
+<p id="challenge-status">Press the button to continue</p>
+<button id="human-verify" type="button">I am human</button></div></body></html>`;
+
+/** Wire the simulated challenge so a click on the control clears it in place. */
+export const SOLVE_CAPTCHA_SIMULATION = (window: any): void => {
+  const doc = window.document;
+  const button = doc.getElementById("human-verify");
+  if (!button || button.dataset.wired === "true") return;
+  button.dataset.wired = "true";
+  button.addEventListener("click", () => {
+    doc.querySelector(".g-recaptcha")?.remove();
+    const status = doc.getElementById("challenge-status");
+    if (status) status.textContent = "Thanks — the check is complete.";
+    const panel = doc.getElementById("challenge-panel");
+    if (panel) panel.setAttribute("data-solved", "true");
+  });
+};
+
+/** The page a site serves after the challenge has been passed. */
+export const AFTER_CHALLENGE_PAGE = `<!doctype html><html><head><title>Dashboard · Example App</title></head>
+<body><h1>Welcome back</h1><p>Your report is ready to download.</p></body></html>`;
+
 function universalPayload(overrides: Record<string, unknown> = {}): unknown {
   const item = {
     id: "7300000000000000001",

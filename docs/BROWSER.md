@@ -105,6 +105,12 @@ Rules that matter:
   user what to do.
 * `browser_resume` re-checks the page: `challengeCleared: true` only when the
   signals are actually gone. If the human abandoned it, the tool says so.
+* `browser_captcha_handoff` / `browser_captcha_wait` / `browser_captcha_cancel`
+  wrap the same primitives in a suspend → handoff → auto-resume state machine
+  (`src/browser/handoff.ts`): the resumable task snapshot, the bounded monitor
+  window, the automatic completion detection (Durable Object alarm + polling)
+  and the terminal `FAILED` / `TIMEOUT` / `CANCELLED` / `SESSION_LOST`
+  outcomes. The monitor never reloads the page and never rotates the session.
 * If the browser binding does not support Live View/handoff, the tool says that
   explicitly rather than pretending.
 

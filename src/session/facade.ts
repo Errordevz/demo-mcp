@@ -71,6 +71,35 @@ export class SessionFacade {
     return this.runtime.resume(pageId, options ?? {});
   }
 
+  captchaHandoffStart(
+    pageId: string | null | undefined,
+    options?: {
+      instructions?: string;
+      timeoutMs?: number;
+      screenshot?: boolean;
+      mode?: "tab" | "devtools" | "full";
+      task?: { workflow?: string; step?: string; context?: Record<string, string> } | null;
+    },
+  ) {
+    return this.runtime.captchaHandoffStart(pageId, options ?? {});
+  }
+
+  captchaHandoffPoll(pageId: string | null | undefined, options?: { waitMs?: number; intervalMs?: number }) {
+    return this.runtime.captchaHandoffPoll(pageId, options ?? {});
+  }
+
+  captchaHandoffTick(pageId: string | null | undefined) {
+    return this.runtime.captchaHandoffTick(pageId);
+  }
+
+  captchaHandoffStatus() {
+    return this.runtime.captchaHandoffStatus();
+  }
+
+  captchaHandoffCancel(options?: { reason?: string }) {
+    return this.runtime.captchaHandoffCancel(options ?? {});
+  }
+
   listTabs(): Promise<{ tabs: TabSummary[]; activeTabId: string | null; sessionId: string }> {
     return this.runtime.listTabs();
   }
