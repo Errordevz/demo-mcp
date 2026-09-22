@@ -41,7 +41,7 @@ describe("command router", () => {
   it("routes /mcp to the mcp command", async () => {
     // Register the real mcp command
     registerCommand(createMcpCommand({
-      version: "0.8.3 beta",
+      version: "0.8.4 beta",
       toolNames: ["demo_ping", "browser_open", "inspect_video", "youtube_search"],
       commands: [],
     }));
@@ -49,7 +49,7 @@ describe("command router", () => {
     expect(result).not.toBeNull();
     const text = (result?.content[0] as { text: string }).text;
     const parsed = JSON.parse(text);
-    expect(parsed.version).toBe("0.8.3 beta");
+    expect(parsed.version).toBe("0.8.4 beta");
     expect(parsed.name).toBe("DEMO MCP");
     expect(parsed.status).toContain("Online");
     expect(parsed.tool_count).toBe(4);
@@ -59,19 +59,19 @@ describe("command router", () => {
 describe("/mcp command", () => {
   it("reports version from deps", async () => {
     const cmd = createMcpCommand({
-      version: "0.8.3 beta",
+      version: "0.8.4 beta",
       toolNames: ["demo_ping", "json_format", "hash_text"],
       commands: [],
     });
     const result = await cmd.execute("", {});
     const text = (result.content[0] as { text: string }).text;
     const parsed = JSON.parse(text);
-    expect(parsed.version).toBe("0.8.3 beta");
+    expect(parsed.version).toBe("0.8.4 beta");
   });
 
   it("groups tools logically", async () => {
     const cmd = createMcpCommand({
-      version: "0.8.3 beta",
+      version: "0.8.4 beta",
       toolNames: [
         "demo_ping", "json_format", "hash_text", "generate_uuid", "http_fetch",
         "browser_open", "browser_screenshot",
@@ -101,7 +101,7 @@ describe("/mcp command", () => {
 
   it("shows capabilities only for configured subsystems", async () => {
     const cmd = createMcpCommand({
-      version: "0.8.3 beta",
+      version: "0.8.4 beta",
       toolNames: [],
       commands: [],
     });
@@ -120,7 +120,7 @@ describe("/mcp command", () => {
 
   it("shows YouTube capability when key is configured", async () => {
     const cmd = createMcpCommand({
-      version: "0.8.3 beta",
+      version: "0.8.4 beta",
       toolNames: [],
       commands: [],
     });
@@ -132,7 +132,7 @@ describe("/mcp command", () => {
 
   it("includes subsystem health information", async () => {
     const cmd = createMcpCommand({
-      version: "0.8.3 beta",
+      version: "0.8.4 beta",
       toolNames: [],
       commands: [],
     });

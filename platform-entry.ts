@@ -5,6 +5,7 @@ import { handleRobloxOAuthRoute, isRobloxOAuthPath } from "./src/roblox/routes.j
 import { SessionManager } from "./src/session/manager.js";
 import { VideoArtifactStore, artifactBaseUrl, parseRangeHeader } from "./src/video/store.js";
 import { LIMITS } from "./src/core/limits.js";
+import { oversizedBody, securityHeaders } from "./src/core/headers.js";
 
 // Re-exported so Wrangler can bind the Durable Object classes
 // (`durable_objects.bindings[].class_name`). `RobloxAuth` holds the OAuth state
@@ -44,7 +45,7 @@ type Env = {
 };
 
 /** Kept equal to the Worker's own version in index.ts so both surfaces agree. */
-const VERSION = "0.8.3 beta";
+const VERSION = "0.8.4 beta";
 const DEFAULT_PLATFORM_ORIGIN = "https://demo-platform.pages.dev";
 const LOCAL_ORIGINS = new Set(["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:3000", "http://127.0.0.1:5173"]);
 const startedAt = Date.now();
@@ -70,6 +71,8 @@ function corsHeaders(origin: string | null, env: Env): HeadersInit {
     "Access-Control-Allow-Headers": "Content-Type, Authorization, Accept, Mcp-Session-Id, Last-Event-ID",
     "Access-Control-Max-Age": "86400",
     "Vary": "Origin",
+    // Static hardening on every platform response (no request data involved).
+    ...securityHeaders(),
   };
   if (allowed) headers["Access-Control-Allow-Origin"] = allowed;
   return headers;
@@ -332,6 +335,11 @@ export default {
       return withCors(await screenshotObject(request, env, id), request, env);
     }
 
+    // Oversized MCP bodies are rejected before the transport reads them.
+    if (url.pathname === "/mcp") {
+      const tooLarge = oversizedBody(request, LIMITS.maxMcpBodyBytes);
+      if (tooLarge) return withCors(tooLarge, request, env);
+    }
     const forwardedHeaders = new Headers(request.headers);
     if (origin) forwardedHeaders.delete("Origin");
     const forwarded = new Request(request, { headers: forwardedHeaders });

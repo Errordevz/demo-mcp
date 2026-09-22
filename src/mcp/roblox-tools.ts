@@ -27,6 +27,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/server";
 import { errorResult, textResult, type ToolResult } from "./results.js";
 import { redactValue, safeLog } from "../core/redact.js";
+import { bearerCredentialMatches } from "../core/credential.js";
 import { asRobloxAuthError } from "../roblox/errors.js";
 import { resolveRobloxConfig, normalizeAccountKey, DEFAULT_SCOPES } from "../roblox/config.js";
 import { createVault } from "../roblox/store.js";
@@ -67,10 +68,12 @@ export async function robloxContext(ctx: RobloxToolContext) {
 /**
  * The MCP transport is public. Authenticate each private tool call before
  * reading or changing a linked account, even if a deployment secret is present.
+ * The comparison is constant-time-ish (`bearerCredentialMatches`): the presented
+ * header is never compared byte-for-byte against the secret.
  */
-function guardMcpEndpoint(ctx: RobloxToolContext): ToolResult | null {
+async function guardMcpEndpoint(ctx: RobloxToolContext): Promise<ToolResult | null> {
   const key = String(ctx.env.DEMO_API_KEY ?? "").trim();
-  if (key && ctx.authorization === `Bearer ${ctx.env.DEMO_API_KEY}`) return null;
+  if (key && (await bearerCredentialMatches(ctx.authorization, key))) return null;
   if (key) return errorResult(JSON.stringify({
     error: "unauthorized",
     message: "Linked Roblox account tools require the configured private-tool bearer credential. Public MCP requests do not.",
@@ -157,7 +160,7 @@ export function registerRobloxAccountTools(mcp: McpServer, ctx: RobloxToolContex
       inputSchema: { account: accountArg("Optional account slot label.") },
     },
     async ({ account }) => {
-      const blocked = guardMcpEndpoint(ctx);
+      const blocked = await guardMcpEndpoint(ctx);
       if (blocked) return blocked;
       return run(async () => {
         const { config, vault } = await robloxContext(ctx);
@@ -216,7 +219,7 @@ export function registerRobloxAccountTools(mcp: McpServer, ctx: RobloxToolContex
       },
     },
     async ({ account, extended }) => {
-      const blocked = guardMcpEndpoint(ctx);
+      const blocked = await guardMcpEndpoint(ctx);
       if (blocked) return blocked;
       return run(async () => {
         const { config, client } = await robloxContext(ctx);
@@ -277,7 +280,7 @@ export function registerRobloxAccountTools(mcp: McpServer, ctx: RobloxToolContex
       },
     },
     async ({ account, maxPageSize, pageToken, filter, assertAssetIds }) => {
-      const blocked = guardMcpEndpoint(ctx);
+      const blocked = await guardMcpEndpoint(ctx);
       if (blocked) return blocked;
       return run(async () => {
         const { config, client } = await robloxContext(ctx);
@@ -324,7 +327,7 @@ export function registerRobloxAccountTools(mcp: McpServer, ctx: RobloxToolContex
       },
     },
     async ({ account, size, format, shape }) => {
-      const blocked = guardMcpEndpoint(ctx);
+      const blocked = await guardMcpEndpoint(ctx);
       if (blocked) return blocked;
       return run(async () => {
         const { config, client } = await robloxContext(ctx);
@@ -344,7 +347,7 @@ export function registerRobloxAccountTools(mcp: McpServer, ctx: RobloxToolContex
       inputSchema: { account: accountArg("Optional account slot label; only used to reflect granted scopes.") },
     },
     async ({ account }) => {
-      const blocked = guardMcpEndpoint(ctx);
+      const blocked = await guardMcpEndpoint(ctx);
       if (blocked) return blocked;
       return run(async () => {
         const { config } = await robloxContext(ctx);
@@ -365,7 +368,7 @@ export function registerRobloxAccountTools(mcp: McpServer, ctx: RobloxToolContex
       },
     },
     async ({ account, revoke }) => {
-      const blocked = guardMcpEndpoint(ctx);
+      const blocked = await guardMcpEndpoint(ctx);
       if (blocked) return blocked;
       return run(async () => {
         const { config, client } = await robloxContext(ctx);
@@ -387,7 +390,7 @@ async function buildCapabilities(ctx: RobloxToolContext, accountKey: string) {
     const { config, vault } = await robloxContext(ctx);
     // The public resource may describe policy, but must not inspect a linked
     // account. Authenticated private capability calls retain their account view.
-    const record = guardMcpEndpoint(ctx) ? null : await vault.getAccount(accountKey);
+    const record = (await guardMcpEndpoint(ctx)) ? null : await vault.getAccount(accountKey);
     const report = describeRobloxCapabilities({
       config,
       account: record ? { connected: !record.reauthorizationRequired, grantedScopes: record.scopes } : null,

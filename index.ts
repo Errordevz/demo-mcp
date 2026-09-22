@@ -6,6 +6,9 @@ import { registerBrowserTools } from "./src/mcp/browser-tools.js";
 import { errorFrom, errorResult, runTool, textResult, type ToolResult } from "./src/mcp/results.js";
 import { redactValue } from "./src/core/redact.js";
 import { assertNavigableUrl, createDohResolver } from "./src/core/url-guard.js";
+import { guardedFetchText, type UrlGuard } from "./src/core/guarded-fetch.js";
+import { bearerCredentialMatches } from "./src/core/credential.js";
+import { oversizedBody, securityHeaders } from "./src/core/headers.js";
 import { LIMITS } from "./src/core/limits.js";
 import { ScreenshotManager } from "./src/browser/screenshot.js";
 import { resolveScreenshotBase } from "./src/session/factory.js";
@@ -28,7 +31,7 @@ import { createJevCommand } from "./src/commands/jev-command.js";
 type Env = SessionManagerEnv & VideoEnv & RobloxAuthEnv & JevEnv & YouTubeEnv & { DEMO_API_KEY?: string; SSRF_GUARD_HTTP_FETCH?: string };
 /** Release version. Reported by `demo_ping`, `/health`, `/tools`, the MCP initialize
  * result and `/platform/stats` — one constant, so those can never disagree. */
-const VERSION = "0.8.3 beta";
+const VERSION = "0.8.4 beta";
 const SKILLS_API = "https://skills.sh/api/v1";
 
 /**
@@ -293,19 +296,32 @@ function server(env: Env, requestUrl: string | null = null, authorization: strin
 
   mcp.registerTool(
     "http_fetch",
-    { title: "HTTP Fetch", description: "Fetch an HTTP(S) URL and return bounded text. Private/internal targets are blocked unless SSRF_GUARD_HTTP_FETCH=false.", inputSchema: { url: z.string().url(), method: z.enum(["GET", "HEAD"]).default("GET") } },
+    { title: "HTTP Fetch", description: "Fetch an HTTP(S) URL and return bounded text. Private/internal targets — including redirect hops into them — are blocked unless SSRF_GUARD_HTTP_FETCH=false.", inputSchema: { url: z.string().url(), method: z.enum(["GET", "HEAD"]).default("GET") } },
     async ({ url, method }) => {
       try {
         const guardEnabled = String(env.SSRF_GUARD_HTTP_FETCH ?? "true").toLowerCase() !== "false";
-        const target = guardEnabled
-          ? await assertNavigableUrl(url, {
-              allowInsecureHttp: true,
-              dns: String(env.SSRF_DNS_CHECK ?? "true").toLowerCase() !== "false" ? createDohResolver() : null,
-              dnsFailOpen: String(env.SSRF_DNS_FAIL_OPEN ?? "true").toLowerCase() === "true",
-            })
-          : { url };
-        const r = await retry(() => fetch(target.url, { method, redirect: "follow" }), 2, 300);
-        return textResult({ status: r.status, contentType: r.headers.get("content-type"), body: method === "HEAD" ? "" : (await r.text()).slice(0, 1_000_000) });
+        const guard: UrlGuard = guardEnabled
+          ? async (candidate) =>
+              (
+                await assertNavigableUrl(candidate, {
+                  allowInsecureHttp: true,
+                  dns: String(env.SSRF_DNS_CHECK ?? "true").toLowerCase() !== "false" ? createDohResolver() : null,
+                  dnsFailOpen: String(env.SSRF_DNS_FAIL_OPEN ?? "true").toLowerCase() === "true",
+                })
+              ).url
+          : async (candidate) => candidate;
+        // Every redirect hop is re-validated and the body read is bounded, so a
+        // public URL cannot bounce this tool into an internal target or an
+        // oversized response.
+        const result = await guardedFetchText(url, { method, guard });
+        return textResult({
+          status: result.status,
+          contentType: result.contentType,
+          finalUrl: result.finalUrl,
+          redirected: result.redirects > 0,
+          truncatedBody: result.truncated,
+          body: result.body,
+        });
       } catch (e) {
         return errorFrom(e);
       }
@@ -755,15 +771,19 @@ export default {
     // Register commands for the /mcp and /jev command system
     registerCommand(createMcpCommand({ version: VERSION, toolNames: DEMO_TOOL_NAMES, commands: listCommands() }));
     registerCommand(createJevCommand());
-    if (url.pathname === "/") return Response.json({ ...status, capabilities });
-    if (url.pathname === "/health") return Response.json({ ok: true, ...status });
-    if (url.pathname === "/tools") return Response.json({ count: TOOL_COUNT, tools: DEMO_TOOL_NAMES, resources: [VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI, YOUTUBE_CAPABILITIES_URI] });
-    if (url.pathname === "/capabilities/jev") return Response.json(jevCapabilitiesReport(env as unknown as Record<string, unknown>));
-    if (url.pathname === "/capabilities/youtube") return Response.json(youTubeCapabilitiesReport(env as unknown as Record<string, unknown>));
+    const headers = securityHeaders();
+    if (url.pathname === "/") return Response.json({ ...status, capabilities }, { headers });
+    if (url.pathname === "/health") return Response.json({ ok: true, ...status }, { headers });
+    if (url.pathname === "/tools") return Response.json({ count: TOOL_COUNT, tools: DEMO_TOOL_NAMES, resources: [VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI, YOUTUBE_CAPABILITIES_URI] }, { headers });
+    if (url.pathname === "/capabilities/jev") return Response.json(jevCapabilitiesReport(env as unknown as Record<string, unknown>), { headers });
+    if (url.pathname === "/capabilities/youtube") return Response.json(youTubeCapabilitiesReport(env as unknown as Record<string, unknown>), { headers });
     if (url.pathname === "/capabilities/video") {
-      return Response.json(describeVideoCapabilities(env as Env & Record<string, unknown>, browserCapabilitiesFor(env, request.url)));
+      return Response.json(describeVideoCapabilities(env as Env & Record<string, unknown>, browserCapabilitiesFor(env, request.url)), { headers });
     }
-    if (url.pathname !== "/mcp") return new Response("Not Found", { status: 404 });
+    if (url.pathname !== "/mcp") return new Response("Not Found", { status: 404, headers });
+    // Guard against oversized request bodies before the transport reads them.
+    const tooLarge = oversizedBody(request, LIMITS.maxMcpBodyBytes);
+    if (tooLarge) return tooLarge;
     // MCP transport is public. Only private account/paid tools validate the
     // optional bearer; protocol validation remains owned by the MCP transport.
     return createMcpHandler((mcpContext) => server(env, mcpContext.requestInfo?.url ?? request.url ?? null, request.headers.get("Authorization")))(request, env, ctx);

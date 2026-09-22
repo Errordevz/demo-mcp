@@ -78,6 +78,27 @@ export class BrowserSession extends DurableObject<BrowserSessionEnv> {
 
   private async facade(sessionId?: string | null): Promise<SessionFacade> {
     const state = await this.load(sessionId);
+    // Retention sweep: when a session has been idle for days, the platform
+    // browser behind it is long gone (keep_alive caps at 10 minutes) but the
+    // stored state would keep its tab URLs, pause and handoff records forever.
+    // Minimise instead of hoard: drop everything except the bare identity and
+    // let the next browser tool re-acquire cleanly.
+    if (state.lastUsedAt < Date.now() - LIMITS.sessionStateRetentionMs) {
+      safeLog("log", "session-state-swept", {
+        sessionId: state.sessionId,
+        idleMs: Date.now() - state.lastUsedAt,
+        hadTabs: state.tabs.length > 0,
+        hadPause: Boolean(state.paused),
+        hadHandoff: Boolean(state.captchaHandoff),
+      });
+      state.providerSessionId = null;
+      state.tabs = [];
+      state.activeTabId = null;
+      state.paused = null;
+      state.captchaHandoff = null;
+      state.lastError = null;
+      await this.save();
+    }
     const deps = this.deps();
     const runtime = createRuntime(state, deps, {
       persist: async (next) => {

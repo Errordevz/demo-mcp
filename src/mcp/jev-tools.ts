@@ -18,6 +18,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/server";
 import { errorResult, textResult, type ToolResult } from "./results.js";
 import { redactValue, safeLog } from "../core/redact.js";
+import { bearerCredentialMatches } from "../core/credential.js";
 import { resolveJevConfig } from "../jev/config.js";
 import { decideResultReview, decideToolRoute, resolveVideoIntentWithJev, RESULT_REVIEW_LEVELS, VIDEO_FOCUS_CRITERIA, type DecisionOutcome, type JevDecisionContext } from "../jev/decisions.js";
 import { detectVideoIntent } from "../video/intent.js";
@@ -43,11 +44,12 @@ function jevContext(ctx: JevToolContext): JevDecisionContext {
 /**
  * Authenticate the paid tool call, not the public MCP transport. A configured
  * secret alone must not let anonymous callers spend the account owner's quota.
- * Read-only capability reporting is unaffected.
+ * Read-only capability reporting is unaffected. The comparison is
+ * constant-time-ish (`bearerCredentialMatches`).
  */
-function guardPaidEndpoint(ctx: JevToolContext): ToolResult | null {
+async function guardPaidEndpoint(ctx: JevToolContext): Promise<ToolResult | null> {
   const key = String(ctx.env.DEMO_API_KEY ?? "").trim();
-  if (key && ctx.authorization === `Bearer ${ctx.env.DEMO_API_KEY}`) return null;
+  if (key && (await bearerCredentialMatches(ctx.authorization, key))) return null;
   if (key) return errorResult(JSON.stringify({
     error: "unauthorized",
     message: "jev_decide requires the configured private-tool bearer credential. Public MCP requests do not.",
@@ -130,7 +132,7 @@ export function registerJevTools(mcp: McpServer, ctx: JevToolContext): void {
       },
     },
     async ({ decision, request, result, evidence }) => {
-      const blocked = guardPaidEndpoint(ctx);
+      const blocked = await guardPaidEndpoint(ctx);
       if (blocked) return blocked;
       return run(async () => {
         const jev = jevContext(ctx);

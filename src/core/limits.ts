@@ -29,6 +29,13 @@ export const LIMITS = {
   pauseMaxMs: 1_800_000,
   /** Session is considered dead after this much inactivity. */
   sessionIdleTtlMs: 600_000,
+  /** Stored browser-session state (tabs, pause records, handoff records with
+   * their visited URLs) older than this is wiped the next time its Durable
+   * Object wakes up, so idle sessions do not retain browsing metadata forever. */
+  sessionStateRetentionMs: 7 * 24 * 60 * 60 * 1000,
+  /** Hard cap for a single MCP JSON-RPC request body (Requests larger than
+   * this are rejected with 413 before any handler runs). */
+  maxMcpBodyBytes: 5_000_000,
 
   /** Tabs per session. */
   maxTabsPerSession: 10,
