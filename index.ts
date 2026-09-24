@@ -23,15 +23,40 @@ import { VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI, registerVideoResources, vide
 import { describeVideoCapabilities } from "./src/video/capabilities.js";
 import type { VideoEnv } from "./src/video/types.js";
 import { registerYouTubeTools, YOUTUBE_TOOL_NAMES, youTubeCapabilitiesReport, YOUTUBE_CAPABILITIES_URI } from "./src/mcp/youtube-tools.js";
+import { registerGitTools, GIT_TOOL_NAMES } from "./src/mcp/git-tools.js";
+import { gitFlags } from "./src/git/config.js";
+import { registerArchiveTools, ARCHIVE_TOOL_NAMES } from "./src/mcp/archive-tools.js";
+import { registerFeedTools, FEED_TOOL_NAMES } from "./src/mcp/feed-tools.js";
+import { registerDocumentTools, DOCUMENT_TOOL_NAMES } from "./src/mcp/document-tools.js";
+import { registerWebTools, WEB_TOOL_NAMES } from "./src/mcp/web-tools.js";
+import { registerUtilTools, UTIL_TOOL_NAMES } from "./src/mcp/util-tools.js";
+import { registerNetworkTools, NETWORK_TOOL_NAMES } from "./src/mcp/network-tools.js";
+import { registerResearchTools, RESEARCH_TOOL_NAMES } from "./src/mcp/research-tools.js";
+import { registerExpandedResources, expandedCapabilitiesReport, EXPANDED_CAPABILITIES_URI } from "./src/mcp/expansion-resources.js";
 import { youTubeFlags, type YouTubeEnv } from "./src/youtube/config.js";
 import { registerCommand, routeCommand, listCommands } from "./src/commands/router.js";
 import { createMcpCommand } from "./src/commands/mcp-command.js";
 import { createJevCommand } from "./src/commands/jev-command.js";
 
-type Env = SessionManagerEnv & VideoEnv & RobloxAuthEnv & JevEnv & YouTubeEnv & { DEMO_API_KEY?: string; SSRF_GUARD_HTTP_FETCH?: string };
+type Env = SessionManagerEnv & VideoEnv & RobloxAuthEnv & JevEnv & YouTubeEnv & {
+  DEMO_API_KEY?: string;
+  SSRF_GUARD_HTTP_FETCH?: string;
+  /** DEMO 0.9 expanded capability policy (non-secret). */
+  GIT_MAX_PACK_MB?: string;
+  GIT_REQUEST_TIMEOUT_MS?: string;
+  GIT_RATE_LIMIT_PER_MINUTE?: string;
+  GIT_MAX_DEPTH?: string;
+  GIT_MEMORY_MAX_MB?: string;
+  GIT_TEMP_REPO_TTL_MS?: string;
+  TOOL_RATE_LIMIT_PER_MINUTE?: string;
+  SNAPSHOT_RETENTION_SECONDS?: string;
+  WEB_MONITOR_SCHEDULED_CHECKS?: string;
+  PDF_MAX_MB?: string;
+  IMAGE_MAX_MB?: string;
+};
 /** Release version. Reported by `demo_ping`, `/health`, `/tools`, the MCP initialize
  * result and `/platform/stats` — one constant, so those can never disagree. */
-const VERSION = "0.8.4 beta";
+const VERSION = "0.9.0";
 const SKILLS_API = "https://skills.sh/api/v1";
 
 /**
@@ -56,6 +81,8 @@ USING THE RESULT — inspect_video returns the actual decoded video frames as MC
 HONESTY — Never claim to have seen or watched the video unless a tool actually returned image content blocks (visualEvidenceDelivered=true) or a real transcript, and you examined them. The frames are samples: do not claim to have watched continuous playback, never invent audio, dialogue, or events the frames do not show, and state uncertainty explicitly. If audioStatus is not "available", say the audio could not be verified. A successful video_fetch proves retrieval only, not understanding. A post caption is NOT a transcript and a thumbnail is NOT a frame. When access_status is anything other than "public", say why the video could not be retrieved (deleted, private, region-restricted, login wall, CAPTCHA, expired link, rate limit) instead of describing content. If inspection failed or only metadata/a thumbnail is available, say visual inspection was not completed and report the error instead of describing content.
 
 ROBLOX ACCOUNT — DEMO can read the *user's own* Roblox account through Roblox's official OAuth 2.0 authorization-code + PKCE flow. Call roblox_account_status first. When it reports connected=false, offer the user the connect link it returns (connectByOpening — the same GET /oauth/roblox/start route), labelled "Connect Roblox", in their own browser; that route 302-redirects to https://apis.roblox.com/oauth/v1/authorize and Roblox hosts the login and consent page entirely. Never build or link a Roblox login form, never ask for a password, a ROBLOSECURITY cookie or a token, and never accept a username or user id from the chat: the identity comes from Roblox's verified userinfo response (the sub claim), so a rename does not break the link. Tokens never leave the Worker, so you cannot and must not handle them. A feature whose scope was not granted reports scope_required with the exact scope to tick in the Roblox dashboard; an account action with no official OAuth/Open Cloud endpoint reports not_supported — say that plainly instead of scraping or guessing. Read demo://capabilities/roblox (or roblox_account_capabilities) before promising anything. Disconnecting is roblox_account_unlink (revokes at Roblox).
+
+DEMO 0.9 EXPANDED CAPABILITIES — Read demo://capabilities/expanded (or GET /capabilities/expanded) for the live report. git_repository inspects PUBLIC Git repositories (GitHub, GitLab, Codeberg, Gitea, any smart-HTTP host) with NO API key — private repositories are a hard auth_required refusal and DEMO never accepts or asks for Git credentials. archive_search/archive_item/wayback cover the Internet Archive and Wayback Machine (if no snapshot exists, the result says so — never invent an archived copy). feed_read parses RSS/Atom. pdf_document extracts PDF text with page references and OCRs scanned pages through Workers AI when configured. image_analyze describes/OCRs images on the same binding. web_extract returns clean text/Markdown/JSON; web_diff compares pages against stored snapshots (normalized for timestamps/counters); web_monitor tracks changes on demand only; screenshot_diff compares two screenshots pixel-wise in the browser. openapi_inspect READS API documents but never calls discovered APIs. net_diagnose and url_inspect give safe public-network and URL-safety reports. schema_validate, jwt_inspect, cron_explain and text_diff are fully local. web_research returns evidence-backed findings with source URLs and timestamps — cite them and never fabricate citations. jwt_inspect DECODES only: decoding is not verification and a decoded token is never proof of anything. All of these fetch untrusted public content through DEMO's SSRF guard with size/time/rate limits.
 
 For everything else (browsing, screenshots, sessions, utilities, skills) the individual tool descriptions define the behaviour.`;
 
@@ -268,6 +295,9 @@ function server(env: Env, requestUrl: string | null = null, authorization: strin
         ...robloxFlags(env),
         ...jevFlags(env as unknown as Record<string, unknown>),
         ...youTubeFlags(env as unknown as Record<string, unknown>),
+        ...gitFlags(env as unknown as Record<string, unknown>),
+        expanded: expandedCapabilitiesReport(env as unknown as Record<string, unknown>, { version: VERSION, browserAvailable: capabilities.browserAvailable }),
+        expandedResources: [EXPANDED_CAPABILITIES_URI],
         toolCount: DEMO_TOOL_NAMES.length,
         // Flattened for existing clients, plus the nested report for new ones.
         ...videoFlags,
@@ -544,6 +574,50 @@ function server(env: Env, requestUrl: string | null = null, authorization: strin
 
   registerYouTubeTools(mcp, { env: env as unknown as Record<string, unknown> & YouTubeEnv, requestUrl });
 
+  /* ------------------------- DEMO 0.9 capability expansion (public, read-only) */
+
+  registerExpandedResources(mcp, { env: env as unknown as Record<string, unknown>, version: VERSION, browserAvailable: capabilities.browserAvailable });
+
+  registerGitTools(mcp, { env: env as unknown as Record<string, unknown> });
+  registerArchiveTools(mcp, { env: env as unknown as Record<string, unknown> });
+  registerFeedTools(mcp, { env: env as unknown as Record<string, unknown> });
+  registerDocumentTools(mcp, { env: env as unknown as Record<string, unknown> });
+  registerWebTools(mcp, {
+    env: env as unknown as Record<string, unknown>,
+    requestUrl,
+    // One-shot browser access for screenshot comparison (same path as the
+    // legacy browser tools use; NULL when the browser binding is missing).
+    ...(capabilities.browserAvailable
+      ? {
+          withRawPage: async <T,>(fn: (page: unknown) => Promise<T>): Promise<T> =>
+            sessions.withRawPage(async (page: unknown) => {
+              try {
+                return await fn(page);
+              } finally {
+                await (page as { close?: () => Promise<void> })?.close?.().catch(() => undefined);
+              }
+            }),
+        }
+      : {}),
+  });
+  registerUtilTools(mcp, { env: env as unknown as Record<string, unknown> });
+  registerNetworkTools(mcp, {
+    env: env as unknown as Record<string, unknown>,
+    ...(capabilities.browserAvailable
+      ? {
+          withRawPage: async <T,>(fn: (page: unknown) => Promise<T>): Promise<T> =>
+            sessions.withRawPage(async (page: unknown) => {
+              try {
+                return await fn(page);
+              } finally {
+                await (page as { close?: () => Promise<void> })?.close?.().catch(() => undefined);
+              }
+            }),
+        }
+      : {}),
+  });
+  registerResearchTools(mcp, { env: env as unknown as Record<string, unknown> });
+
   /* ----------------------------------------------------------- skills tools */
 
   mcp.registerTool(
@@ -739,6 +813,15 @@ export const DEMO_TOOL_NAMES = [
   ...JEV_TOOL_NAMES,
   // Public YouTube Data API v3
   ...YOUTUBE_TOOL_NAMES,
+  // DEMO 0.9 capability expansion (public, read-only)
+  ...GIT_TOOL_NAMES,
+  ...ARCHIVE_TOOL_NAMES,
+  ...FEED_TOOL_NAMES,
+  ...DOCUMENT_TOOL_NAMES,
+  ...WEB_TOOL_NAMES,
+  ...UTIL_TOOL_NAMES,
+  ...NETWORK_TOOL_NAMES,
+  ...RESEARCH_TOOL_NAMES,
 ] as const;
 
 export const TOOL_COUNT = DEMO_TOOL_NAMES.length;
@@ -763,10 +846,12 @@ export default {
       ...robloxFlags(env),
       ...jevFlags(env as unknown as Record<string, unknown>),
       ...youTubeFlags(env as unknown as Record<string, unknown>),
+      ...gitFlags(env as unknown as Record<string, unknown>),
+      expandedCapabilities: true,
       skillsSh: true,
       composio: false,
       toolCount: TOOL_COUNT,
-      resources: [VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI, ROBLOX_CAPABILITIES_URI, JEV_CAPABILITIES_URI, YOUTUBE_CAPABILITIES_URI],
+      resources: [VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI, ROBLOX_CAPABILITIES_URI, JEV_CAPABILITIES_URI, YOUTUBE_CAPABILITIES_URI, EXPANDED_CAPABILITIES_URI],
     };
     // Register commands for the /mcp and /jev command system
     registerCommand(createMcpCommand({ version: VERSION, toolNames: DEMO_TOOL_NAMES, commands: listCommands() }));
@@ -774,7 +859,8 @@ export default {
     const headers = securityHeaders();
     if (url.pathname === "/") return Response.json({ ...status, capabilities }, { headers });
     if (url.pathname === "/health") return Response.json({ ok: true, ...status }, { headers });
-    if (url.pathname === "/tools") return Response.json({ count: TOOL_COUNT, tools: DEMO_TOOL_NAMES, resources: [VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI, YOUTUBE_CAPABILITIES_URI] }, { headers });
+    if (url.pathname === "/tools") return Response.json({ count: TOOL_COUNT, tools: DEMO_TOOL_NAMES, resources: [VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI, YOUTUBE_CAPABILITIES_URI, EXPANDED_CAPABILITIES_URI] }, { headers });
+    if (url.pathname === "/capabilities/expanded") return Response.json(expandedCapabilitiesReport(env as unknown as Record<string, unknown>, { version: VERSION, browserAvailable: capabilities.browserAvailable }), { headers });
     if (url.pathname === "/capabilities/jev") return Response.json(jevCapabilitiesReport(env as unknown as Record<string, unknown>), { headers });
     if (url.pathname === "/capabilities/youtube") return Response.json(youTubeCapabilitiesReport(env as unknown as Record<string, unknown>), { headers });
     if (url.pathname === "/capabilities/video") {

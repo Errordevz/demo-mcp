@@ -9,6 +9,7 @@
  * when the engine is absent, disabled, slow or wrong.
  */
 
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { askJev, listJevModels } from "../src/jev/client.js";
 import { resolveJevConfig, jevFlags, JEV_LIMITS, JEV_DEFAULT_MODEL } from "../src/jev/config.js";
@@ -643,7 +644,7 @@ describe("Jev MCP tools", () => {
 
     const health = await worker.fetch(new Request("https://demo.test/health"), {} as never, CTX);
     const flags = (await health.json()) as Record<string, unknown>;
-    expect(flags).toMatchObject({ version: "0.8.4 beta", jevDecisionEngine: false, jevApiKeyConfigured: false, jevModel: "jev-latest" });
+    expect(flags).toMatchObject({ version: JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version, jevDecisionEngine: false, jevApiKeyConfigured: false, jevModel: "jev-latest" });
     expect((flags.resources as string[])).toContain("demo://capabilities/jev");
   });
 });

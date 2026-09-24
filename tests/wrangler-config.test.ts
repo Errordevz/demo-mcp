@@ -73,6 +73,21 @@ const REQUIRED_VARS: Record<string, string> = {
   VIDEO_VISION_MODEL: "@cf/llava-hf/llava-1.5-7b-hf",
 };
 
+/** DEMO 0.9 expanded capability policy (git/public-fetch/snapshots). No secrets. */
+const EXPANSION_VARS: Record<string, string> = {
+  GIT_MAX_PACK_MB: "20",
+  GIT_REQUEST_TIMEOUT_MS: "25000",
+  GIT_RATE_LIMIT_PER_MINUTE: "6",
+  GIT_MAX_DEPTH: "200",
+  GIT_MEMORY_MAX_MB: "48",
+  GIT_TEMP_REPO_TTL_MS: "600000",
+  TOOL_RATE_LIMIT_PER_MINUTE: "12",
+  SNAPSHOT_RETENTION_SECONDS: "604800",
+  WEB_MONITOR_SCHEDULED_CHECKS: "false",
+  PDF_MAX_MB: "25",
+  IMAGE_MAX_MB: "8",
+};
+
 /** Jev decision-engine policy. The credential must never appear here. */
 const JEV_VARS: Record<string, string> = {
   TYPESAFE_ENABLED: "true",
@@ -88,7 +103,7 @@ describe("wrangler.jsonc", () => {
     const data = await config();
     expect(typeof data.vars).toBe("object");
 
-    for (const [name, value] of Object.entries({ ...REQUIRED_VARS, ...JEV_VARS })) {
+    for (const [name, value] of Object.entries({ ...REQUIRED_VARS, ...JEV_VARS, ...EXPANSION_VARS })) {
       const occurrences = [...source.matchAll(new RegExp(`"${name}"\\s*:`, "g"))].length;
       expect(occurrences, `${name} must be declared exactly once`).toBe(1);
       // Strings, not numbers/booleans: the code parses them with its own coercion, and
@@ -131,7 +146,7 @@ describe("wrangler.jsonc", () => {
   it("only declares variables the code actually reads, and reads the flags it declares", async () => {
     const data = await config();
     const readers = await Promise.all(
-      ["index.ts", "platform-entry.ts", "src/session/factory.ts", "src/video/processor.ts", "src/video/capabilities.ts", "src/jev/config.ts", "src/roblox/config.ts"].map((file) =>
+      ["index.ts", "platform-entry.ts", "src/session/factory.ts", "src/video/processor.ts", "src/video/capabilities.ts", "src/jev/config.ts", "src/roblox/config.ts", "src/git/config.ts", "src/core/rate-limit.ts", "src/web/storage.ts", "src/web/monitor.ts"].map((file) =>
         readFile(path.join(ROOT, file), "utf8"),
       ),
     );
