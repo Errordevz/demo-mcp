@@ -1,6 +1,6 @@
 {
   "name": "demo-cloudflare-mcp",
-  "version": "0.8.4 beta",
+  "version": "0.9.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -17,6 +17,7 @@
     "@cloudflare/puppeteer": "^1.1.0",
     "@modelcontextprotocol/server": "2.0.0",
     "agents": "0.20.0",
+    "isomorphic-git": "^1.42.2",
     "zod": "^4.0.0"
   },
   "devDependencies": {

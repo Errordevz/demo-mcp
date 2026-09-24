@@ -109,6 +109,80 @@ export const LIMITS = {
 
   /** Workflows (legacy `browser_run` / `browser_watch`). */
   maxWorkflowActions: 40,
+
+  /* ────────────────────────── extended public capabilities (0.9.0) ───────── */
+  /** Shared defaults for the read-only fetch-backed capabilities (feeds, PDFs,
+   * images, web diff, monitoring, OpenAPI, Internet Archive, research). A tool
+   * argument may only lower these, never raise them — same policy as video. */
+  publicFetchTimeoutDefaultMs: 15_000,
+  publicFetchTimeoutMaxMs: 30_000,
+  publicFetchMaxBytes: 4_000_000,
+  /** Generic webpage fetch (extraction, diff, monitor, research): bounded HTML. */
+  webpageMaxHtmlBytes: 2_000_000,
+  webpageExtractMaxChars: 200_000,
+  /** Feeds. */
+  feedMaxBytes: 3_000_000,
+  feedMaxEntriesDefault: 20,
+  feedMaxEntriesCap: 100,
+  /** Internet Archive. */
+  archiveCdxMaxRows: 500,
+  archiveCdxMaxRowsCap: 2_000,
+  archiveSnapshotMaxBytes: 6_000_000,
+  /** PDFs. */
+  pdfMaxBytesDefault: 25 * 1024 * 1024,
+  pdfMaxBytesCap: 25 * 1024 * 1024,
+  pdfMaxPagesCap: 500,
+  pdfMaxTextChars: 400_000,
+  pdfMaxSearchMatches: 100,
+  pdfMaxOcrPages: 5,
+  pdfScannedPageTextThreshold: 40,
+  /** Images (analysis + screenshot comparison). */
+  imageMaxBytes: 8 * 1024 * 1024,
+  imageCompareMaxImages: 4,
+  imageAnalysisMaxSideHint: 1_568,
+  /** Snapshots + website monitoring (R2-backed, TTL via existing cleanup sweep). */
+  snapshotRetentionDefaultSeconds: 7 * 24 * 60 * 60,
+  snapshotRetentionMaxSeconds: 30 * 24 * 60 * 60,
+  monitorMaxVersionsDefault: 10,
+  monitorMaxVersionsCap: 50,
+  monitorMaxPerDeploymentHint: 200,
+  monitorMinCheckIntervalSeconds: 300,
+  /** Diff engine. */
+  diffMaxLinesDefault: 4_000,
+  diffMaxLinesCap: 20_000,
+  diffMaxOutputBytes: 1_000_000,
+  /** OpenAPI documents. */
+  openapiMaxBytes: 6_000_000,
+  openapiMaxEndpointsCap: 400,
+  openapiMaxSchemaPreviewChars: 2_000,
+  /** JSON Schema validation. */
+  jsonSchemaMaxBytes: 2_000_000,
+  jsonSchemaMaxDepth: 64,
+  jsonSchemaMaxErrors: 50,
+  /** JWT inspection. */
+  jwtMaxChars: 32_000,
+  /** Cron. */
+  cronMaxOccurrences: 20,
+  cronSearchHorizonDays: 366 * 5,
+  /** Git. */
+  gitMaxPackBytes: 20 * 1024 * 1024,
+  gitTimeoutDefaultMs: 25_000,
+  gitTimeoutMaxMs: 60_000,
+  gitDefaultDepth: 10,
+  gitMaxDepth: 200,
+  gitMaxLogEntries: 200,
+  gitMaxFilesListed: 5_000,
+  gitMaxTreeEntries: 2_000,
+  gitMaxFileBytes: 1_000_000,
+  gitMaxSearchFiles: 1_500,
+  gitMaxBytesPerFileScanned: 512 * 1024,
+  gitMaxPatchBytes: 1_500_000,
+  /** Research orchestration (budgets are per MCP call; fetch caps inherit). */
+  researchMaxSourcesCap: 10,
+  researchMaxBytesPerSource: 1_200_000,
+  researchEvidencePerSource: 6,
+  researchTimeoutDefaultMs: 25_000,
+  researchTimeoutMaxMs: 30_000,
 } as const;
 
 export function clamp(value: number, min: number, max: number): number {

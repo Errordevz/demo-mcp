@@ -562,6 +562,24 @@ Verify from a browser: `GET /capabilities/jev` (or `/health`, which reports
 `TYPESAFE_ENABLED=false`: the code path returns DEMO's own rules with zero network calls.
 `jev_decide` is also reachable from a browser-free client only — see `docs/JEV.md` §6.
 
+## DEMO 0.9 capability expansion
+
+Nineteen new public, read-only tools join the existing surface (nothing was
+removed or renamed). All of them reuse DEMO's existing SSRF guard, rate limits,
+timeouts and artifact storage. Full details and the implementation report:
+[`docs/CAPABILITIES-EXPANSION.md`](docs/CAPABILITIES-EXPANSION.md).
+
+| Group | Tools | Notes |
+| --- | --- | --- |
+| Public Git | `git_repository` | Generic Git smart-HTTP (GitHub, GitLab, Codeberg, Gitea, any host) — **no API key**. Private repos are a hard `auth_required` refusal; hooks/LFS/build scripts never run. |
+| Internet Archive | `archive_search`, `archive_item`, `wayback` | Wayback availability/snapshots/retrieval + archive.org search/items. "No snapshot exists" is a first-class result. |
+| Feeds | `feed_read` | RSS 2.x / Atom / RDF with metadata, entries, GUIDs, dates, authors, categories, enclosures. |
+| Documents | `pdf_document`, `image_analyze` | PDF text/pages/search/tables/scanned-detection + OCR via the existing Workers AI binding; image describe/OCR/compare on the same binding. |
+| Web intelligence | `web_extract`, `web_diff`, `web_monitor`, `screenshot_diff` | Clean extraction (text/Markdown/JSON), content diff with noise normalization, R2-backed change monitors, browser-pixel screenshot comparison. |
+| Network | `openapi_inspect`, `net_diagnose`, `url_inspect` | OpenAPI/Swagger document inspection (never calls discovered APIs), safe DNS/HTTP/TLS diagnostics, URL safety report. |
+| Utilities | `schema_validate`, `jwt_inspect`, `cron_explain`, `text_diff` | Fully local: JSON Schema validation, JWT **decoding only** (DECODING ≠ VERIFICATION), cron explanation/schedule, text/JSON diff. |
+| Research | `web_research` | Evidence-backed research with preserved provenance; conflicts reported, never resolved by guessing. |
+
 ## Configuration
 
 See `.env.example` for a copyable template covering both the live test suite

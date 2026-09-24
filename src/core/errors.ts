@@ -10,6 +10,9 @@ export type BrowserErrorCode =
   | "invalid_input"
   | "validation_failed"
   | "blocked_url"
+  /** A remote refused access because it needs credentials — DEMO is public-only
+   * by design and never negotiates authentication for Git. */
+  | "auth_required"
   | "capability_unavailable"
   | "browser_unavailable"
   | "session_not_found"

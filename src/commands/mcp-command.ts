@@ -61,13 +61,20 @@ function groupTools(toolNames: readonly string[]): Record<string, string[]> {
     Roblox: [],
     JEV: [],
     Skills: [],
+    Git: [],
+    "Internet Archive": [],
+    Feeds: [],
+    Documents: [],
+    "Web Intelligence": [],
+    Research: [],
+    Network: [],
     Utilities: [],
   };
 
   for (const name of toolNames) {
     if (name === "demo_ping" || name.startsWith("http_") || name.startsWith("json_") || name.startsWith("hash_") || name.startsWith("generate_")) {
       groups.Core.push(name);
-    } else if (name.startsWith("browser_")) {
+    } else if (name.startsWith("browser_") || name === "screenshot_diff") {
       groups.Browser.push(name);
     } else if (name === "inspect_video" || name.startsWith("video_")) {
       groups.Video.push(name);
@@ -79,6 +86,22 @@ function groupTools(toolNames: readonly string[]): Record<string, string[]> {
       groups.JEV.push(name);
     } else if (name.startsWith("skills_") || name.startsWith("skill_")) {
       groups.Skills.push(name);
+    } else if (name === "git_repository") {
+      groups.Git.push(name);
+    } else if (name.startsWith("archive_") || name === "wayback") {
+      groups["Internet Archive"].push(name);
+    } else if (name === "feed_read") {
+      groups.Feeds.push(name);
+    } else if (name === "pdf_document" || name === "image_analyze") {
+      groups.Documents.push(name);
+    } else if (name === "web_extract" || name === "web_diff" || name === "web_monitor") {
+      groups["Web Intelligence"].push(name);
+    } else if (name === "web_research") {
+      groups.Research.push(name);
+    } else if (name === "openapi_inspect" || name === "net_diagnose" || name === "url_inspect") {
+      groups.Network.push(name);
+    } else if (name === "schema_validate" || name === "jwt_inspect" || name === "cron_explain" || name === "text_diff") {
+      groups.Utilities.push(name);
     } else {
       groups.Utilities.push(name);
     }
@@ -142,6 +165,23 @@ function subsystemHealth(env: Record<string, unknown>): Record<string, { status:
     detail: jevConfig.available ? `TypeSafe ${jevConfig.model} configured` : (jevConfig.disabledReason ?? "Not configured"),
   };
 
+  // DEMO 0.9 expanded capabilities (public read-only; presence only).
+  health["Public Git"] = { status: "online", detail: "Public repositories over Git smart-HTTP (no API key; private repos refused)" };
+  health["Internet Archive"] = { status: "online", detail: "Wayback + archive.org public APIs (no key)" };
+  health["Feeds"] = { status: "online", detail: "RSS 2.x / Atom / RDF parsing (no key)" };
+  const hasAiVision = Boolean(env.AI && typeof (env.AI as { run?: unknown }).run === "function");
+  health["PDF & Images"] = {
+    status: hasAiVision ? "online" : "limited",
+    detail: hasAiVision ? "Parsing + Workers AI vision (OCR/describe)" : "Parsing + metadata only (no Workers AI binding for OCR/vision)",
+  };
+  health["Web intelligence"] = {
+    status: env.SCREENSHOTS || env.WEB_SNAPSHOTS ? "online" : "limited",
+    detail: env.SCREENSHOTS || env.WEB_SNAPSHOTS ? "Extraction, diff, monitoring (R2 snapshots)" : "Extraction and diff (no R2 binding for snapshots/monitoring)",
+  };
+  health["Network & safety"] = { status: "online", detail: "DNS/HTTP/TLS diagnostics + URL safety over the shared SSRF guard" };
+  health["Local utilities"] = { status: "online", detail: "JSON Schema, JWT decoding, cron, text diff (fully local)" };
+  health["Web research"] = { status: "online", detail: "Evidence-backed research with preserved provenance" };
+
   return health;
 }
 
@@ -189,6 +229,12 @@ function buildCapabilitiesList(env: Record<string, unknown>): string[] {
   const robloxSecret = String(env.ROBLOX_CLIENT_SECRET ?? "").trim();
   if (robloxClientId && robloxSecret) caps.push("Roblox");
   if (resolveJevConfig(env).available) caps.push("JEV");
-  caps.push("HTTP fetching", "JSON utilities", "Hashing", "UUID generation");
+  caps.push(
+    "HTTP fetching", "JSON utilities", "Hashing", "UUID generation",
+    "Public Git (no API key)", "Internet Archive / Wayback", "RSS / Atom feeds",
+    "PDF intelligence", "Image analysis", "Web extraction", "Web diff", "Website monitoring",
+    "OpenAPI inspection", "Network diagnostics", "URL safety", "JSON Schema validation",
+    "JWT decoding", "Cron parsing", "Text/document diff", "Screenshot comparison", "Structured web research",
+  );
   return caps;
 }

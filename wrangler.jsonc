@@ -105,8 +105,32 @@
     "TYPESAFE_ACCEPT_THRESHOLD": "0.7",
 
     // Optional Workers AI model ids (only used when the AI binding exists).
+    // VIDEO_VISION_MODEL is also reused for PDF OCR + image describe/OCR.
     "VIDEO_TRANSCRIPTION_MODEL": "@cf/openai/whisper",
-    "VIDEO_VISION_MODEL": "@cf/llava-hf/llava-1.5-7b-hf"
+    "VIDEO_VISION_MODEL": "@cf/llava-hf/llava-1.5-7b-hf",
+
+    // ── DEMO 0.9 expanded capabilities (policy only; no secrets) ─────────────
+    // Public Git (smart-HTTP): size/time/rate caps. There is deliberately NO
+    // credential variable — private repositories are refused, never negotiated.
+    "GIT_MAX_PACK_MB": "20",
+    "GIT_REQUEST_TIMEOUT_MS": "25000",
+    "GIT_RATE_LIMIT_PER_MINUTE": "6",
+    "GIT_MAX_DEPTH": "200",
+    "GIT_MEMORY_MAX_MB": "48",
+    "GIT_TEMP_REPO_TTL_MS": "600000",
+    // Shared per-minute budget for the read-only fetch-backed capabilities
+    // (Internet Archive, feeds, PDFs, images, web diff/monitor, OpenAPI, research).
+    "TOOL_RATE_LIMIT_PER_MINUTE": "12",
+    // Web snapshots + monitors reuse the SCREENSHOTS R2 bucket as expiring
+    // objects (same TTL/cleanup convention as screenshots and video artifacts).
+    "SNAPSHOT_RETENTION_SECONDS": "604800",
+    // Website monitor checks run on demand (web_monitor mode: check). The
+    // hourly cron sweep stays OFF unless explicitly enabled here — a registered
+    // URL must never silently become an unbounded recurring job.
+    "WEB_MONITOR_SCHEDULED_CHECKS": "false",
+    // Per-call download ceilings (a tool argument may only lower these).
+    "PDF_MAX_MB": "25",
+    "IMAGE_MAX_MB": "8"
     // Optional external speech-to-text provider (alternative to Workers AI).
     // Set both as secrets: wrangler secret put TRANSCRIPTION_ENDPOINT
     //                           wrangler secret put TRANSCRIPTION_API_KEY

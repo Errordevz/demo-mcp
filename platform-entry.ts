@@ -19,6 +19,10 @@ type Env = {
   BROWSER?: unknown;
   SCREENSHOTS?: R2Bucket;
   VIDEO_ARTIFACTS?: R2Bucket;
+  /** Optional separate R2 bucket for web snapshots/monitors (falls back to SCREENSHOTS). */
+  WEB_SNAPSHOTS?: R2Bucket;
+  /** Workers AI binding (vision/OCR/transcription). Presence checked only. */
+  AI?: { run?: unknown };
   BROWSER_SESSIONS?: unknown;
   VIDEO_ARTIFACT_TTL_SECONDS?: string | number;
   /** Roblox OAuth: ids/secrets are Worker env + secrets only, never client-side. */
@@ -42,10 +46,22 @@ type Env = {
   TYPESAFE_DECISION_TIMEOUT_MS?: string | number;
   TYPESAFE_REVIEW_THRESHOLD?: string | number;
   TYPESAFE_ACCEPT_THRESHOLD?: string | number;
+  /** DEMO 0.9 expanded capability policy (non-secret). */
+  GIT_MAX_PACK_MB?: string;
+  GIT_REQUEST_TIMEOUT_MS?: string;
+  GIT_RATE_LIMIT_PER_MINUTE?: string;
+  GIT_MAX_DEPTH?: string;
+  GIT_MEMORY_MAX_MB?: string;
+  GIT_TEMP_REPO_TTL_MS?: string;
+  TOOL_RATE_LIMIT_PER_MINUTE?: string;
+  SNAPSHOT_RETENTION_SECONDS?: string;
+  WEB_MONITOR_SCHEDULED_CHECKS?: string;
+  PDF_MAX_MB?: string;
+  IMAGE_MAX_MB?: string;
 };
 
 /** Kept equal to the Worker's own version in index.ts so both surfaces agree. */
-const VERSION = "0.8.4 beta";
+const VERSION = "0.9.0";
 const DEFAULT_PLATFORM_ORIGIN = "https://demo-platform.pages.dev";
 const LOCAL_ORIGINS = new Set(["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:3000", "http://127.0.0.1:5173"]);
 const startedAt = Date.now();
@@ -179,6 +195,22 @@ function telemetry(env: Env) {
       jevDecisionEngine: jevSurface(env),
       typedDecisions: jevSurface(env).available,
       youtube: youtubeSurface(env),
+      expanded: {
+        git: true,
+        gitPublicOnly: true,
+        internetArchive: true,
+        feeds: true,
+        pdf: true,
+        images: true,
+        webExtract: true,
+        webDiff: true,
+        webMonitor: Boolean(env.SCREENSHOTS || env.WEB_SNAPSHOTS),
+        openapi: true,
+        networkDiagnostics: true,
+        localUtilities: true,
+        webResearch: true,
+        urlSafety: true,
+      },
     },
     connections: [
       { name: "DEMO MCP", type: "Execution Worker", connected: true },
@@ -190,6 +222,10 @@ function telemetry(env: Env) {
       { name: "Roblox session store", type: "Durable Object (RobloxAuth)", connected: robloxSurface(env).storage === "durable-object" },
       { name: "TypeSafe Jev", type: "Structured decision engine (HTTP API)", connected: jevSurface(env).available },
       { name: "YouTube Data API", type: "Public metadata (Data API v3)", connected: youtubeSurface(env).available },
+      { name: "Git (smart HTTP)", type: "Public repositories, no API key", connected: true },
+      { name: "Internet Archive", type: "Wayback + archive.org public APIs", connected: true },
+      { name: "Workers AI vision", type: "Image/PDF OCR + description", connected: Boolean(env.AI && typeof (env.AI as { run?: unknown }).run === "function") },
+      { name: "Web snapshots", type: "R2 (expiring objects)", connected: Boolean(env.SCREENSHOTS || env.WEB_SNAPSHOTS) },
     ],
     endpoints: {
       ui: "/",
@@ -201,6 +237,7 @@ function telemetry(env: Env) {
       robloxOAuth: "/oauth/roblox/{start,callback,logout,status}",
       jevCapabilities: "/capabilities/jev",
       youtubeCapabilities: "/capabilities/youtube",
+      expandedCapabilities: "/capabilities/expanded",
     },
     telemetry: { scope: "worker-isolate", containsSecrets: false, containsUserContent: false },
   };
@@ -291,10 +328,24 @@ async function cleanupExpiredObjects(bucket: R2Bucket | undefined, prefixes: str
 
 export default {
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    // Artifact TTL sweep (existing behaviour) + DEMO 0.9 snapshot/monitor objects,
+    // which follow the same expiresAt customMetadata convention as screenshots.
     const cleanup = cleanupExpiredObjects(env.VIDEO_ARTIFACTS ?? env.SCREENSHOTS, ["video-artifacts/"])
       .then((removed) => cleanupExpiredObjects(env.SCREENSHOTS, ["screenshots/"]).then((frames) => ({ removed, frames })))
-      .catch(() => ({ removed: 0, frames: 0 }));
+      .then((counts) => cleanupExpiredObjects(env.SCREENSHOTS, ["web-snap/", "web-mon/"]).then((snapshots) => ({ ...counts, snapshots })))
+      .catch(() => ({ removed: 0, frames: 0, snapshots: 0 }));
     ctx.waitUntil(cleanup.then(() => undefined));
+    // Website monitoring sweep is OPT-IN: a registered URL must never silently
+    // become an unbounded recurring job, so the existing hourly cron only runs
+    // due monitor checks when WEB_MONITOR_SCHEDULED_CHECKS=true.
+    if (String(env.WEB_MONITOR_SCHEDULED_CHECKS ?? "false").toLowerCase() === "true") {
+      ctx.waitUntil(
+        import("./src/web/monitor.js")
+          .then((module) => module.checkDueMonitors(env as unknown as Record<string, unknown>, { maxChecks: 5 }))
+          .then(() => undefined)
+          .catch(() => undefined),
+      );
+    }
   },
 
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
