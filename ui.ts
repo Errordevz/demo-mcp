@@ -22,6 +22,7 @@ import {
   MCP_ENDPOINT,
   PROJECT,
   SECTIONS,
+  CAPABILITY_CATEGORIES,
   MCP_COMMANDS,
   BROWSER_FLOW,
   VIDEO_STAGES,
@@ -50,6 +51,7 @@ function bootPayload(): string {
     data: {
       PROJECT,
       SECTIONS: [...SECTIONS],
+      CAPABILITY_CATEGORIES: [...CAPABILITY_CATEGORIES],
       MCP_COMMANDS,
       BROWSER_FLOW,
       VIDEO_STAGES,
@@ -71,15 +73,16 @@ function page(): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="color-scheme" content="dark">
-<meta name="theme-color" content="#0a0b0e">
-<meta name="description" content="DEMO inspector — open execution layer status, tools, browser, video, research, routing and skills. No account required.">
-<title>DEMO · Inspector</title>
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f7f7f8">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0a0b0e">
+<meta name="description" content="DEMO — execution infrastructure for AI agents. Browser, video, web, Roblox, skills and decision routing over MCP. No account required.">
+<title>DEMO — Execution infrastructure for AI agents</title>
 <style>${UI_CSS}</style>
 </head>
 <body>
-<div id="app"><noscript><main style="max-width:640px;margin:80px auto;padding:0 20px;font-family:ui-sans-serif,system-ui,sans-serif;color:#e7ebf1">
-<h1 style="font-size:20px">DEMO inspector</h1>
+<div id="app"><noscript><main style="max-width:640px;margin:80px auto;padding:0 20px;font-family:ui-sans-serif,system-ui,sans-serif;color:#e7ebf1;background:#0a0b0e">
+<h1 style="font-size:20px">DEMO — Execution infrastructure for AI agents</h1>
 <p style="color:#98a2b0;line-height:1.6">This page renders live deployment status with a small inline script. JavaScript is disabled, so the status view cannot load — the Worker itself needs nothing from you: the MCP endpoint at <code>/mcp</code> works without a login or account.</p>
 </main></noscript></div>
 <script>window.__DEMO_BOOT__=${bootPayload()};</script>

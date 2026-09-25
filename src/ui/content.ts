@@ -12,26 +12,99 @@ export const MCP_ENDPOINT = "demo-mcp.amidevz.workers.dev/mcp";
 
 export const PROJECT = {
   name: "DEMO",
-  tagline: "The open execution layer",
+  tagline: "Execution infrastructure for AI agents.",
   blurb:
-    "DEMO runs a real persistent browser, a public-video pipeline, research tooling, skills and typed decision routing on Cloudflare Workers, and exposes all of it through MCP. Open the URL and use it — there is no account to create.",
+    "One MCP server for browser automation, web access, video understanding, Roblox integrations, skills, Jev decision routing, and storage. Open the URL and use it — there is no account to create.",
   repoUrl: "https://github.com/Errordevz/demo-mcp",
   repoLabel: "github.com/Errordevz/demo-mcp",
   docsTreeUrl: "https://github.com/Errordevz/demo-mcp/tree/main/docs",
   readmeUrl: "https://github.com/Errordevz/demo-mcp#readme",
 };
 
-/** Navigation sections (all backed by real content in this build). */
+/**
+ * Navigation sections (all backed by real content in this build).
+ *
+ * `nav` controls placement: `primary` sections sit in the top header,
+ * `secondary` sections are reachable from capability cards, the footer and the
+ * command palette, and `hidden` sections stay routable (deep links keep
+ * working) without appearing in navigation.
+ */
 export const SECTIONS = [
-  { id: "overview", label: "Overview", icon: "gauge", blurb: "Deployment status at a glance" },
-  { id: "tools", label: "Tools", icon: "tools", blurb: "Every MCP tool with live availability" },
-  { id: "browser", label: "Browser", icon: "globe", blurb: "Persistent sessions, screenshots, handoff" },
-  { id: "video", label: "Video", icon: "play", blurb: "Resolve, extract, transcribe, analyze" },
-  { id: "research", label: "Research", icon: "search", blurb: "Web, feeds, archive, PDFs, sources" },
-  { id: "routing", label: "Routing", icon: "branch", blurb: "Jev / Laya decision providers" },
-  { id: "roblox", label: "Roblox", icon: "game", blurb: "Optional OAuth — not a DEMO login" },
-  { id: "skills", label: "Skills", icon: "puzzle", blurb: "Built-ins and the skills.sh surface" },
-  { id: "about", label: "About", icon: "info", blurb: "Open source, architecture, security" },
+  { id: "overview", label: "Overview", icon: "gauge", blurb: "Deployment status at a glance", nav: "primary" },
+  { id: "capabilities", label: "Capabilities", icon: "layers", blurb: "Capability categories and the tool explorer", nav: "primary" },
+  { id: "status", label: "Status", icon: "activity", blurb: "Live deployment and capability status", nav: "primary" },
+  { id: "tools", label: "Tools", icon: "tools", blurb: "Every MCP tool with live availability", nav: "hidden" },
+  { id: "browser", label: "Browser", icon: "globe", blurb: "Persistent sessions, screenshots, handoff", nav: "secondary" },
+  { id: "video", label: "Video", icon: "play", blurb: "Resolve, extract, transcribe, analyze", nav: "secondary" },
+  { id: "research", label: "Research", icon: "search", blurb: "Web, feeds, archive, PDFs, sources", nav: "secondary" },
+  { id: "routing", label: "Routing", icon: "branch", blurb: "Jev / Laya decision providers", nav: "secondary" },
+  { id: "roblox", label: "Roblox", icon: "game", blurb: "Optional OAuth — not a DEMO login", nav: "secondary" },
+  { id: "skills", label: "Skills", icon: "puzzle", blurb: "Built-ins and the skills.sh surface", nav: "secondary" },
+  { id: "about", label: "About", icon: "info", blurb: "Open source, architecture, security", nav: "secondary" },
+] as const;
+
+/**
+ * Capability categories for the overview page.
+ *
+ * Small, stable grouping over the raw tool groups: each card links to the
+ * section that documents the capability in depth, and its live status pill is
+ * computed at runtime from /health + /platform/stats (never hardcoded).
+ */
+export const CAPABILITY_CATEGORIES = [
+  {
+    id: "browser",
+    title: "Browser",
+    icon: "globe",
+    route: "browser",
+    description: "A real persistent browser on Cloudflare: sessions, screenshots, DOM snapshots, and human handoff.",
+    highlights: ["Persistent sessions", "Screenshots", "DOM snapshots", "Human handoff"],
+    groups: ["Browser"],
+  },
+  {
+    id: "video",
+    title: "Video",
+    icon: "play",
+    route: "video",
+    description: "Resolve public videos, decode real frames, transcribe speech, and analyze scenes — with explicit evidence.",
+    highlights: ["URL resolution", "Frame decoding", "Transcription", "Scene analysis"],
+    groups: ["Video", "YouTube"],
+  },
+  {
+    id: "web",
+    title: "Web & Research",
+    icon: "search",
+    route: "research",
+    description: "Fetch, extract, diff, and monitor public web content — plus feeds, archives, PDFs, and Git.",
+    highlights: ["Extraction", "Change monitoring", "Archive & feeds", "Evidence-backed research"],
+    groups: ["Core", "Web Intelligence", "Research", "Internet Archive", "Feeds", "Documents", "Git", "Network", "Utilities"],
+  },
+  {
+    id: "roblox",
+    title: "Roblox",
+    icon: "game",
+    route: "roblox",
+    description: "Public profiles and games out of the box; your own account via official OAuth — never a DEMO login.",
+    highlights: ["Public profiles", "Games", "OAuth account tools"],
+    groups: ["Roblox"],
+  },
+  {
+    id: "intelligence",
+    title: "Intelligence",
+    icon: "cpu",
+    route: "routing",
+    description: "Typed Jev and Laya decisions, result review, and skills — advisory only, never authoritative.",
+    highlights: ["Jev decisions", "Laya routing", "Skills"],
+    groups: ["JEV", "Laya", "Skills"],
+  },
+  {
+    id: "infrastructure",
+    title: "Infrastructure",
+    icon: "database",
+    route: "status",
+    description: "Cloudflare storage, expiring artifacts, durable sessions, and the public MCP endpoint.",
+    highlights: ["R2 artifacts", "Durable sessions", "Public MCP"],
+    groups: [],
+  },
 ] as const;
 
 /** Commands that genuinely exist in this build (src/commands/*). */
