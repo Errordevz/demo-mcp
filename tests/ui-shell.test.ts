@@ -165,7 +165,7 @@ describe("inspector UI — served document contract", () => {
     expect(html).toContain(MCP_ENDPOINT);
     expect(html).toContain("Connect MCP");
     expect(html).toContain("Connect DEMO");
-    expect(html).toContain("Put this in the AI plugins");
+    expect(html).toContain("Add DEMO to your AI client as a remote MCP server.");
     expect(html).toContain("No DEMO account required.");
     expect(html).toContain("Copied!");
     // No invented auth surface.
@@ -203,7 +203,8 @@ describe("inspector UI — rendered against stub routes", () => {
 
     // Shell + live overview data.
     expect(doc.querySelector(".nav a[aria-current=\"page\"]")?.textContent).toContain("Overview");
-    expect(doc.querySelector(".hero h1")?.textContent).toContain("No account required");
+    expect(doc.querySelector(".hero h1")?.textContent).toContain("Execution infrastructure for AI agents");
+    expect(doc.getElementById("view")?.textContent).toContain("No account required");
     expect(doc.getElementById("view")?.textContent).toContain("9.9.9-test");
     expect(doc.querySelector(".foot")?.textContent).toContain(`${TOOL_CATALOG.length} tools`);
 
@@ -234,6 +235,35 @@ describe("inspector UI — rendered against stub routes", () => {
     (doc.querySelector("#view .trow") as HTMLElement).click();
     await flush();
     expect(doc.querySelector(".tdetail")?.textContent).toContain("Open a URL in DEMO's Cloudflare browser session");
+
+    // Capabilities route renders the same explorer with live availability.
+    dom.window.location.hash = "#/capabilities";
+    await flush();
+    // Clear the persisted search to see the full explorer again.
+    const search2 = doc.getElementById("tool-search") as HTMLInputElement | null;
+    if (search2 && search2.value) {
+      search2.value = "";
+      search2.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+      await flush();
+    }
+    expect(doc.querySelectorAll("#view .trow").length).toBe(TOOL_CATALOG.length);
+    expect(doc.querySelector(".nav a[aria-current=\"page\"]")?.textContent).toContain("Capabilities");
+
+    // Status route shows live deployment state honestly.
+    dom.window.location.hash = "#/status";
+    await flush();
+    const statusText = doc.getElementById("view")?.textContent ?? "";
+    expect(statusText).toContain("System status");
+    expect(statusText).toContain("9.9.9-test");
+    expect(statusText).toContain("/mcp");
+
+    // Unknown routes get a polished 404, not a blank page.
+    dom.window.location.hash = "#/does-not-exist";
+    await flush();
+    const missing = doc.getElementById("view")?.textContent ?? "";
+    expect(missing).toContain("Page not found");
+    expect(missing).toContain("That route doesn't exist.");
+    expect(missing).toContain("Back to DEMO");
 
     // Roblox state degrades safely and never shows a login form.
     dom.window.location.hash = "#/roblox";

@@ -61,11 +61,17 @@ crash.
 ## Inspector UI (`/`)
 
 The Worker serves a self-contained inspector at `/` (`ui.ts` + `src/ui/*`): a
-dark-first, zero-dependency status console for the deployment — Overview
-(live capability state), a searchable tool explorer, Browser/Video/Research/
-Routing/Roblox/Skills/About sections, a command palette and a **Connect MCP**
-dialog that reveals and copies the public endpoint
+minimal, zero-dependency developer console for the deployment — a compact
+Overview hero with live status, six capability categories, a searchable tool
+explorer (`#/capabilities`, with the legacy `#/tools` route kept working), a
+dedicated System Status page (`#/status`), in-depth Browser/Video/Research/
+Routing/Roblox/Skills/About sections, a command palette (`Ctrl/⌘+K`), a
+mobile menu, a polished 404 for unknown routes, and a **Connect MCP** dialog
+that reveals and copies the public endpoint
 `demo-mcp.amidevz.workers.dev/mcp`.
+
+The UI is dark-first with a light theme following the OS preference, built on
+design tokens in `src/ui/styles.ts` (no UI framework, no external requests).
 
 Design invariants (enforced by `tests/ui-shell.test.ts`):
 

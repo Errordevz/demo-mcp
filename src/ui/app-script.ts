@@ -29,6 +29,7 @@ var DATA = BOOT.data || {};
 var ENDPOINT = BOOT.endpoint || "";
 var VERSION = BOOT.version || "";
 var HINTS = DATA.AVAILABILITY_HINTS || {};
+var CATS = DATA.CAPABILITY_CATEGORIES || [];
 
 var S = {
   route: "",
@@ -47,6 +48,19 @@ var LAZY_ROUTES = {
   video: "/capabilities/video",
   expanded: "/capabilities/expanded"
 };
+
+/* Explorer filters: a small stable grouping over the raw tool groups.
+ * "storage" selects R2-backed tools by availability instead of group. */
+var EXPLORER_FILTERS = [
+  { id: "", label: "All" },
+  { id: "browser", label: "Browser", groups: ["Browser"] },
+  { id: "video", label: "Video", groups: ["Video", "YouTube"] },
+  { id: "web", label: "Web", groups: ["Core", "Web Intelligence", "Research", "Internet Archive", "Feeds", "Documents", "Git", "Network", "Utilities"] },
+  { id: "roblox", label: "Roblox", groups: ["Roblox"] },
+  { id: "skills", label: "Skills", groups: ["Skills"] },
+  { id: "intel", label: "Intelligence", groups: ["JEV", "Laya"] },
+  { id: "storage", label: "Storage", availability: ["artifacts", "snapshots"] }
+];
 
 /* ------------------------------------------------------------- utilities */
 
@@ -94,12 +108,14 @@ function fmtTs(iso) {
 
 var ICONS = {
   gauge: ["M12 21a9 9 0 1 1 0-18 9 9 0 0 1 0 18z", "M12 12l4.5-3.5"],
+  activity: ["M3 12h4l3 8 4-16 3 8h4"],
   tools: ["M4 4h6v6H4z", "M14 4h6v6h-6z", "M4 14h6v6H4z", "M14 14h6v6h-6z"],
   globe: ["M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z", "M3 12h18", "M12 3c2.7 2.6 4 5.6 4 9s-1.3 6.4-4 9c-2.7-2.6-4-5.6-4-9s1.3-6.4 4-9z"],
   play: ["M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z", "M10.5 9.2l4.3 2.8-4.3 2.8z"],
   search: ["M11 19a8 8 0 1 1 0-16 8 8 0 0 1 0 16z", "M21 21l-4.35-4.35"],
   branch: ["M6 4v16", "M18 3a3 3 0 1 1 0 6 3 3 0 0 1 0-6z", "M18 9c0 4-4 5.5-12 5.5"],
   game: ["M6.5 7h11a4.5 4.5 0 0 1 0 9h-1.3a3 3 0 0 1-2.3-1.1l-.5-.6a2.2 2.2 0 0 0-3.4 0l-.5.6A3 3 0 0 1 7.8 16H6.5a4.5 4.5 0 0 1 0-9z", "M7.5 12h2", "M15.5 11.5h.01", "M17 13h.01"],
+  puzzle: ["M9 3h6v4.5h4.5v6H15V18H9v-4.5H4.5v-6H9z", "M12 10.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3z"],
   zap: ["M13 2L4.5 13.5H11L10 22l8.5-11.5H12z"],
   info: ["M12 21a9 9 0 1 1 0-18 9 9 0 0 1 0 18z", "M12 11v5", "M12 8h.01"],
   plug: ["M9 7V3", "M15 7V3", "M7 7h10v3a5 5 0 0 1-10 0z", "M12 15v6"],
@@ -112,6 +128,7 @@ var ICONS = {
   slash: ["M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z", "M5.6 5.6l12.8 12.8"],
   clock: ["M12 21a9 9 0 1 1 0-18 9 9 0 0 1 0 18z", "M12 7.5V12l3 2"],
   chev: ["M9 6l6 6-6 6"],
+  arrow: ["M4 12h15", "M13 6l6 6-6 6"],
   refresh: ["M21 12a9 9 0 1 1-2.64-6.36", "M21 3v6h-6"],
   external: ["M14 4h6v6", "M20 4l-9.5 9.5", "M18 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h5"],
   book: ["M4 19.5A2.5 2.5 0 0 1 6.5 17H20V2H6.5A2.5 2.5 0 0 0 4 4.5v15z", "M4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5"],
@@ -176,13 +193,117 @@ function toolAvail(key) {
   }
 }
 
+function robloxState() {
+  if (S.robloxLoading && !S.roblox && !S.robloxErr) return { s: "idle", l: "Checking", short: "Checking" };
+  if (S.robloxErr) {
+    var p = S.robloxErr.payload || {};
+    if (p.error === "not_configured" || S.robloxErr.status === 503) return { s: "off", l: "Not configured", short: "Not configured" };
+    return { s: "err", l: "Status unavailable", short: "Error" };
+  }
+  var r = S.roblox || {};
+  var conf = r.configuration || {};
+  if (conf.enabled === false) {
+    var missing = !conf.clientIdConfigured || !conf.clientSecretConfigured;
+    return missing ? { s: "off", l: "Not configured", short: "Not configured" } : { s: "off", l: "Disabled", short: "Disabled" };
+  }
+  if (r.connected && r.account) {
+    var granted = r.account.grantedScopes || [];
+    var requested = (r.configuration && r.configuration.requestedScopes) || [];
+    for (var g2 = 0; g2 < requested.length; g2++) {
+      if (granted.indexOf(requested[g2]) === -1) return { s: "warn", l: "Insufficient scope", short: "Scope gap", missing: requested[g2] };
+    }
+    return { s: "ok", l: "Connected", short: "Connected" };
+  }
+  if (r.account && r.account.reauthorizationRequired) return { s: "warn", l: "Authorization required", short: "Re-auth required" };
+  return { s: "idle", l: "Not connected", short: "Not connected" };
+}
+
+/* Honest per-category status, derived only from live telemetry. */
+function catStatus(id) {
+  var c = caps(), sc = statCaps();
+  if (id === "browser") {
+    if (!S.health) return S.healthErr ? { s: "err", l: "Unreachable" } : { s: "idle", l: "Checking" };
+    return c.browserAvailable ? { s: "ok", l: "Operational" } : { s: "off", l: "Unavailable" };
+  }
+  if (id === "video") {
+    if (!S.health) return S.healthErr ? { s: "err", l: "Unreachable" } : { s: "idle", l: "Checking" };
+    if (hv("videoFrames") && hv("videoBytesRetrieval")) return { s: "ok", l: "Operational" };
+    if (hv("videoResolution") || hv("videoBytesRetrieval") || hv("publicVideo")) return { s: "warn", l: "Limited" };
+    return { s: "off", l: "Unavailable" };
+  }
+  if (id === "web") {
+    if (!S.stats) return S.statsErr ? { s: "err", l: "Unreachable" } : { s: "idle", l: "Checking" };
+    return { s: "ok", l: "Operational" };
+  }
+  if (id === "roblox") {
+    var r = robloxState();
+    if (r.s === "ok") return { s: "ok", l: "Connected" };
+    if (r.l === "Not connected") return { s: "info", l: "Ready to connect" };
+    if (r.s === "idle") return { s: "idle", l: "Checking" };
+    if (r.s === "err") return { s: "err", l: "Unreachable" };
+    return { s: r.s, l: r.l };
+  }
+  if (id === "intelligence") {
+    if (!S.stats) return S.statsErr ? { s: "err", l: "Unreachable" } : { s: "idle", l: "Checking" };
+    var jev = sc.jevDecisionEngine || {}, laya = sc.layaDecisionProvider || {};
+    if (jev.available || laya.available) return { s: "ok", l: "Operational" };
+    return { s: "warn", l: "Limited" };
+  }
+  if (id === "infrastructure") {
+    if (!S.stats) {
+      if (S.statsErr && S.healthErr) return { s: "err", l: "Unreachable" };
+      if (S.health) return { s: "warn", l: "Partial" };
+      return { s: "idle", l: "Checking" };
+    }
+    return S.stats.status === "online" ? { s: "ok", l: "Operational" } : { s: "warn", l: "Degraded" };
+  }
+  return { s: "idle", l: "Checking" };
+}
+
+function videoPipe() {
+  if (!S.health) return S.healthErr ? { s: "err", l: "Unreachable" } : { s: "idle", l: "Checking" };
+  if (hv("videoFrames") && hv("videoBytesRetrieval")) return { s: "ok", l: "Operational" };
+  if (hv("videoResolution") || hv("videoBytesRetrieval") || hv("publicVideo")) return { s: "warn", l: "Limited" };
+  return { s: "off", l: "Unavailable" };
+}
+
+function storageState() {
+  if (!S.health && !S.stats) {
+    if (S.healthErr && S.statsErr) return { s: "err", l: "Unreachable" };
+    return { s: "idle", l: "Checking" };
+  }
+  var c = caps(), sc = statCaps();
+  var r2 = c.screenshots || hv("videoArtifacts") || (sc.expanded && sc.expanded.webMonitor);
+  return r2 ? { s: "ok", l: "Available" } : { s: "off", l: "Not configured" };
+}
+
+function decisionsState() {
+  var sc = statCaps();
+  if (!S.stats) return S.statsErr ? { s: "err", l: "Unreachable" } : { s: "idle", l: "Checking" };
+  var jev = sc.jevDecisionEngine || {}, laya = sc.layaDecisionProvider || {};
+  if (jev.available || laya.available) return { s: "ok", l: "Operational" };
+  return { s: "warn", l: "Built-in rules" };
+}
+
 /* ------------------------------------------------------------ navigation */
 
+function sectionMeta(id) {
+  var secs = DATA.SECTIONS || [];
+  for (var i = 0; i < secs.length; i++) if (secs[i].id === id) return secs[i];
+  return { id: "notfound", label: "Not found", icon: "search", blurb: "" };
+}
+function primarySections() {
+  return (DATA.SECTIONS || []).filter(function (s) { return s.nav === "primary"; });
+}
+function secondarySections() {
+  return (DATA.SECTIONS || []).filter(function (s) { return s.nav === "secondary"; });
+}
 function routeFromHash() {
   var h = (location.hash || "").replace(/^#\/?/, "").split("?")[0];
+  if (!h) return "overview";
   var secs = DATA.SECTIONS || [];
   for (var i = 0; i < secs.length; i++) if (secs[i].id === h) return h;
-  return "overview";
+  return "notfound";
 }
 function go(route) {
   if (location.hash === "#/" + route) { renderView(); enterRoute(); return; }
@@ -191,124 +312,116 @@ function go(route) {
 
 /* ------------------------------------------------------------- rendering */
 
-function sectionMeta(id) {
-  var secs = DATA.SECTIONS || [];
-  for (var i = 0; i < secs.length; i++) if (secs[i].id === id) return secs[i];
-  return secs[0] || { id: "overview", label: "Overview", icon: "gauge", blurb: "" };
+function externalLinks() {
+  var proj = DATA.PROJECT || {};
+  var out = "";
+  if (proj.docsTreeUrl) out += '<a href="' + esc(proj.docsTreeUrl) + '" target="_blank" rel="noreferrer noopener">' + ic("book") + "<span>Docs</span></a>";
+  if (proj.repoUrl) out += '<a href="' + esc(proj.repoUrl) + '" target="_blank" rel="noreferrer noopener" aria-label="Source repository on GitHub">' + ic("code") + "<span>Source</span></a>";
+  return out;
 }
 
 function renderShell() {
   var app = qs("#app");
   if (!app) return;
-  var secs = DATA.SECTIONS || [];
+  var prim = primarySections(), sec = secondarySections();
   var nav = "";
-  for (var i = 0; i < secs.length; i++) {
-    var s = secs[i];
-    var flag = navFlag(s.id);
-    nav += '<a href="#/' + s.id + '" data-route="' + s.id + '"' + (S.route === s.id ? ' aria-current="page"' : "") + ' title="' + esc(s.label) + '">' +
-      ic(s.icon) + '<span class="lbl">' + esc(s.label) + "</span>" + (flag || "") + "</a>";
+  for (var i = 0; i < prim.length; i++) {
+    nav += '<a href="#/' + prim[i].id + '" data-route="' + prim[i].id + '"' + (S.route === prim[i].id ? ' aria-current="page"' : "") + ">" +
+      ic(prim[i].icon) + "<span>" + esc(prim[i].label) + "</span></a>";
+  }
+  nav += externalLinks();
+  var menuSec = "";
+  for (var k = 0; k < sec.length; k++) {
+    menuSec += '<a class="mi" href="#/' + sec[k].id + '" data-route="' + sec[k].id + '"' + (S.route === sec[k].id ? ' aria-current="page"' : "") + ">" +
+      ic(sec[k].icon) + "<span>" + esc(sec[k].label) + "</span></a>";
+  }
+  var menuPrim = "";
+  for (var m = 0; m < prim.length; m++) {
+    menuPrim += '<a class="mi" href="#/' + prim[m].id + '" data-route="' + prim[m].id + '"' + (S.route === prim[m].id ? ' aria-current="page"' : "") + ">" +
+      ic(prim[m].icon) + "<span>" + esc(prim[m].label) + "</span></a>";
   }
   var proj = DATA.PROJECT || {};
   app.innerHTML =
     '<a class="skip" href="#main">Skip to content</a>' +
     '<div class="layout">' +
-      '<aside class="sidebar" id="sidebar" aria-label="Main navigation">' +
-        '<div class="brand">' +
-          '<div class="brand-mark" aria-hidden="true">D</div>' +
-          '<div class="brand-text"><div class="brand-name">' + esc(proj.name || "DEMO") + "</div>" +
-          '<div class="brand-sub">' + esc(proj.tagline || "execution layer") + "</div></div>" +
-        "</div>" +
-        '<nav class="nav" aria-label="Sections"><div class="nav-sec">Platform</div>' + nav + "</nav>" +
-        '<div class="side-foot">' +
-          '<div class="side-note"><b>No account required.</b> Connect an MCP client and start using DEMO.</div>' +
-          '<div class="row" style="gap:6px">' +
-            (proj.repoUrl ? '<a class="btn btn--sm btn--icon" href="' + esc(proj.repoUrl) + '" rel="noreferrer noopener" target="_blank" aria-label="Source repository on GitHub" title="Source repository">' + ic("code") + "</a>" : "") +
-            (proj.docsTreeUrl ? '<a class="btn btn--sm btn--icon" href="' + esc(proj.docsTreeUrl) + '" rel="noreferrer noopener" target="_blank" aria-label="Documentation" title="Documentation">' + ic("book") + "</a>" : "") +
-            '<button class="collapse-btn" type="button" data-act="collapse" aria-label="Collapse sidebar" title="Collapse sidebar">' + ic("chev", 13) + "</button>" +
-          "</div>" +
-        "</div>" +
-      "</aside>" +
-      '<div class="scrim" data-act="drawer-close" aria-hidden="true"></div>' +
-      '<div class="main-col">' +
-        '<header class="topbar">' +
-          '<button class="menu-btn" type="button" data-act="drawer-open" aria-label="Open navigation">' + ic("menu") + "</button>" +
-          '<h2 id="tb-title"></h2><span class="tb-sub" id="tb-sub"></span>' +
+      '<header class="header">' +
+        '<div class="header-in">' +
+          '<a class="brand" href="#/overview" aria-label="DEMO home">' +
+            '<span class="brand-mark" aria-hidden="true">D</span>' +
+            '<span><span class="brand-name">' + esc(proj.name || "DEMO") + "</span> " +
+            '<span class="brand-ver" id="brand-ver">' + esc(VERSION ? "v" + VERSION : "") + "</span></span>" +
+          "</a>" +
+          '<nav class="nav" aria-label="Primary">' + nav + "</nav>" +
           '<span class="grow"></span>' +
-          '<div class="topbar-actions">' +
-            '<button class="btn" type="button" data-act="palette-open" aria-label="Open command palette">' + ic("search") + '<span class="lbl">Search</span><kbd>⌘K</kbd></button>' +
-            '<button class="btn btn--primary" type="button" data-act="connect-open">' + ic("plug") + '<span class="lbl">Connect MCP</span></button>' +
+          '<div class="header-actions">' +
+            '<button class="btn btn--smhide" type="button" data-act="palette-open" aria-label="Search (Ctrl+K)">' + ic("search") + '<span class="lbl">Search</span></button>' +
+            '<button class="btn btn--primary" type="button" data-act="connect-open">' + ic("plug") + "<span>Connect MCP</span></button>" +
+            '<button class="menu-btn" type="button" data-act="menu-toggle" aria-label="Open menu" aria-expanded="false" aria-controls="menu">' + ic("menu") + "</button>" +
           "</div>" +
-        "</header>" +
-        '<main id="main" class="content" tabindex="-1"><div id="view"></div></main>' +
-        '<footer class="foot" id="foot"></footer>' +
-      "</div>" +
+        "</div>" +
+        '<nav class="menu" id="menu" aria-label="Menu">' +
+          '<div class="menu-in">' + menuPrim +
+            '<div class="mi-sec">Explore</div>' + menuSec +
+            '<div class="mi-sec">Resources</div>' +
+            (proj.docsTreeUrl ? '<a class="mi" href="' + esc(proj.docsTreeUrl) + '" target="_blank" rel="noreferrer noopener">' + ic("book") + "<span>Docs</span></a>" : "") +
+            (proj.repoUrl ? '<a class="mi" href="' + esc(proj.repoUrl) + '" target="_blank" rel="noreferrer noopener">' + ic("code") + "<span>Source on GitHub</span></a>" : "") +
+            '<div class="mi-cta"><button class="btn btn--primary" type="button" data-act="connect-open">' + ic("plug") + "<span>Connect MCP</span></button></div>" +
+          "</div>" +
+        "</nav>" +
+      "</header>" +
+      '<main id="main" class="content" tabindex="-1"><div id="view"></div></main>' +
+      '<footer class="foot"><div class="foot-in" id="foot"></div></footer>' +
     "</div>" +
     '<div class="overlay" id="connect-overlay" hidden><div class="modal" role="dialog" aria-modal="true" aria-labelledby="connect-title">' + connectModalBody() + "</div></div>" +
     '<div class="overlay" id="palette-overlay" hidden><div class="palette" role="dialog" aria-modal="true" aria-label="Command palette">' + paletteBody() + "</div></div>" +
     '<div class="toasts" id="toasts" role="status" aria-live="polite"></div>';
 }
 
-function navFlag(id) {
-  if (!S.health && !S.stats) return "";
-  if (id === "tools") {
-    var n = S.stats ? S.stats.toolCount : CAT.length;
-    if (n) return '<span class="nav-flag mono faint">' + n + "</span>";
-    return "";
-  }
-  var cls = "", label = "";
-  if (id === "roblox") {
-    var r = robloxState();
-    if (r.s === "warn" || r.s === "err") { cls = "st--" + r.s + " st--dot"; label = r.short; }
-  } else if (id === "browser" && caps().browserAvailable === false) {
-    cls = "st--off st--dot"; label = "Browser unavailable";
-  }
-  if (!cls) return "";
-  return '<span class="nav-flag st ' + cls + '" title="' + esc(label) + '"><span class="vh">' + esc(label) + "</span></span>";
+function renderHeaderState() {
+  qsa("[data-route]").forEach(function (a) {
+    if (a.getAttribute("data-route") === S.route) a.setAttribute("aria-current", "page");
+    else a.removeAttribute("aria-current");
+  });
+  var ver = qs("#brand-ver");
+  var live = (S.stats && S.stats.version) || VERSION;
+  if (ver) ver.textContent = live ? "v" + live : "";
 }
 
 function renderView() {
   var meta = sectionMeta(S.route);
-  var t = qs("#tb-title"); if (t) t.textContent = meta.label;
-  var sub = qs("#tb-sub"); if (sub) sub.textContent = meta.blurb || "";
-  qsa(".nav a").forEach(function (a) {
-    if (a.getAttribute("data-route") === S.route) a.setAttribute("aria-current", "page");
-    else a.removeAttribute("aria-current");
-  });
+  renderHeaderState();
   var views = {
-    overview: overviewView, tools: toolsView, browser: browserView, video: videoView,
-    research: researchView, routing: routingView, roblox: robloxView, skills: skillsView, about: aboutView
+    overview: overviewView, capabilities: capabilitiesView, tools: toolsView, status: statusView,
+    browser: browserView, video: videoView, research: researchView, routing: routingView,
+    roblox: robloxView, skills: skillsView, about: aboutView, notfound: notfoundView
   };
-  var fn = views[S.route] || overviewView;
+  var fn = views[S.route] || notfoundView;
   var view = qs("#view");
   if (view) view.innerHTML = fn();
   renderFoot();
-  document.title = meta.label + " · DEMO inspector";
-}
-
-function renderShellNav() {
-  qsa(".nav a").forEach(function (a) {
-    var old = qs(".nav-flag", a);
-    if (old) old.remove();
-    var flag = navFlag(a.getAttribute("data-route"));
-    if (flag) a.insertAdjacentHTML("beforeend", flag);
-  });
+  document.title = (meta.label ? meta.label + " · " : "") + "DEMO";
 }
 
 function renderFoot() {
   var f = qs("#foot");
   if (!f) return;
-  if (S.statsErr || !S.stats) {
-    f.innerHTML = "<span>no cookies · no tracking · no login</span>";
-    return;
-  }
-  var s1 = S.stats;
+  var proj = DATA.PROJECT || {};
   var bits = [];
-  bits.push('<span class="mono">v' + esc(s1.version || VERSION || "—") + "</span>");
-  bits.push('<span class="mono">' + s1.toolCount + " tools</span>");
-  if (s1.generatedAt) bits.push("<span>telemetry " + esc(fmtTs(s1.generatedAt)) + "</span>");
-  if (typeof s1.uptimeSeconds === "number") bits.push("<span>isolate age " + esc(fmtDur(s1.uptimeSeconds)) + " · " + s1.requestCountSinceIsolateStart + " req (this isolate)</span>");
+  if (S.stats) {
+    bits.push('<span class="mono">v' + esc(S.stats.version || VERSION || "—") + "</span>");
+    bits.push('<span class="mono">' + S.stats.toolCount + " tools</span>");
+    if (S.stats.generatedAt) bits.push("<span>telemetry " + esc(fmtTs(S.stats.generatedAt)) + "</span>");
+    if (typeof S.stats.uptimeSeconds === "number") bits.push("<span>isolate age " + esc(fmtDur(S.stats.uptimeSeconds)) + "</span>");
+  } else {
+    bits.push('<span class="mono">' + CAT.length + " tools</span>");
+  }
   bits.push("<span>no cookies · no tracking · no login</span>");
-  f.innerHTML = bits.join("<span aria-hidden=\"true\">·</span>");
+  var links = '<span class="foot-links">' +
+    '<a href="#/capabilities">Capabilities</a><a href="#/status">Status</a>' +
+    (proj.docsTreeUrl ? '<a href="' + esc(proj.docsTreeUrl) + '" target="_blank" rel="noreferrer noopener">Docs</a>' : "") +
+    (proj.repoUrl ? '<a href="' + esc(proj.repoUrl) + '" target="_blank" rel="noreferrer noopener">Source</a>' : "") +
+    "</span>";
+  f.innerHTML = bits.join('<span aria-hidden="true">·</span>') + links;
 }
 
 /* ---------------------------------------------------------------- shared */
@@ -345,141 +458,140 @@ function errPanel(title, path, key, msg) {
     { cls: "err-card" });
 }
 
+function techDetails(summary, obj) {
+  var json = "";
+  try { json = JSON.stringify(obj, null, 2) || ""; } catch (e) { json = String(obj); }
+  if (json.length > 20000) json = json.slice(0, 20000) + "\n… (truncated)";
+  return '<details class="tech"><summary>' + ic("chev", 13) + esc(summary || "Technical details") + "</summary>" +
+    '<div class="tech-bd"><pre class="codeblock">' + esc(json) + "</pre></div></details>";
+}
+
+function pageHead(eyebrow, title, blurb) {
+  return '<div class="page-head"><div class="eyebrow">' + esc(eyebrow) + "</div><h1>" + esc(title) + "</h1>" +
+    (blurb ? "<p>" + esc(blurb) + "</p>" : "") + "</div>";
+}
+
 function note(html) { return '<p class="note">' + html + "</p>"; }
 
 /* -------------------------------------------------------------- overview */
 
-function robloxState() {
-  if (S.robloxLoading && !S.roblox && !S.robloxErr) return { s: "idle", l: "Checking", short: "Checking" };
-  if (S.robloxErr) {
-    var p = S.robloxErr.payload || {};
-    if (p.error === "not_configured" || S.robloxErr.status === 503) return { s: "off", l: "Not configured", short: "Not configured" };
-    return { s: "err", l: "Status unavailable", short: "Error" };
-  }
-  var r = S.roblox || {};
-  var conf = r.configuration || {};
-  if (conf.enabled === false) {
-    var missing = !conf.clientIdConfigured || !conf.clientSecretConfigured;
-    return missing ? { s: "off", l: "Not configured", short: "Not configured" } : { s: "off", l: "Disabled", short: "Disabled" };
-  }
-  if (r.connected && r.account) {
-    var granted = r.account.grantedScopes || [];
-    var requested = (r.configuration && r.configuration.requestedScopes) || [];
-    for (var g2 = 0; g2 < requested.length; g2++) {
-      if (granted.indexOf(requested[g2]) === -1) return { s: "warn", l: "Insufficient scope", short: "Scope gap", missing: requested[g2] };
-    }
-    return { s: "ok", l: "Connected", short: "Connected" };
-  }
-  if (r.account && r.account.reauthorizationRequired) return { s: "warn", l: "Authorization required", short: "Re-auth required" };
-  return { s: "idle", l: "Not connected", short: "Not connected" };
-}
-
-function overviewView() {
-  if (S.statsErr && S.healthErr) {
-    return heroBlock() + '<div style="height:14px"></div>' + errPanel("Backend unreachable — telemetry unavailable", "/platform/stats", "core",
-      "The Worker did not answer. Try again or inspect deployment status.");
-  }
-  var c = caps(), sc = statCaps();
-  var live = !!S.health;
-
-  var rows1 = [
-    kv("DEMO version", live || S.stats ? '<code class="chip-v">' + esc((S.stats && S.stats.version) || VERSION || "—") + "</code>" : st("idle", "Loading")),
-    kv("MCP endpoint", S.stats ? st("ok", "Operational") : st("idle", "Checking"), '<code class="chip-v">' + (S.stats ? "/mcp" : "…") + "</code>"),
-    kv("Tools", S.stats ? st("info", String(S.stats.toolCount)) : st("idle", "Checking"), 'inventory at <code class="chip-v">/tools</code>'),
-    kv("Browser", live ? boolSt(c.browserAvailable, "Operational") : st("idle", "Checking"), c.reason ? '<span class="hint">' + esc(c.reason) + "</span>" : ""),
-    kv("Browser sessions", live ? (c.sessionStorage === "durable-object" ? st("ok", "Durable Object") : st("warn", "In-memory")) : st("idle", "…"), c.provider ? '<span class="hint mono">' + esc(c.provider) + "</span>" : ""),
-    kv("Live view", live ? boolSt(c.liveView, "Available") : st("idle", "…")),
-    kv("Screenshots", live ? boolSt(c.screenshots, "R2 storage") : st("idle", "…"), c.screenshotReason ? '<span class="hint">' + esc(c.screenshotReason) + "</span>" : ""),
-    kv("Human handoff", live ? boolSt(c.handoff, "Enabled") : st("idle", "…")),
-    kv("Accessibility snapshots", live ? boolSt(c.accessibilitySnapshot, "Enabled") : st("idle", "…"))
-  ];
-  var jev = sc.jevDecisionEngine || {}, laya = sc.layaDecisionProvider || {};
-  var rows2 = [
-    kv("Video bytes", hv("videoBytesRetrieval") != null ? boolSt(hv("videoBytesRetrieval"), "Available") : st("idle", "…")),
-    kv("Frame decoding", hv("videoFrames") != null ? boolSt(hv("videoFrames"), "Operational") : st("idle", "…")),
-    kv("Transcription", hv("videoTranscription") != null ? (hv("videoTranscription") ? st("ok", "Configured") : st("off", "No provider")) : st("idle", "…"), hv("transcriptionProvider") ? '<span class="hint mono">' + esc(hv("transcriptionProvider")) + "</span>" : ""),
-    kv("Vision analysis", hv("videoVisionAnalysis") != null ? (hv("videoVisionAnalysis") ? st("ok", "Configured") : st("warn", "Optional")) : st("idle", "…"), hv("visionProvider") ? '<span class="hint mono">' + esc(hv("visionProvider")) + "</span>" : ""),
-    kv("Video artifacts", hv("videoArtifacts") != null ? boolSt(hv("videoArtifacts"), "Available") : st("idle", "…")),
-    kv("YouTube", sc.youtube ? (sc.youtube.available ? st("ok", "Configured") : st("off", "No API key")) : st("idle", "…")),
-    kv("Git (public)", sc.expanded && sc.expanded.git ? st("ok", "Available") : st("idle", "…"), "public repos only · no key"),
-    kv("Internet Archive", sc.expanded && sc.expanded.internetArchive ? st("ok", "Available") : st("idle", "…")),
-    kv("Research", sc.expanded && sc.expanded.webResearch ? st("ok", "Available") : st("idle", "…")),
-    kv("Jev engine", S.stats ? (jev.available ? st("ok", "Operational") : st("off", "Not configured")) : st("idle", "…"), jev.model ? '<span class="hint mono">' + esc(jev.model) + "</span>" : ""),
-    kv("Laya engine", S.stats ? (laya.available ? st("ok", "Operational") : st("off", "Not configured")) : st("idle", "…"), laya.endpointHost ? '<span class="hint mono">' + esc(laya.endpointHost) + "</span>" : ""),
-    kv("Roblox (optional)", st(robloxState().s, robloxState().l), "external authorization — not a DEMO login")
-  ];
-
-  var conns = "";
-  if (S.stats && S.stats.connections) {
-    conns = '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Connection</th><th>Type</th><th class="t-r">State</th></tr></thead><tbody>';
-    for (var i = 0; i < S.stats.connections.length; i++) {
-      var cn = S.stats.connections[i];
-      conns += "<tr><td>" + esc(cn.name) + "</td><td class=\"muted\">" + esc(cn.type) + "</td><td class=\"t-r\">" + (cn.connected ? st("ok", "Connected") : st("off", "Disconnected")) + "</td></tr>";
-    }
-    conns += "</tbody></table></div>";
-  } else {
-    conns = skeletonPanel(6);
-  }
-
-  var epHtml = "";
-  if (S.stats && S.stats.endpoints) {
-    var keys = Object.keys(S.stats.endpoints);
-    for (var j2 = 0; j2 < keys.length; j2++) {
-      epHtml += kv(keys[j2], '<code class="chip-v">' + esc(S.stats.endpoints[keys[j2]]) + "</code>");
-    }
-  } else {
-    epHtml = skeletonPanel(4);
-  }
-
-  var noLogin = '<section class="panel" aria-label="Access model"><div class="panel-bd" style="display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap">' +
-    '<span class="badge-secure">' + ic("shield") + "Public by design</span>" +
-    '<div class="note" style="flex:1;min-width:240px">DEMO access needs <b>no account and no sign-in</b> — the MCP endpoint, browser, video, research and utility tools are usable immediately. External authorization is asked for only where a capability genuinely needs it: today that is <b>Roblox OAuth</b>, and only for Roblox-account features. <a href="#/roblox">Roblox status →</a></div>' +
-    "</div></section>";
-
-  return (
-    heroBlock() +
-    '<div class="grid grid--status" style="margin-top:14px">' +
-      statusCard("Deployment", "gauge", rows1) +
-      statusCard("Capabilities", "cpu", rows2) +
-    "</div>" +
-    '<div class="grid grid--2" style="margin-top:14px">' +
-      panel("Connections", "users", conns, { flush: true }) +
-      panel("Endpoints (same origin)", "terminal", '<div class="panel-bd--flush">' + epHtml + "</div>", { flush: true }) +
-    "</div>" +
-    '<div style="margin-top:14px">' + noLogin + "</div>"
-  );
-}
-
 function heroBlock() {
-  var online = S.stats ? S.stats.status === "online" : null;
   var proj = DATA.PROJECT || {};
+  var dot = "live-dot--idle live-dot--pulse", t = "Checking status", sub = "Reading live deployment telemetry";
+  if (S.stats) {
+    if (S.stats.status === "online") { dot = ""; t = "Operational"; sub = "MCP endpoint available"; }
+    else { dot = "live-dot--warn"; t = "Degraded"; sub = "Deployment answered with an unexpected status"; }
+  } else if (S.statsErr && S.healthErr) {
+    dot = "live-dot--err"; t = "Status unavailable"; sub = "Could not reach deployment telemetry";
+  } else if (S.statsErr || S.healthErr) {
+    dot = "live-dot--warn"; t = "Partial telemetry"; sub = "Some deployment signals did not answer";
+  }
   return '<div class="hero">' +
-    '<div class="hero-main">' +
-      '<div class="eyebrow">' + esc(proj.name || "DEMO") + " · " + esc(proj.tagline || "the open execution layer") + "</div>" +
-      "<h1>Open infrastructure. No account required.</h1>" +
-      "<p>" + esc(proj.blurb || "") + "</p>" +
-      '<div class="row">' +
-        (online === false ? st("err", "Degraded") : online ? st("ok", "Online") : st("idle", "Checking status")) +
-        (S.stats ? st("info", S.stats.toolCount + " MCP tools") : "") +
-        (S.health && caps().browserAvailable ? st("ok", "Browser ready") : S.health ? st("off", "Browser unavailable") : "") +
-      "</div>" +
+    '<div class="eyebrow">' + esc(proj.name || "DEMO") + "</div>" +
+    "<h1>Execution infrastructure for AI agents.</h1>" +
+    '<p class="lede">' + esc(proj.blurb || "") + "</p>" +
+    '<div class="hero-cta">' +
+      '<button class="btn btn--primary btn--lg" type="button" data-act="connect-open">' + ic("plug") + "Connect MCP</button>" +
+      '<a class="btn btn--lg" href="#/capabilities">Explore capabilities</a>' +
     "</div>" +
-    '<div class="hero-side">' +
-      '<button class="btn btn--primary" type="button" data-act="connect-open">' + ic("plug") + "Connect MCP</button>" +
-      '<button class="btn" type="button" data-act="refresh">' + ic("refresh") + "Refresh telemetry</button>" +
-      '<div class="hero-fine">demo-mcp on Cloudflare Workers · open by default</div>' +
+    '<div class="hero-status"><span class="live-dot ' + dot + '" aria-hidden="true"></span>' +
+      "<span><b>" + esc(t) + "</b> · " + esc(sub) + "</span>" +
+      ((S.statsErr && S.healthErr) ? '<button class="link-btn" type="button" data-act="refresh">Retry</button>' : "") +
     "</div>" +
   "</div>";
 }
 
-/* ----------------------------------------------------------------- tools */
+function catCard(cat) {
+  var cs = catStatus(cat.id);
+  var n = 0;
+  for (var i = 0; i < CAT.length; i++) if (cat.groups && cat.groups.indexOf(CAT[i].group) !== -1) n++;
+  var count = cat.groups && cat.groups.length ? n + (n === 1 ? " tool" : " tools") : "live status";
+  var tags = "";
+  for (var t = 0; t < (cat.highlights || []).length; t++) tags += '<span class="cat-tag">' + esc(cat.highlights[t]) + "</span>";
+  return '<a class="cat" href="#/' + esc(cat.route || "capabilities") + '">' +
+    '<div class="cat-top"><span class="cat-ic">' + ic(cat.icon) + "</span><h3>" + esc(cat.title) + "</h3>" + st(cs.s, cs.l) + "</div>" +
+    "<p>" + esc(cat.description || "") + "</p>" +
+    '<div class="cat-tags">' + tags + "</div>" +
+    '<div class="cat-foot"><span>' + esc(count) + '</span><span style="margin-left:auto" class="link-arrow">Open ' + ic("arrow") + "</span></div>" +
+  "</a>";
+}
+
+function overviewStatusRows() {
+  var c = caps(), sc = statCaps();
+  var live = !!S.health;
+  var vp = videoPipe(), stor = storageState(), dec = decisionsState();
+  var laya = sc.layaDecisionProvider || {}, jev = sc.jevDecisionEngine || {};
+  return [
+    kv("DEMO version", (live || S.stats) ? '<code class="chip-v">v' + esc((S.stats && S.stats.version) || VERSION || "—") + "</code>" : st("idle", "Loading")),
+    kv("MCP endpoint", S.stats ? (S.stats.status === "online" ? st("ok", "Operational") : st("warn", "Degraded")) : (S.statsErr ? st("err", "Unreachable") : st("idle", "Checking")), "<code class=\"chip-v\">/mcp</code>"),
+    kv("Browser", live ? boolSt(c.browserAvailable, "Operational") : (S.healthErr ? st("err", "Unreachable") : st("idle", "Checking")), c.reason ? '<span class="hint">' + esc(c.reason) + "</span>" : ""),
+    kv("Video pipeline", st(vp.s, vp.l)),
+    kv("Decisions", st(dec.s, dec.l), (jev.available || laya.available) ? '<span class="hint mono">' + esc(hv("decisionRoutingMode") || laya.routingMode || "auto") + "</span>" : '<span class="hint">built-in rules decide until a provider is configured</span>'),
+    kv("Storage", st(stor.s, stor.l), '<span class="hint">R2 artifacts · expiring</span>'),
+    kv("Skills", S.stats || S.health ? st("ok", "Available") : (S.statsErr && S.healthErr ? st("err", "Unreachable") : st("idle", "Checking")), '<span class="hint">built-ins + skills.sh · no key required</span>')
+  ];
+}
+
+function accessPanel() {
+  var proj = DATA.PROJECT || {};
+  return panel("Access model", "shield",
+    '<div class="row" style="margin-bottom:10px"><span class="badge-secure">' + ic("shield") + "No account required</span></div>" +
+    note("Connect DEMO directly to your MCP-compatible client. The browser, video, research and utility tools work immediately — external authorization is asked for only where a capability genuinely needs it: today that is <b>Roblox OAuth</b>, and only for Roblox-account features.") +
+    '<div class="row" style="margin-top:12px">' +
+      '<button class="btn btn--primary" type="button" data-act="connect-open">' + ic("plug") + "Connect MCP</button>" +
+      (proj.docsTreeUrl ? '<a class="btn" href="' + esc(proj.docsTreeUrl) + '" target="_blank" rel="noreferrer noopener">' + ic("book") + "Docs</a>" : "") +
+      '<a class="btn" href="#/roblox">Roblox status</a>' +
+    "</div>");
+}
+
+function overviewView() {
+  if (S.statsErr && S.healthErr) {
+    return heroBlock() + '<div style="height:16px"></div>' + errPanel("Backend unreachable — telemetry unavailable", "/platform/stats", "core",
+      "The Worker did not answer. Try again or inspect deployment status.") +
+      '<div style="height:16px"></div>' + techDetails("Technical details", {
+        healthError: S.healthErr ? String(S.healthErr.message || S.healthErr) : null,
+        statsError: S.statsErr ? String(S.statsErr.message || S.statsErr) : null
+      });
+  }
+  var cards = "";
+  for (var i = 0; i < CATS.length; i++) cards += catCard(CATS[i]);
+  return (
+    heroBlock() +
+    '<div class="sec-head"><h2>Capabilities</h2><p>Six surfaces, one endpoint. Every status below is live.</p><a class="link-arrow" href="#/capabilities">Explore all tools ' + ic("arrow") + "</a></div>" +
+    '<div class="cat-grid">' + cards + "</div>" +
+    '<div class="sec-head"><h2>Status</h2><p>Live deployment state.</p><a class="link-arrow" href="#/status">Full status ' + ic("arrow") + "</a></div>" +
+    '<div class="grid grid--2">' +
+      statusCard("Deployment", "gauge", overviewStatusRows(), { right: '<a class="link-arrow" href="#/status">Details ' + ic("arrow") + "</a>" }) +
+      accessPanel() +
+    "</div>"
+  );
+}
+
+/* ------------------------------------------------------- capability explorer */
+
+function filterDef(id) {
+  for (var i = 0; i < EXPLORER_FILTERS.length; i++) if (EXPLORER_FILTERS[i].id === id) return EXPLORER_FILTERS[i];
+  return EXPLORER_FILTERS[0];
+}
+function toolInFilter(t, fid) {
+  if (!fid) return true;
+  var def = filterDef(fid);
+  if (def.availability) return def.availability.indexOf(t.availability) !== -1;
+  if (def.groups) return def.groups.indexOf(t.group) !== -1;
+  return true;
+}
+function filterCount(fid) {
+  var n = 0;
+  for (var i = 0; i < CAT.length; i++) if (toolInFilter(CAT[i], fid)) n++;
+  return n;
+}
 
 function filteredTools() {
   var q = S.tf.q.toLowerCase();
   var out = [];
   for (var i = 0; i < CAT.length; i++) {
     var t = CAT[i];
-    if (S.tf.group && t.group !== S.tf.group) continue;
+    if (!toolInFilter(t, S.tf.group)) continue;
     if (S.tf.avail) {
       var a = toolAvail(t.availability).s;
       if (S.tf.avail === "ok" && a !== "ok") continue;
@@ -495,14 +607,13 @@ function filteredTools() {
   return out;
 }
 
-function toolRow(t, groupLabel) {
+function toolRow(t) {
   var a = toolAvail(t.availability);
   var open = S.openTool === t.name;
   return '<button class="trow" type="button" data-act="open-tool" data-name="' + esc(t.name) + '" aria-expanded="' + (open ? "true" : "false") + '">' +
-    "<span>" + st(a.s, a.l) + "</span>" +
-    '<span class="tname">' + esc(t.name) + "</span>" +
+    '<span class="tname"><span class="tstat tstat--' + a.s + '" title="' + esc(a.l) + '"><span class="vh">' + esc(a.l) + "</span></span>" + esc(t.name) + "</span>" +
     '<span class="tdesc">' + esc(t.description || t.title) + "</span>" +
-    '<span class="tgrp">' + esc(groupLabel || t.group) + "</span>" +
+    '<span class="tgrp">' + esc(t.group) + "</span>" +
     '<span class="tw">' + ic("chev", 14) + "</span>" +
     "</button>";
 }
@@ -510,14 +621,19 @@ function toolRow(t, groupLabel) {
 function toolDetail(t) {
   var a = toolAvail(t.availability);
   var hint = HINTS[t.availability] || "";
+  var inputs = t.inputs || [];
+  var shown = inputs.slice(0, 2).map(function (n) { return '"' + n + '": "…"'; }).join(", ");
+  var example = '{"name": "' + t.name + '", "arguments": {' + shown + "}}";
   return '<div class="tdetail">' +
+    '<div class="row" style="gap:8px;margin-bottom:8px">' + st(a.s, a.l) + (hint ? '<span class="hint">' + esc(hint) + "</span>" : "") + "</div>" +
     '<p class="tdesc-full">' + esc(t.title) + (t.description ? " — " + esc(t.description) : " — description is available via tools/list over /mcp.") + "</p>" +
-    (t.inputs && t.inputs.length ? '<h4>Input fields</h4><div class="pill-row">' + t.inputs.map(function (n) {
+    (inputs.length ? "<h4>Inputs</h4>" + '<div class="pill-row">' + inputs.map(function (n) {
       return '<span class="in-chip">' + esc(n) + "</span>";
-    }).join("") + '</div><p class="hint" style="margin-top:8px">Field names as registered on the MCP server. The full JSON Schema comes from tools/list on /mcp.</p>' : "") +
-    '<h4>Availability</h4><div class="row" style="gap:8px">' + st(a.s, a.l) + (hint ? '<span class="hint">' + esc(hint) + "</span>" : "") + "</div>" +
+    }).join("") + "</div>" : "") +
+    "<h4>Example usage</h4>" + '<pre class="codeblock">POST /mcp · tools/call\n' + esc(example) + "</pre>" +
+    '<p class="hint" style="margin-top:8px">Results come back as MCP content blocks. The full JSON Schema for every field comes from tools/list on /mcp — nothing here is mocked.</p>' +
     '<div class="tfoot"><button class="btn btn--sm" type="button" data-act="copy" data-copy="' + esc(t.name) + '">' + ic("copy", 13) + "Copy name</button>" +
-    '<span class="hint">Invoke it from any connected MCP client — tools run through the same Worker that serves this page.</span></div>' +
+    '<span class="hint">Invoke it from any connected MCP client.</span></div>' +
     "</div>";
 }
 
@@ -532,25 +648,22 @@ function toolsRowsHtml() {
   return rows;
 }
 
-function toolsView() {
-  var gc = {};
-  for (var i = 0; i < CAT.length; i++) gc[CAT[i].group] = (gc[CAT[i].group] || 0) + 1;
+function explorerPanel() {
   var list = filteredTools();
-  var chips = '<button class="chip" type="button" data-act="filter-group" data-g="" aria-pressed="' + (S.tf.group === "" ? "true" : "false") + '">All<span class="cnt">' + CAT.length + "</span></button>";
-  var order = GROUPS.slice().sort();
-  for (var g2 = 0; g2 < order.length; g2++) {
-    var g = order[g2];
-    chips += '<button class="chip" type="button" data-act="filter-group" data-g="' + esc(g) + '" aria-pressed="' + (S.tf.group === g ? "true" : "false") + '">' + esc(g) + '<span class="cnt">' + gc[g] + "</span></button>";
+  var chips = "";
+  for (var i = 0; i < EXPLORER_FILTERS.length; i++) {
+    var f = EXPLORER_FILTERS[i];
+    chips += '<button class="chip" type="button" data-act="filter-group" data-g="' + esc(f.id) + '" aria-pressed="' + (S.tf.group === f.id ? "true" : "false") + '">' + esc(f.label) + '<span class="cnt">' + filterCount(f.id) + "</span></button>";
   }
   var availChips = [["", "Any state"], ["ok", "Available"], ["off", "Needs setup"], ["warn", "Private"]].map(function (o) {
     return '<button class="chip" type="button" data-act="filter-avail" data-a="' + o[0] + '" aria-pressed="' + (S.tf.avail === o[0] ? "true" : "false") + '">' + o[1] + "</button>";
   }).join("");
 
   var head = '<div class="panel-bd" style="border-bottom:1px solid var(--border);display:flex;flex-wrap:wrap;gap:10px;align-items:center">' +
-    '<div class="search">' + ic("search") + '<input id="tool-search" type="search" placeholder="Filter ' + CAT.length + ' tools by name, description or group…" aria-label="Filter tools" value="' + esc(S.tf.q) + '"></div>' +
+    '<div class="search">' + ic("search") + '<input id="tool-search" type="search" placeholder="Search ' + CAT.length + ' tools by name, description or group…" aria-label="Search tools" value="' + esc(S.tf.q) + '"></div>' +
     '<span class="tcount" id="tool-count">' + list.length + " shown · " + (S.stats ? S.stats.toolCount + " live on /mcp" : CAT.length + " in catalog") + "</span></div>" +
-    '<div style="padding:10px 14px;border-bottom:1px solid var(--border)"><div class="chips">' + chips + "</div></div>" +
-    '<div style="padding:10px 14px;border-bottom:1px solid var(--border);display:flex;gap:6px;flex-wrap:wrap;align-items:center"><span class="eyebrow" style="margin-right:4px">State</span><div class="chips">' + availChips + "</div></div>";
+    '<div style="padding:10px 16px;border-bottom:1px solid var(--border)"><div class="chips" role="group" aria-label="Filter by capability">' + chips + "</div></div>" +
+    '<div style="padding:10px 16px;border-bottom:1px solid var(--border);display:flex;gap:6px;flex-wrap:wrap;align-items:center"><span class="eyebrow" style="margin-right:4px">State</span><div class="chips" role="group" aria-label="Filter by availability">' + availChips + "</div></div>";
 
   return panel("Tool explorer", "tools", head + '<div class="panel-bd--flush" id="tool-rows">' + toolsRowsHtml() + "</div>", {
     flush: true,
@@ -558,10 +671,128 @@ function toolsView() {
   });
 }
 
+function capabilitiesView() {
+  var showCats = !S.tf.q && !S.tf.group && !S.tf.avail;
+  var cats = "";
+  if (showCats) {
+    var cards = "";
+    for (var i = 0; i < CATS.length; i++) cards += catCard(CATS[i]);
+    cats = '<div class="cat-grid" style="margin-bottom:16px">' + cards + "</div>";
+  }
+  return pageHead("Capabilities", "Capability explorer", "Every MCP tool DEMO exposes, with live availability. Select a tool for its inputs and usage.") +
+    '<div style="height:16px"></div>' + cats + explorerPanel();
+}
+
+/* "Tools" stays routable as a compact alias of the explorer. */
+function toolsView() {
+  return pageHead("Capabilities", "Tools", "Every MCP tool DEMO exposes, with live availability.") +
+    '<div style="height:16px"></div>' + explorerPanel();
+}
+
+/* ----------------------------------------------------------------- status */
+
+function deploymentRows() {
+  var c = caps();
+  var live = !!S.health;
+  return [
+    kv("DEMO version", (live || S.stats) ? '<code class="chip-v">v' + esc((S.stats && S.stats.version) || VERSION || "—") + "</code>" : st("idle", "Loading")),
+    kv("MCP endpoint", S.stats ? (S.stats.status === "online" ? st("ok", "Operational") : st("warn", "Degraded")) : (S.statsErr ? st("err", "Unreachable") : st("idle", "Checking")), "<code class=\"chip-v\">/mcp</code>"),
+    kv("Tools live", S.stats ? st("info", String(S.stats.toolCount)) : st("idle", "Checking"), 'inventory at <code class="chip-v">/tools</code>'),
+    kv("Telemetry", S.stats && S.stats.generatedAt ? '<span class="hint mono">' + esc(fmtTs(S.stats.generatedAt)) + "</span>" : "—"),
+    kv("Isolate age", S.stats && typeof S.stats.uptimeSeconds === "number" ? '<span class="hint">' + esc(fmtDur(S.stats.uptimeSeconds)) + " · " + S.stats.requestCountSinceIsolateStart + " req (this isolate)</span>" : "—")
+  ];
+}
+
+function capabilityRows() {
+  var c = caps(), sc = statCaps();
+  var live = !!S.health;
+  var vp = videoPipe(), stor = storageState();
+  var jev = sc.jevDecisionEngine || {}, laya = sc.layaDecisionProvider || {};
+  return [
+    kv("Browser", live ? boolSt(c.browserAvailable, "Operational") : (S.healthErr ? st("err", "Unreachable") : st("idle", "Checking")), c.reason && !c.browserAvailable ? '<span class="hint">' + esc(c.reason) + "</span>" : ""),
+    kv("Browser sessions", live ? (c.sessionStorage === "durable-object" ? st("ok", "Durable Object") : st("warn", "In-memory")) : st("idle", "…"), c.provider ? '<span class="hint mono">' + esc(c.provider) + "</span>" : ""),
+    kv("Screenshots", live ? boolSt(c.screenshots, "Available") : st("idle", "…"), c.screenshotReason ? '<span class="hint">' + esc(c.screenshotReason) + "</span>" : ""),
+    kv("Live view", live ? boolSt(c.liveView, "Available") : st("idle", "…")),
+    kv("Human handoff", live ? boolSt(c.handoff, "Available") : st("idle", "…")),
+    kv("Accessibility snapshots", live ? boolSt(c.accessibilitySnapshot, "Available") : st("idle", "…")),
+    kv("Video pipeline", st(vp.s, vp.l)),
+    kv("Video artifacts", hv("videoArtifacts") != null ? boolSt(hv("videoArtifacts"), "Available") : (S.healthErr ? st("err", "Unreachable") : st("idle", "…"))),
+    kv("Transcription", hv("videoTranscription") != null ? (hv("videoTranscription") ? st("ok", "Configured") : st("off", "No provider")) : st("idle", "…"), hv("transcriptionProvider") ? '<span class="hint mono">' + esc(hv("transcriptionProvider")) + "</span>" : ""),
+    kv("Vision analysis", hv("videoVisionAnalysis") != null ? (hv("videoVisionAnalysis") ? st("ok", "Configured") : st("warn", "Optional")) : st("idle", "…"), hv("visionProvider") ? '<span class="hint mono">' + esc(hv("visionProvider")) + "</span>" : ""),
+    kv("Storage (R2)", st(stor.s, stor.l), '<span class="hint">screenshots · video artifacts · snapshots</span>'),
+    kv("Skills", (S.stats || S.health) ? st("ok", "Available") : st("idle", "…"), '<span class="hint">built-ins + skills.sh · no key required</span>'),
+    kv("YouTube", sc.youtube ? (sc.youtube.available ? st("ok", "Configured") : st("off", "No API key")) : (S.statsErr ? st("err", "Unreachable") : st("idle", "…"))),
+    kv("Jev engine", S.stats ? (jev.available ? st("ok", "Operational") : st("off", "Not configured")) : st("idle", "…"), jev.model ? '<span class="hint mono">' + esc(jev.model) + "</span>" : ""),
+    kv("Laya provider", S.stats ? (laya.available ? st("ok", "Operational") : st("off", "Not configured")) : st("idle", "…"), laya.endpointHost ? '<span class="hint mono">' + esc(laya.endpointHost) + "</span>" : ""),
+    kv("Roblox (optional)", st(robloxState().s, robloxState().l), "external authorization — not a DEMO login")
+  ];
+}
+
+function statusView() {
+  if (S.statsErr && S.healthErr) {
+    return pageHead("Status", "System status", "Live deployment state, read from this Worker's own telemetry.") +
+      '<div style="height:16px"></div>' + errPanel("Backend unreachable — telemetry unavailable", "/platform/stats", "core",
+        "The Worker did not answer. Try again or inspect deployment status.") +
+      '<div style="height:16px"></div>' + techDetails("Technical details", {
+        healthError: S.healthErr ? String(S.healthErr.message || S.healthErr) : null,
+        statsError: S.statsErr ? String(S.statsErr.message || S.statsErr) : null
+      });
+  }
+  var conns = "";
+  if (S.stats && S.stats.connections) {
+    conns = '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Connection</th><th>Type</th><th class="t-r">State</th></tr></thead><tbody>';
+    for (var i = 0; i < S.stats.connections.length; i++) {
+      var cn = S.stats.connections[i];
+      conns += "<tr><td>" + esc(cn.name) + "</td><td class=\"muted\">" + esc(cn.type) + "</td><td class=\"t-r\">" + (cn.connected ? st("ok", "Connected") : st("off", "Disconnected")) + "</td></tr>";
+    }
+    conns += "</tbody></table></div>";
+  } else {
+    conns = skeletonPanel(6);
+  }
+  var epHtml = "";
+  if (S.stats && S.stats.endpoints) {
+    var keys = Object.keys(S.stats.endpoints);
+    for (var j = 0; j < keys.length; j++) {
+      epHtml += kv(keys[j], '<code class="chip-v">' + esc(S.stats.endpoints[keys[j]]) + "</code>");
+    }
+  } else {
+    epHtml = skeletonPanel(4);
+  }
+  return (
+    pageHead("Status", "System status", "Live deployment state — every value below is read from this Worker's own telemetry, never hardcoded.") +
+    '<div style="height:16px"></div>' +
+    '<div class="grid grid--2">' +
+      statusCard("Deployment", "gauge", deploymentRows()) +
+      statusCard("Capabilities", "cpu", capabilityRows()) +
+    "</div>" +
+    '<div class="grid grid--2" style="margin-top:16px">' +
+      panel("Connections", "users", conns, { flush: true }) +
+      panel("Endpoints (same origin)", "terminal", '<div class="panel-bd--flush">' + epHtml + "</div>", { flush: true }) +
+    "</div>" +
+    '<div style="margin-top:16px">' + techDetails("Technical details", { health: S.health, stats: S.stats }) + "</div>"
+  );
+}
+
+/* -------------------------------------------------------------------- 404 */
+
+function notfoundView() {
+  return '<div class="center-404">' +
+    '<div class="eyebrow">DEMO</div>' +
+    "<h1>Page not found</h1>" +
+    "<p>That route doesn't exist.</p>" +
+    '<a class="btn btn--primary" href="#/overview">Back to DEMO</a>' +
+  "</div>";
+}
+
 /* --------------------------------------------------------------- browser */
 
 function browserView() {
-  if (!S.health) return panel("Browser subsystem", "globe", skeletonPanel(6));
+  if (!S.health) {
+    if (S.healthErr) return pageHead("Browser", "Browser", "Persistent sessions, screenshots, and human handoff.") + '<div style="height:16px"></div>' +
+      errPanel("Browser status unavailable", "/health", "core", "The Worker did not answer, so browser availability is unknown right now.");
+    return pageHead("Browser", "Browser", "Persistent sessions, screenshots, and human handoff.") + '<div style="height:16px"></div>' +
+      panel("Browser subsystem", "globe", skeletonPanel(6));
+  }
   var c = caps();
   var rows = [
     kv("Provider", '<code class="chip-v">' + esc(c.provider || "—") + "</code>"),
@@ -586,6 +817,8 @@ function browserView() {
   var trows = bt.map(function (t) { return toolRow(t); }).join("");
 
   return (
+    pageHead("Browser", "Browser", "A real persistent browser, driven by an MCP client through these tools.") +
+    '<div style="height:16px"></div>' +
     '<div class="grid grid--2">' +
       panel("Subsystem state", "gauge", '<div class="panel-bd--flush">' + rows + "</div>", { flush: true }) +
       panel("Session workflow — via MCP tools", "terminal", '<div class="flow">' + flow + "</div>", {
@@ -593,11 +826,11 @@ function browserView() {
         right: (DATA.PROJECT && DATA.PROJECT.docsTreeUrl) ? '<a class="btn btn--sm" href="' + esc(DATA.PROJECT.docsTreeUrl + "/BROWSER.md") + '" target="_blank" rel="noreferrer noopener">' + ic("book", 13) + "Docs</a>" : ""
       }) +
     "</div>" +
-    '<div style="margin-top:14px">' + panel("Browser tools — " + bt.length + " registered", "camera", '<div class="panel-bd--flush">' + trows + "</div>", {
+    '<div style="margin-top:16px">' + panel("Browser tools — " + bt.length + " registered", "camera", '<div class="panel-bd--flush">' + trows + "</div>", {
       flush: true,
       right: '<button class="btn btn--sm" type="button" data-act="tools-tab">Open explorer</button>'
     }) + "</div>" +
-    '<div style="margin-top:14px">' + note("The browser is driven by an MCP client through these tools — this page shows live capability state and never drives the browser itself. Screenshots land in R2 and are readable at <code class=\"chip-v\">/screenshots/:id</code> until they expire. Login walls and CAPTCHAs are surfaced for a human through the Live View and never bypassed. Active sessions are scoped to the MCP conversation that opened them; there is no shared, cross-user session browser.") + "</div>"
+    '<div style="margin-top:16px">' + note("This page shows live capability state and never drives the browser itself. Screenshots land in R2 and are readable at <code class=\"chip-v\">/screenshots/:id</code> until they expire. Login walls and CAPTCHAs are surfaced for a human through the Live View and never bypassed. Active sessions are scoped to the MCP conversation that opened them; there is no shared, cross-user session browser.") + "</div>"
   );
 }
 
@@ -605,11 +838,12 @@ function browserView() {
 
 function videoView() {
   var v = S.lazy.video, err = S.lazyErr.video;
-  if (err && !v) return errPanel("Video capabilities unavailable", LAZY_ROUTES.video, "video", "The capability report did not return. Try again or inspect deployment status.");
+  var head = pageHead("Video", "Video", "Public video understanding with explicit, inspectable evidence.") + '<div style="height:16px"></div>';
+  if (err && !v) return head + errPanel("Video capabilities unavailable", LAZY_ROUTES.video, "video", "The capability report did not return. Try again or inspect deployment status.");
 
   var stages = (DATA.VIDEO_STAGES || []).map(function (s) {
     var on = hv(s.flag);
-    var pill = on == null ? st("idle", "Checking") : (on ? st("ok", "Operational") : st("off", "Unavailable"));
+    var pill = on == null ? (S.healthErr ? st("err", "Unreachable") : st("idle", "Checking")) : (on ? st("ok", "Operational") : st("off", "Unavailable"));
     return kv(s.label, pill, esc(s.detail));
   }).join("");
 
@@ -620,10 +854,9 @@ function videoView() {
       var open = !!S.expandedPlatforms[p.platform];
       var notes = p.notes || "";
       platforms += '<button class="trow" type="button" data-act="plat" data-p="' + esc(p.platform) + '" aria-expanded="' + (open ? "true" : "false") + '">' +
-        "<span>" + (p.frameDecoding ? st("ok", "Frames") : st("warn", "Metadata")) + "</span>" +
         '<span class="tname">' + esc(p.platform) + "</span>" +
         '<span class="tdesc">' + esc(open ? notes : notes.slice(0, 160)) + (notes.length > 160 && !open ? "…" : "") + "</span>" +
-        '<span class="tgrp">' + (p.shortLinks ? "short links · " : "") + (p.directStreamDiscovery ? "stream discovery" : "page parsing") + "</span>" +
+        '<span class="tgrp">' + (p.frameDecoding ? "frames" : "metadata") + "</span>" +
         '<span class="tw">' + ic("chev", 14) + "</span></button>";
       if (open && notes.length > 160) {
         platforms += '<div class="tdetail"><p class="tdesc-full">' + esc(notes) + "</p></div>";
@@ -658,18 +891,19 @@ function videoView() {
   var vrows = vt.map(function (t) { return toolRow(t); }).join("");
 
   return (
+    head +
     panel("Pipeline stages", "film", '<div class="panel-bd--flush">' + stages + "</div>", { flush: true }) +
-    '<div style="margin-top:14px">' + panel("Platform support", "layers", v ? '<div class="panel-bd--flush">' + platforms + "</div>" : skeletonPanel(4), {
+    '<div style="margin-top:16px">' + panel("Platform support", "layers", v ? '<div class="panel-bd--flush">' + platforms + "</div>" : skeletonPanel(4), {
       flush: true,
       right: v ? '<span class="hint mono">' + esc(v.schema || "") + "</span>" : ""
     }) + "</div>" +
-    (providers ? '<div style="margin-top:14px">' + panel("Providers — presence only, never values", "cpu", '<div class="panel-bd--flush">' + providers + "</div>", { flush: true }) + "</div>" : "") +
-    (limits ? '<div style="margin-top:14px">' + panel("Guardrails", "shield", limits + note("Every URL and redirect hop passes the SSRF guard. Signed CDN URLs are never persisted — only the original public page URL is stored. Manifests (HLS/DASH) are reported, never assembled.")) + "</div>" : "") +
-    '<div class="grid grid--2" style="margin-top:14px">' +
+    (providers ? '<div style="margin-top:16px">' + panel("Providers — presence only, never values", "cpu", '<div class="panel-bd--flush">' + providers + "</div>", { flush: true }) + "</div>" : "") +
+    (limits ? '<div style="margin-top:16px">' + panel("Guardrails", "shield", limits + note("Every URL and redirect hop passes the SSRF guard. Signed CDN URLs are never persisted — only the original public page URL is stored. Manifests (HLS/DASH) are reported, never assembled.")) + "</div>" : "") +
+    '<div class="grid grid--2" style="margin-top:16px">' +
       panel("Honesty contract", "info", honesty) +
       panel("Video & YouTube tools — " + vt.length, "play", '<div class="panel-bd--flush">' + vrows + "</div>", { flush: true }) +
     "</div>" +
-    '<div style="margin-top:14px">' + note("Artifacts are temporary and expiring: retrieved bytes are served from <code class=\"chip-v\">/video-assets/:ref</code> (Range-aware for playback), decoded frames from <code class=\"chip-v\">/screenshots/:id</code>. This page shows pipeline capability, not results — never claim a video was analyzed unless the connected client received real frames or a transcript from the tool.") + "</div>"
+    '<div style="margin-top:16px">' + note("Artifacts are temporary and expiring: retrieved bytes are served from <code class=\"chip-v\">/video-assets/:ref</code> (Range-aware for playback), decoded frames from <code class=\"chip-v\">/screenshots/:id</code>. This page shows pipeline capability, not results — never claim a video was analyzed unless the connected client received real frames or a transcript from the tool.") + "</div>"
   );
 }
 
@@ -677,9 +911,10 @@ function videoView() {
 
 function researchView() {
   var e = S.lazy.expanded, err = S.lazyErr.expanded;
-  if (err && !e) return errPanel("Expanded capabilities report unavailable", LAZY_ROUTES.expanded, "expanded", "The report endpoint did not return. Try again or inspect deployment status.");
+  var head = pageHead("Web & Research", "Web & research", "Fetch, extract, and compare public sources — with full provenance.") + '<div style="height:16px"></div>';
+  if (err && !e) return head + errPanel("Expanded capabilities report unavailable", LAZY_ROUTES.expanded, "expanded", "The report endpoint did not return. Try again or inspect deployment status.");
   var g = e;
-  if (!g) return panel("Research capabilities", "search", skeletonPanel(6));
+  if (!g) return head + panel("Research capabilities", "search", skeletonPanel(6));
 
   function flagRow(label, val, detail) {
     var pill = val === true ? st("ok", "Available") : val === false ? st("off", "Unavailable") : st("info", String(val));
@@ -721,8 +956,8 @@ function researchView() {
     right: '<button class="btn btn--sm" type="button" data-act="tools-tab">Open explorer</button>'
   });
 
-  return '<div class="stack">' + cards + "</div>" +
-    '<div style="margin-top:14px">' + note("Run research from an MCP client — ask it to call <code class=\"chip-v\">web_research</code>, <code class=\"chip-v\">web_extract</code>, <code class=\"chip-v\">feed_read</code> or <code class=\"chip-v\">wayback</code>. This page shows live capability state only; it never fabricates results, sources or timestamps.") + "</div>";
+  return head + '<div class="stack">' + cards + "</div>" +
+    '<div style="margin-top:16px">' + note("Run research from an MCP client — ask it to call <code class=\"chip-v\">web_research</code>, <code class=\"chip-v\">web_extract</code>, <code class=\"chip-v\">feed_read</code> or <code class=\"chip-v\">wayback</code>. This page shows live capability state only; it never fabricates results, sources or timestamps.") + "</div>";
 }
 
 /* --------------------------------------------------------------- routing */
@@ -745,8 +980,10 @@ function routingView() {
   }).join("");
 
   var dt = CAT.filter(function (t) { return t.group === "JEV" || t.group === "Laya"; });
+  var head = pageHead("Routing", "Decision routing", "Typed Jev and Laya judgments — advisory only, never authoritative.") + '<div style="height:16px"></div>';
 
   return (
+    head +
     '<div class="grid grid--2">' +
       panel("Decision routing", "branch",
         '<div class="row" style="gap:10px;align-items:baseline"><span class="mono" style="font-size:22px;letter-spacing:-.02em">' + esc(mode) + "</span>" + st("info", "auto: Laya → Jev → deterministic rules") + "</div>" +
@@ -764,7 +1001,7 @@ function routingView() {
         '<div class="panel-bd"><div class="hint">These rows read <b>presence booleans</b> from <code class="chip-v">/platform/stats</code>. Secret values live only as Worker secrets — they are never sent to a browser, never logged, never rendered. The private-tool bearer used by <code class="chip-v">roblox_account_*</code> and <code class="chip-v">jev_decide</code> is deliberately not reported publicly.</div></div>',
         { flush: false }) +
     "</div>" +
-    '<div class="grid grid--2" style="margin-top:14px">' +
+    '<div class="grid grid--2" style="margin-top:16px">' +
       panel("Jev decision engine", "cpu",
         '<div class="row">' + (jev.available ? st("ok", "Operational") : st("off", "Not configured")) + (jev.enabled ? st("info", "enabled") : "") + "</div>" +
         '<p class="note" style="margin-top:10px">' + esc(jevDetail) + "</p>" +
@@ -774,7 +1011,7 @@ function routingView() {
         '<p class="note" style="margin-top:10px">' + esc(layaDetail) + "</p>" +
         '<p class="hint">HTTPS-only and SSRF-guarded on every call. Full policy: <code class="chip-v">GET /capabilities/laya</code>.</p>') +
     "</div>" +
-    '<div class="grid grid--2" style="margin-top:14px">' +
+    '<div class="grid grid--2" style="margin-top:16px">' +
       panel("Commands — run in your MCP client", "terminal", '<div class="panel-bd--flush">' + commands + "</div>", { flush: true }) +
       panel("Decision tools", "zap", '<div class="panel-bd--flush">' + dt.map(function (t) { return toolRow(t); }).join("") + "</div>", { flush: true }) +
     "</div>"
@@ -788,28 +1025,26 @@ function robloxView() {
   var r = S.roblox;
   var conf = (r && r.configuration) || {};
   var acc = (r && r.account) || null;
-  // Connect is offered whenever this browser is not linked and the flow could
-  // plausibly work; not-configured / disabled states explain setup instead.
+  /* Connect is offered whenever this browser is not linked and the flow could
+     plausibly work; not-configured / disabled states explain setup instead. */
   var canConnect = (s.l === "Not connected" || s.l === "Authorization required" || s.l === "Insufficient scope" || s.l === "Checking");
 
-  var head = '<div class="hero" style="padding:18px 20px">' +
-    '<div class="hero-main">' +
-      '<div class="eyebrow">Optional external authorization — not a DEMO login</div>' +
-      '<h1 style="font-size:20px;margin:6px 0 6px">Roblox account connection</h1>' +
-      '<div class="row" style="gap:10px">' + st(s.s, s.l) +
-        (acc && acc.username ? '<span class="mono" style="font-size:14px">@' + esc(acc.username) + "</span>" : "") +
-      "</div>" +
-      (s.s === "err" && S.robloxErr ? note(esc(S.robloxErr.message || "Status could not be read.")) : "") +
-      (s.l === "Not configured" && S.robloxErr && S.robloxErr.payload && S.robloxErr.payload.hint ? note("<b>Setup:</b> " + esc(S.robloxErr.payload.hint)) : "") +
-      (s.l === "Insufficient scope" ? note("<b>Missing scope:</b> " + esc(s.missing || "a requested scope") + " is not on the granted token. Reconnect and approve every scope — account tools report <code class=\"chip-v\">scope_required</code> until then.") : "") +
-      (s.l === "Disabled" && conf.disabledReason ? note(esc(conf.disabledReason)) : "") +
-      (s.l === "Not configured" && conf.enabled === false && conf.disabledReason ? note(esc(conf.disabledReason)) : "") +
+  var head = '<div class="panel"><div class="panel-bd">' +
+    '<div class="eyebrow">Optional external authorization — not a DEMO login</div>' +
+    '<h1 style="font-size:20px;margin:8px 0;letter-spacing:-.02em">Roblox account connection</h1>' +
+    '<div class="row" style="gap:10px">' + st(s.s, s.l) +
+      (acc && acc.username ? '<span class="mono" style="font-size:14px">@' + esc(acc.username) + "</span>" : "") +
     "</div>" +
-    '<div class="hero-side">' +
+    (s.s === "err" && S.robloxErr ? note(esc(S.robloxErr.message || "Status could not be read.")) : "") +
+    (s.l === "Not configured" && S.robloxErr && S.robloxErr.payload && S.robloxErr.payload.hint ? note("<b>Setup:</b> " + esc(S.robloxErr.payload.hint)) : "") +
+    (s.l === "Insufficient scope" ? note("<b>Missing scope:</b> " + esc(s.missing || "a requested scope") + " is not on the granted token. Reconnect and approve every scope — account tools report <code class=\"chip-v\">scope_required</code> until then.") : "") +
+    (s.l === "Disabled" && conf.disabledReason ? note(esc(conf.disabledReason)) : "") +
+    (s.l === "Not configured" && conf.enabled === false && conf.disabledReason ? note(esc(conf.disabledReason)) : "") +
+    '<div class="row" style="margin-top:12px">' +
       (s.l === "Connected" ? '<button class="btn btn--danger btn--touch" type="button" data-act="roblox-disconnect">' + ic("x") + "Disconnect</button>" :
         canConnect ? '<button class="btn btn--primary btn--touch" type="button" data-act="roblox-connect">' + ic("external") + "Connect Roblox account</button>" : "") +
       '<button class="btn" type="button" data-act="roblox-refresh">' + ic("refresh") + "Re-check status</button>" +
-    "</div></div>";
+    "</div></div></div>";
 
   var connectNote = "";
   if (canConnect) {
@@ -852,9 +1087,11 @@ function robloxView() {
 
   var rtools = CAT.filter(function (t) { return t.group === "Roblox"; });
 
-  return '<div style="margin-bottom:14px">' + head + "</div>" + connectNote +
-    '<div style="margin-top:14px">' + details + "</div>" +
-    '<div style="margin-top:14px">' + panel("Roblox tools", "game", '<div class="panel-bd--flush">' + rtools.map(function (t) { return toolRow(t); }).join("") + "</div>", { flush: true }) + "</div>";
+  return pageHead("Roblox", "Roblox", "Optional OAuth for your own account — public lookups need nothing at all.") +
+    '<div style="height:16px"></div>' +
+    '<div style="margin-bottom:16px">' + head + "</div>" + connectNote +
+    '<div style="margin-top:16px">' + details + "</div>" +
+    '<div style="margin-top:16px">' + panel("Roblox tools", "game", '<div class="panel-bd--flush">' + rtools.map(function (t) { return toolRow(t); }).join("") + "</div>", { flush: true }) + "</div>";
 }
 
 /* ---------------------------------------------------------------- skills */
@@ -868,12 +1105,14 @@ function skillsView() {
         '<span class="hint">' + esc(sk.note || "") + (sk.license ? " · " + esc(sk.license) : "") + "</span>" +
         (sk.source ? '<a class="btn btn--sm" href="' + esc(sk.source) + '" target="_blank" rel="noreferrer noopener">' + ic("external", 13) + esc(sk.sourceLabel || "source") + "</a>" : "") +
       "</div>");
-  }).join('<div style="height:14px"></div>');
+  }).join('<div style="height:16px"></div>');
 
   var skt = CAT.filter(function (t) { return t.group === "Skills"; });
 
-  return '<div class="grid grid--2">' + cards + "</div>" +
-    '<div style="margin-top:14px">' + panel("skills.sh surface — via MCP tools", "layers",
+  return pageHead("Skills", "Skills", "Bundled skills plus the live skills.sh catalog — text in, guidance out, nothing executed.") +
+    '<div style="height:16px"></div>' +
+    '<div class="grid grid--2">' + cards + "</div>" +
+    '<div style="margin-top:16px">' + panel("skills.sh surface — via MCP tools", "layers",
       '<div class="panel-bd"><p class="note">Live search, browse, retrieval and security audit run through the <b>skills_* tools over /mcp</b> against the public skills.sh catalog. No account, no local install, no execution: skill text is returned for review, and the <code class="chip-v">npx skills add …</code> line is printed, never run.</p>' +
       '<div class="row" style="margin-top:10px"><button class="btn btn--sm" type="button" data-act="skills-tools">' + ic("search", 13) + "Search & browse skills tools</button>" +
       '<span class="hint">' + skt.length + " skill tools · filterable with the live availability of each</span></div></div>" +
@@ -894,28 +1133,27 @@ function aboutView() {
   var info =
     kv("Repository", proj.repoUrl ? '<a href="' + esc(proj.repoUrl) + '" target="_blank" rel="noreferrer noopener">' + esc(proj.repoLabel || proj.repoUrl) + "</a>" : "—") +
     kv("Runtime", '<span class="hint">Cloudflare Workers · Durable Objects · R2 · Browser Rendering · Workers AI</span>') +
-    kv("Version", '<code class="chip-v">' + esc((s1 && s1.version) || VERSION || "—") + "</code>") +
+    kv("Version", '<code class="chip-v">v' + esc((s1 && s1.version) || VERSION || "—") + "</code>") +
     kv("MCP endpoint", '<span class="copy-inline"><code class="chip-v">' + esc(ENDPOINT) + '</code><button class="btn btn--sm" type="button" data-act="copy" data-copy="' + esc(ENDPOINT) + '">' + ic("copy", 13) + "Copy</button></span>") +
     kv("Tools", (s1 ? s1.toolCount : CAT.length) + " registered on /mcp") +
     kv("Docs", (proj.docsTreeUrl ? '<a href="' + esc(proj.docsTreeUrl) + '" target="_blank" rel="noreferrer noopener">docs/ in the repository</a>' : "—") + (proj.readmeUrl ? ' · <a href="' + esc(proj.readmeUrl) + '" target="_blank" rel="noreferrer noopener">README</a>' : ""));
 
   return (
-    '<div class="hero" style="flex-direction:column;gap:10px">' +
-      '<div class="eyebrow">' + esc(proj.name || "DEMO") + "</div>" +
-      "<h1>" + esc(proj.tagline || "The open execution layer") + "</h1>" +
+    '<div class="page-head"><div class="eyebrow">' + esc(proj.name || "DEMO") + "</div>" +
+      "<h1>" + esc(proj.tagline || "Execution infrastructure for AI agents.") + "</h1>" +
       "<p>" + esc(proj.blurb || "") + "</p>" +
-      '<div class="row">' +
+      '<div class="row" style="margin-top:14px">' +
         '<button class="btn btn--primary" type="button" data-act="connect-open">' + ic("plug") + "Connect MCP</button>" +
         (proj.repoUrl ? '<a class="btn" href="' + esc(proj.repoUrl) + '" target="_blank" rel="noreferrer noopener">' + ic("code") + "Source repository</a>" : "") +
         (proj.docsTreeUrl ? '<a class="btn" href="' + esc(proj.docsTreeUrl) + '" target="_blank" rel="noreferrer noopener">' + ic("book") + "Documentation</a>" : "") +
       "</div>" +
     "</div>" +
-    '<div class="grid grid--2" style="margin-top:14px">' +
+    '<div class="grid grid--2" style="margin-top:16px">' +
       panel("Project", "info", '<div class="panel-bd--flush">' + info + "</div>", { flush: true }) +
       panel("Security & privacy", "shield", '<ul class="list">' + priv + "</ul>", { flush: true }) +
     "</div>" +
-    '<div style="margin-top:14px">' + panel("This Worker's routes", "terminal", '<div class="panel-bd--flush">' + routes + "</div>", { flush: true }) + "</div>" +
-    '<div style="margin-top:14px">' + panel("Architecture", "layers",
+    '<div style="margin-top:16px">' + panel("This Worker's routes", "terminal", '<div class="panel-bd--flush">' + routes + "</div>", { flush: true }) + "</div>" +
+    '<div style="margin-top:16px">' + panel("Architecture", "layers",
       '<pre class="codeblock">' + esc(DATA.ARCHITECTURE_TEXT || "") + "</pre>" +
       note("DEMO is open source: read it, self-host it, extend it. The inspector you are using is served by the same Worker as <code class=\"chip-v\">/mcp</code> — one deployment, no separate control plane, no login.")) +
     "</div>"
@@ -925,12 +1163,17 @@ function aboutView() {
 /* --------------------------------------------------------- connect modal */
 
 function connectModalBody() {
-  return '<div class="modal-hd">' + ic("plug") + '<h3 id="connect-title">Connect DEMO</h3>' +
+  return '<div class="modal-hd"><span class="modal-ic">' + ic("plug") + "</span>" +
+    '<div><h3 id="connect-title">Connect DEMO</h3><p class="sub">Add DEMO to your AI client as a remote MCP server.</p></div>' +
     '<button class="btn btn--icon x" type="button" data-act="connect-close" aria-label="Close dialog">' + ic("x") + "</button></div>" +
     '<div class="modal-bd">' +
-      '<p class="modal-instruction">Put this in the AI plugins</p>' +
       '<div class="endpoint"><code id="mcp-endpoint" tabindex="0">' + esc(ENDPOINT) + "</code>" +
       '<button class="btn btn--primary" type="button" id="copy-endpoint" data-act="copy" data-copy="' + esc(ENDPOINT) + '" data-swap="Copied!">' + ic("copy") + "Copy</button></div>" +
+      '<ol class="modal-steps">' +
+        "<li><span class=\"n\">1</span><span>Open your MCP client's server settings and add a remote server.</span></li>" +
+        "<li><span class=\"n\">2</span><span>Paste this URL — prefix it with <code class=\"chip-v\">https://</code> if your client asks for a full URL.</span></li>" +
+        "<li><span class=\"n\">3</span><span>Save. DEMO tools appear in your client immediately.</span></li>" +
+      "</ol>" +
       '<p class="modal-note"><b>No DEMO account required.</b> The endpoint works with any MCP client — no login, no onboarding, nothing to install.</p>' +
     "</div>" +
     '<div class="modal-ft">' + ic("shield") + "<span>Public endpoint · requests go straight to this Worker</span></div>";
@@ -943,13 +1186,14 @@ function paletteItems() {
   var secs = DATA.SECTIONS || [];
   for (var i = 0; i < secs.length; i++) {
     (function (s) {
+      if (s.nav === "hidden") return;
       items.push({ label: s.label, hint: s.blurb || "section", icon: s.icon, run: function () { go(s.id); } });
     })(secs[i]);
   }
   items.push({ label: "Copy MCP endpoint", hint: "clipboard", icon: "copy", run: function () { copyText(ENDPOINT, true); } });
   items.push({ label: "Connect MCP — show dialog", hint: "modal", icon: "plug", run: function () { openConnect(); } });
   items.push({ label: "Refresh telemetry", hint: "re-fetch", icon: "refresh", run: function () { loadCore(true); loadRoblox(true); } });
-  items.push({ label: "Tool explorer", hint: CAT.length + " tools", icon: "search", run: function () { go("tools"); setTimeout(function () { var el = qs("#tool-search"); if (el) el.focus(); }, 60); } });
+  items.push({ label: "Capability explorer", hint: CAT.length + " tools", icon: "search", run: function () { go("capabilities"); setTimeout(function () { var el = qs("#tool-search"); if (el) el.focus(); }, 60); } });
   var cmds = DATA.MCP_COMMANDS || [];
   for (var j = 0; j < cmds.length; j++) {
     (function (cmd) {
@@ -1024,10 +1268,12 @@ function closeOverlays() {
   S.lastFocus = null;
 }
 function openConnect() {
+  setMenu(false);
   S.modalOpen = true;
   openOverlay("#connect-overlay", "#copy-endpoint");
 }
 function openPalette() {
+  setMenu(false);
   S.paletteOpen = true;
   S.pQuery = "";
   S.pSel = 0;
@@ -1052,6 +1298,19 @@ function overlayKeys(ev) {
     if (ev.key === "ArrowDown") { ev.preventDefault(); S.pSel++; renderPalette(); var e1 = qs("#p-opt-" + S.pSel); if (e1 && e1.scrollIntoView) e1.scrollIntoView({ block: "nearest" }); }
     else if (ev.key === "ArrowUp") { ev.preventDefault(); S.pSel = Math.max(0, S.pSel - 1); renderPalette(); var e2 = qs("#p-opt-" + S.pSel); if (e2 && e2.scrollIntoView) e2.scrollIntoView({ block: "nearest" }); }
     else if (ev.key === "Enter") { ev.preventDefault(); runPalette(S.pSel); }
+  }
+}
+
+function setMenu(open) {
+  body().classList.toggle("menu-open", !!open);
+  var btn = qs('[data-act="menu-toggle"]');
+  if (btn) {
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+    btn.setAttribute("aria-label", open ? "Close menu" : "Open menu");
+  }
+  if (open) {
+    var fi = qs("#menu a.mi, #menu button.mi");
+    if (fi) fi.focus();
   }
 }
 
@@ -1107,7 +1366,6 @@ function loadCore(force) {
   ]).then(function () {
     S.core = null;
     renderView();
-    renderShellNav();
   });
   return S.core;
 }
@@ -1127,8 +1385,6 @@ function loadRoblox(force) {
     S.robloxLoading = false;
     S.robloxInflight = false;
     renderView();
-    renderShellNav();
-    renderFoot();
   });
 }
 
@@ -1154,9 +1410,9 @@ document.addEventListener("click", function (ev) {
   var t = ev.target;
   if (!t || !t.closest) return;
 
-  var navLink = t.closest("a[data-route]");
+  var navLink = t.closest('a[href^="#/"]');
   if (navLink) {
-    body().classList.remove("drawer");
+    setMenu(false);
     return;
   }
 
@@ -1170,16 +1426,16 @@ document.addEventListener("click", function (ev) {
   }
   var act = el.getAttribute("data-act");
 
-  if (act === "tools-tab") go("tools");
-  else if (act === "skills-tools") { S.tf.group = "Skills"; S.tf.avail = ""; S.tf.q = ""; go("tools"); }
+  if (act === "tools-tab") go("capabilities");
+  else if (act === "skills-tools") { S.tf.group = "skills"; S.tf.avail = ""; S.tf.q = ""; go("capabilities"); }
   else if (act === "open-tool") {
     var nm = el.getAttribute("data-name");
-    if (S.route !== "tools") {
+    if (S.route !== "tools" && S.route !== "capabilities") {
       S.tf.group = "";
       S.tf.avail = "";
       S.tf.q = "";
       S.openTool = nm;
-      go("tools");
+      go("capabilities");
     } else {
       S.openTool = S.openTool === nm ? null : nm;
       renderView();
@@ -1208,6 +1464,7 @@ document.addEventListener("click", function (ev) {
   else if (act === "connect-close") closeOverlays();
   else if (act === "palette-open") openPalette();
   else if (act === "palette-close") closeOverlays();
+  else if (act === "menu-toggle") setMenu(!body().classList.contains("menu-open"));
   else if (act === "filter-group") {
     S.tf.group = S.tf.group === el.getAttribute("data-g") ? "" : el.getAttribute("data-g");
     renderView();
@@ -1226,16 +1483,6 @@ document.addEventListener("click", function (ev) {
     if (!key || key === "core") { S.core = null; loadCore(true); }
     else { S.lazyErr[key] = null; S.lazy[key] = null; loadLazy(key); }
   }
-  else if (act === "collapse") {
-    body().classList.toggle("rail");
-    try { localStorage.setItem("demo-rail", body().classList.contains("rail") ? "1" : "0"); } catch (e) { /* noop */ }
-  }
-  else if (act === "drawer-open") {
-    body().classList.add("drawer");
-    var fi = qs("#sidebar a");
-    if (fi) fi.focus();
-  }
-  else if (act === "drawer-close") body().classList.remove("drawer");
   else if (act === "roblox-connect") { location.href='/oauth/roblox/start'; }
   else if (act === "roblox-disconnect") {
     el.disabled = true;
@@ -1260,7 +1507,7 @@ document.addEventListener("input", function (ev) {
   if (!el) return;
   if (el.id === "tool-search") {
     S.tf.q = el.value;
-    // scoped update: keep the input (focus, caret, mobile keyboard) alive
+    /* scoped update: keep the input (focus, caret, mobile keyboard) alive */
     var rowsBox = qs("#tool-rows");
     if (rowsBox) rowsBox.innerHTML = toolsRowsHtml();
     else { renderView(); return; }
@@ -1282,8 +1529,8 @@ document.addEventListener("keydown", function (ev) {
     ev.preventDefault();
     if (S.paletteOpen) closeOverlays();
     else openPalette();
-  } else if (ev.key === "Escape" && !S.modalOpen && !S.paletteOpen && body().classList.contains("drawer")) {
-    body().classList.remove("drawer");
+  } else if (ev.key === "Escape" && !S.modalOpen && !S.paletteOpen && body().classList.contains("menu-open")) {
+    setMenu(false);
   }
 });
 
@@ -1303,9 +1550,6 @@ function enterRoute() {
 }
 
 function boot() {
-  try {
-    if (localStorage.getItem("demo-rail") === "1" && window.matchMedia && window.matchMedia("(min-width: 901px)").matches) body().classList.add("rail");
-  } catch (e) { /* noop */ }
   S.route = routeFromHash();
   renderShell();
   renderView();
