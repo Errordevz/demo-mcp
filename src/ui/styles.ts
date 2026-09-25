@@ -402,6 +402,56 @@ button.trow:hover { background: var(--surface-2) }
 .modal-note { margin-top: 14px; font-size: var(--fs-12); color: var(--faint); line-height: 1.6 }
 .modal-note b { color: var(--dim); font-weight: 600 }
 
+/* connect dialog ---------------------------------------------------------- */
+.connect-modal { width: min(560px, 100%); max-height: min(720px, calc(100dvh - 40px)) }
+.connect-modal .modal-hd > div { min-width: 0; flex: 1 }
+.connect-pane { animation: connect-in var(--t-med) }
+@keyframes connect-in { from { opacity: 0; transform: translateY(4px) } to { opacity: 1; transform: none } }
+.prov-list { display: flex; flex-direction: column; gap: 2px }
+.prov {
+  display: grid; grid-template-columns: 36px minmax(0, 1fr) 16px; gap: 10px; align-items: center;
+  width: 100%; text-align: left; background: transparent; border: 1px solid transparent;
+  border-radius: var(--r-md); padding: 8px 8px; cursor: pointer; color: inherit; min-height: 52px;
+}
+.prov:hover, .prov:focus-visible { background: var(--surface-2); border-color: var(--border); text-decoration: none }
+.prov-mark {
+  width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center;
+  background: var(--surface-3); border: 1px solid var(--border-2); color: var(--text);
+}
+.prov-mark svg { width: 16px; height: 16px }
+.prov-txt { min-width: 0 }
+.prov-name { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: var(--fs-14); font-weight: 650; letter-spacing: -.01em; line-height: 1.25 }
+.prov-sum { display: block; margin-top: 1px; font-size: var(--fs-12); color: var(--faint); line-height: 1.35 }
+.prov-chev { color: var(--faint) }
+.prov-chev svg { width: 14px; height: 14px }
+.pill {
+  font-size: 10px; letter-spacing: .04em; text-transform: uppercase; font-weight: 650;
+  color: var(--faint); border: 1px solid var(--border-2); border-radius: 999px; padding: 1px 7px; white-space: nowrap;
+}
+.pill--verified { color: var(--accent-strong); border-color: color-mix(in srgb, var(--accent) 40%, var(--border-2)) }
+.endpoint-label { margin: 0 0 6px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); font-weight: 650 }
+.connect-meta { margin: 0 0 12px; font-size: var(--fs-12); color: var(--faint); line-height: 1.45 }
+.connect-callout { margin: 12px 0 0; font-size: var(--fs-13); color: var(--dim); line-height: 1.5 }
+.connect-actions { display: flex; flex-direction: column; gap: 8px; margin-top: 14px }
+.connect-actions .btn { width: 100% }
+.connect-status { margin: 10px 0 0; font-size: var(--fs-12); color: var(--dim); line-height: 1.5 }
+.connect-status:empty { display: none }
+.connect-config { margin-top: 12px; background: var(--bg-deep); border: 1px solid var(--border-2); border-radius: var(--r-md); overflow: hidden }
+.connect-config-hd { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: var(--fs-12); color: var(--dim) }
+.connect-config pre {
+  margin: 0; padding: 10px 12px; overflow-x: auto; font-family: var(--mono); font-size: 11.5px;
+  line-height: 1.5; color: var(--text); white-space: pre-wrap; word-break: break-word;
+}
+.connect-notes { margin: 12px 0 0; padding: 0 0 0 18px; color: var(--faint); font-size: var(--fs-12); line-height: 1.55 }
+.connect-notes li + li { margin-top: 4px }
+.connect-links { display: flex; flex-wrap: wrap; gap: 8px 14px; margin-top: 14px; font-size: var(--fs-12) }
+.connect-links a { display: inline-flex; align-items: center; gap: 4px }
+.connect-links svg { width: 12px; height: 12px }
+.connect-ft { flex-wrap: wrap }
+.connect-ft-note { display: flex; align-items: flex-start; gap: 6px; flex: 1 1 220px; min-width: 0; line-height: 1.4 }
+.connect-ft-note svg { flex: none; margin-top: 1px }
+.connect-ft-url { font-family: var(--mono); font-size: 11px; color: var(--dim); word-break: break-all; flex: 1 1 180px; min-width: 0 }
+
 /* command palette --------------------------------------------------------- */
 .palette {
   width: min(600px, 100%); background: var(--surface); border: 1px solid var(--border-2); border-radius: var(--r-lg);
@@ -487,6 +537,10 @@ kbd { font-family: var(--mono); font-size: 10.5px; color: var(--dim); background
   .endpoint code { font-size: 12.5px; padding: 4px 2px; white-space: normal }
   .endpoint .btn { justify-content: center; min-height: 44px }
   .btn--touch, .modal .btn { min-height: 44px }
+  .connect-modal { padding-bottom: env(safe-area-inset-bottom) }
+  .connect-modal .btn--icon { width: 44px; min-height: 44px }
+  .connect-config-hd .btn, .connect-links a { min-height: 44px }
+  .prov { min-height: 56px }
   .modal-bd { padding: 14px 14px 16px }
   .modal-hd { padding: 16px 14px 0 }
   .modal-ft { padding: 11px 14px }
