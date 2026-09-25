@@ -163,14 +163,20 @@ describe("inspector UI — served document contract", () => {
   it("surfaces the Connect MCP dialog with the exact public endpoint and no login", () => {
     expect(MCP_ENDPOINT).toBe("demo-mcp.amidevz.workers.dev/mcp");
     expect(html).toContain(MCP_ENDPOINT);
+    expect(html).toContain(`https://${MCP_ENDPOINT}`);
     expect(html).toContain("Connect MCP");
     expect(html).toContain("Connect DEMO");
-    expect(html).toContain("Add DEMO to your AI client as a remote MCP server.");
+    expect(html).toContain("Choose where you want to connect DEMO.");
     expect(html).toContain("No DEMO account required.");
     expect(html).toContain("Copied!");
-    // No invented auth surface.
+    expect(html).toContain("This dialog never confirms a connection.");
+    // No invented auth surface, and no invented client URL schemes.
     expect(html.toLowerCase()).not.toContain("create account");
     expect(html.toLowerCase()).not.toContain("sign up");
+    expect(html).not.toContain('href="chatgpt://');
+    expect(html).not.toContain('href="claude://');
+    expect(html).not.toContain('href="claude-cli://');
+    expect(html).not.toMatch(/connected successfully|connection succeeded|installation complete/i);
   });
 
   it("advertises the no-login stance and the full navigation", () => {
@@ -208,15 +214,68 @@ describe("inspector UI — rendered against stub routes", () => {
     expect(doc.getElementById("view")?.textContent).toContain("9.9.9-test");
     expect(doc.querySelector(".foot")?.textContent).toContain(`${TOOL_CATALOG.length} tools`);
 
-    // Connect MCP dialog: open → endpoint shown → copy swaps → Esc closes.
+    // Connect MCP: picker → verified handoff → manual fallback → copy → Esc.
     (doc.querySelector('[data-act="connect-open"]') as HTMLElement | null)?.click();
     await flush();
     const overlay = doc.getElementById("connect-overlay") as (HTMLElement & { hidden: boolean }) | null;
     expect(overlay && !overlay.hidden).toBe(true);
-    expect(doc.getElementById("mcp-endpoint")?.textContent).toBe("demo-mcp.amidevz.workers.dev/mcp");
+    expect(doc.getElementById("connect-title")?.textContent).toBe("Connect DEMO");
+    expect(doc.getElementById("connect-sub")?.textContent).toBe("Choose where you want to connect DEMO.");
+    expect(doc.querySelectorAll(".prov").length).toBe(6);
+    const providers = [...doc.querySelectorAll(".prov")] as HTMLElement[];
+    expect(doc.activeElement).toBe(providers[0]);
+    doc.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    expect(doc.activeElement).toBe(providers[1]);
+    doc.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Home", bubbles: true }));
+    expect(doc.activeElement).toBe(providers[0]);
+    expect(doc.getElementById("mcp-endpoint")?.textContent).toBe("https://demo-mcp.amidevz.workers.dev/mcp");
     (doc.getElementById("copy-endpoint") as HTMLElement | null)?.click();
     await flush();
     expect(doc.getElementById("copy-endpoint")?.textContent).toContain("Copied!");
+
+    const pick = (id: string) => {
+      (doc.querySelector(`.prov[data-client="${id}"]`) as HTMLElement).click();
+    };
+    pick("chatgpt");
+    expect(doc.getElementById("connect-title")?.textContent).toBe("Connect DEMO to ChatGPT?");
+    expect(doc.getElementById("connect-sub")?.textContent).toBe("You're about to connect DEMO as a remote MCP server in ChatGPT.");
+    const chatgpt = doc.getElementById("connect-primary");
+    expect(chatgpt?.getAttribute("href")).toBe("https://chatgpt.com/plugins");
+    expect(chatgpt?.getAttribute("target")).toBe("_blank");
+    expect(chatgpt?.getAttribute("rel")).toBe("noreferrer noopener");
+    expect(doc.getElementById("connect-overlay")?.textContent).not.toMatch(/confirmation dialog will appear/i);
+    (doc.querySelector('[data-act="connect-back"]') as HTMLElement).click();
+    expect(doc.getElementById("connect-title")?.textContent).toBe("Connect DEMO");
+
+    pick("claude");
+    const claudeHref = doc.getElementById("connect-primary")?.getAttribute("href") ?? "";
+    expect(claudeHref).toContain("https://claude.ai/customize/connectors?");
+    expect(claudeHref).toContain("modal=add-custom-connector");
+    expect(claudeHref).toContain("connectorUrl=https%3A%2F%2Fdemo-mcp.amidevz.workers.dev%2Fmcp");
+    expect(doc.getElementById("connect-primary")?.getAttribute("target")).toBe("_blank");
+    (doc.querySelector('[data-act="connect-back"]') as HTMLElement).click();
+
+    pick("cursor");
+    const cursor = doc.getElementById("connect-primary");
+    expect(cursor?.getAttribute("href")).toMatch(/^cursor:\/\/anysphere\.cursor-deeplink\/mcp\/install\?/);
+    expect(cursor?.hasAttribute("target")).toBe(false);
+    expect(cursor?.hasAttribute("rel")).toBe(false);
+    (doc.querySelector('[data-act="connect-back"]') as HTMLElement).click();
+
+    pick("vscode");
+    const vscode = doc.getElementById("connect-primary");
+    expect(vscode?.getAttribute("href")).toMatch(/^vscode:mcp\/install\?/);
+    expect(vscode?.hasAttribute("target")).toBe(false);
+    const insiders = [...doc.querySelectorAll("a")].find((a) => (a.getAttribute("href") ?? "").startsWith("vscode-insiders:"));
+    expect(insiders?.hasAttribute("target")).toBe(false);
+    (doc.querySelector('[data-act="connect-back"]') as HTMLElement).click();
+
+    pick("other");
+    expect(doc.getElementById("connect-title")?.textContent).toBe("Connect DEMO to your MCP-compatible client.");
+    expect(doc.getElementById("mcp-endpoint")?.textContent).toBe("https://demo-mcp.amidevz.workers.dev/mcp");
+    expect(doc.getElementById("copy-endpoint")?.textContent).toContain("Copy endpoint");
+    expect(doc.getElementById("connect-overlay")?.textContent).not.toMatch(/connected successfully|connection succeeded/i);
+
     dom.window.document.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     await flush();
     expect(overlay?.hidden).toBe(true);

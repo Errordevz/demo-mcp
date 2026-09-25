@@ -66,9 +66,14 @@ Overview hero with live status, six capability categories, a searchable tool
 explorer (`#/capabilities`, with the legacy `#/tools` route kept working), a
 dedicated System Status page (`#/status`), in-depth Browser/Video/Research/
 Routing/Roblox/Skills/About sections, a command palette (`Ctrl/⌘+K`), a
-mobile menu, a polished 404 for unknown routes, and a **Connect MCP** dialog
-that reveals and copies the public endpoint
-`demo-mcp.amidevz.workers.dev/mcp`.
+mobile menu, a polished 404 for unknown routes, and a **Connect MCP** dialog.
+That dialog launches only verified official handoffs: Claude's documented
+custom-connector install link, Cursor's `cursor://` MCP install deeplink, and
+VS Code's `vscode:mcp/install` URL. ChatGPT opens the documented Plugins page
+(`https://chatgpt.com/plugins`) — OpenAI does not document a prefilled install
+URL. Claude Code and any other client get the documented command or a copyable
+endpoint. The public URL is `https://demo-mcp.amidevz.workers.dev/mcp`. See
+`docs/CONNECT-MCP.md`.
 
 The UI is dark-first with a light theme following the OS preference, built on
 design tokens in `src/ui/styles.ts` (no UI framework, no external requests).

@@ -27,6 +27,9 @@ var CAT = BOOT.catalog || [];
 var GROUPS = BOOT.groups || [];
 var DATA = BOOT.data || {};
 var ENDPOINT = BOOT.endpoint || "";
+var SERVER_URL = BOOT.serverUrl || (ENDPOINT ? "https://" + ENDPOINT : "");
+var CONNECT = BOOT.connect || { title: "Connect DEMO", subtitle: "Choose where you want to connect DEMO." };
+var CLIENTS = BOOT.clients || [];
 var VERSION = BOOT.version || "";
 var HINTS = DATA.AVAILABILITY_HINTS || {};
 var CATS = DATA.CAPABILITY_CATEGORIES || [];
@@ -41,7 +44,8 @@ var S = {
   tf: { q: "", group: "", avail: "" },
   expandedPlatforms: {},
   core: null,
-  modalOpen: false, paletteOpen: false, lastFocus: null, pSel: 0, pQuery: "", pItems: []
+  modalOpen: false, paletteOpen: false, lastFocus: null, pSel: 0, pQuery: "", pItems: [],
+  connectId: "", connectNote: ""
 };
 
 var LAZY_ROUTES = {
@@ -119,6 +123,10 @@ var ICONS = {
   zap: ["M13 2L4.5 13.5H11L10 22l8.5-11.5H12z"],
   info: ["M12 21a9 9 0 1 1 0-18 9 9 0 0 1 0 18z", "M12 11v5", "M12 8h.01"],
   plug: ["M9 7V3", "M15 7V3", "M7 7h10v3a5 5 0 0 1-10 0z", "M12 15v6"],
+  chevL: ["M15 6l-6 6 6 6"],
+  bubble: ["M5 6.5A3.5 3.5 0 0 1 8.5 3h7A3.5 3.5 0 0 1 19 6.5v6A3.5 3.5 0 0 1 15.5 16H12l-3.5 3.5V16H8.5A3.5 3.5 0 0 1 5 12.5z"],
+  spark: ["M12 2.8l1.7 5.1 5.3.2-4.2 3.3 1.5 5.1L12 13.8 7.7 16.5l1.5-5.1L5 8.1l5.3-.2z"],
+  pointer: ["M5.5 3.5l12 8.5-6.2.8-2.4 5.7z"],
   copy: ["M9 9h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2V11a2 2 0 0 1 2-2z", "M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"],
   check: ["M20 6L9 17l-5-5"],
   checkc: ["M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z", "M8.5 12.5l2.5 2.5 5-5.5"],
@@ -372,7 +380,7 @@ function renderShell() {
       '<main id="main" class="content" tabindex="-1"><div id="view"></div></main>' +
       '<footer class="foot"><div class="foot-in" id="foot"></div></footer>' +
     "</div>" +
-    '<div class="overlay" id="connect-overlay" hidden><div class="modal" role="dialog" aria-modal="true" aria-labelledby="connect-title">' + connectModalBody() + "</div></div>" +
+    '<div class="overlay" id="connect-overlay" hidden><div class="modal connect-modal" role="dialog" aria-modal="true" aria-labelledby="connect-title" aria-describedby="connect-sub"><div id="connect-root">' + connectHtml() + "</div></div></div>" +
     '<div class="overlay" id="palette-overlay" hidden><div class="palette" role="dialog" aria-modal="true" aria-label="Command palette">' + paletteBody() + "</div></div>" +
     '<div class="toasts" id="toasts" role="status" aria-live="polite"></div>';
 }
@@ -1161,22 +1169,194 @@ function aboutView() {
 }
 
 /* --------------------------------------------------------- connect modal */
+/*
+ * Provider URLs come only from BOOT.clients (src/ui/mcp-clients.ts).
+ * This script does not invent schemes or query parameters.
+ */
 
-function connectModalBody() {
-  return '<div class="modal-hd"><span class="modal-ic">' + ic("plug") + "</span>" +
-    '<div><h3 id="connect-title">Connect DEMO</h3><p class="sub">Add DEMO to your AI client as a remote MCP server.</p></div>' +
-    '<button class="btn btn--icon x" type="button" data-act="connect-close" aria-label="Close dialog">' + ic("x") + "</button></div>" +
-    '<div class="modal-bd">' +
-      '<div class="endpoint"><code id="mcp-endpoint" tabindex="0">' + esc(ENDPOINT) + "</code>" +
-      '<button class="btn btn--primary" type="button" id="copy-endpoint" data-act="copy" data-copy="' + esc(ENDPOINT) + '" data-swap="Copied!">' + ic("copy") + "Copy</button></div>" +
-      '<ol class="modal-steps">' +
-        "<li><span class=\"n\">1</span><span>Open your MCP client's server settings and add a remote server.</span></li>" +
-        "<li><span class=\"n\">2</span><span>Paste this URL — prefix it with <code class=\"chip-v\">https://</code> if your client asks for a full URL.</span></li>" +
-        "<li><span class=\"n\">3</span><span>Save. DEMO tools appear in your client immediately.</span></li>" +
-      "</ol>" +
-      '<p class="modal-note"><b>No DEMO account required.</b> The endpoint works with any MCP client — no login, no onboarding, nothing to install.</p>' +
+function clientById(id) {
+  for (var i = 0; i < CLIENTS.length; i++) if (CLIENTS[i].id === id) return CLIENTS[i];
+  return null;
+}
+function safeHref(url) {
+  if (!url) return "";
+  if (url.indexOf("https://") === 0) return url;
+  if (url.indexOf("cursor://anysphere.cursor-deeplink/mcp/install?") === 0) return url;
+  if (url.indexOf("vscode:mcp/install?") === 0) return url;
+  if (url.indexOf("vscode-insiders:mcp/install?") === 0) return url;
+  return "";
+}
+function pillClass(method) {
+  if (method === "direct-prefill" || method === "direct-install") return "pill pill--verified";
+  if (method === "official-screen") return "pill";
+  return "pill pill--manual";
+}
+function connectHeader(title, sub, back) {
+  var lead = back
+    ? '<button class="btn btn--icon" type="button" data-act="connect-back" aria-label="Back to clients">' + ic("chevL") + "</button>"
+    : '<span class="modal-ic">' + ic("plug") + "</span>";
+  return '<div class="modal-hd">' + lead +
+    '<div><h3 id="connect-title">' + esc(title) + '</h3><p class="sub" id="connect-sub">' + esc(sub) + "</p></div>" +
+    '<button class="btn btn--icon x" type="button" data-act="connect-close" aria-label="Close dialog">' + ic("x") + "</button></div>";
+}
+function connectFooter(withUrl) {
+  var extra = "";
+  if (withUrl) {
+    extra = '<code id="mcp-endpoint" class="connect-ft-url">' + esc(SERVER_URL) + "</code>" +
+      '<button class="btn btn--sm" type="button" id="copy-endpoint" data-act="copy" data-copy="' + esc(SERVER_URL) + '" data-swap="Copied!">' + ic("copy", 13) + "Copy</button>";
+  }
+  return '<div class="modal-ft connect-ft"><span class="connect-ft-note">' + ic("shield") + "<span>No DEMO account required. This dialog never confirms a connection.</span></span>" + extra + "</div>";
+}
+function endpointBlock(primary) {
+  var cls = primary ? "btn btn--primary" : "btn";
+  return '<p class="endpoint-label">DEMO MCP</p>' +
+    '<div class="endpoint"><code id="mcp-endpoint" tabindex="0">' + esc(SERVER_URL) + "</code>" +
+    '<button class="' + cls + '" type="button" id="copy-endpoint" data-act="copy" data-copy="' + esc(SERVER_URL) + '" data-swap="Copied!">' + ic("copy") + "Copy endpoint</button></div>";
+}
+function stepsHtml(steps) {
+  if (!steps || !steps.length) return "";
+  var html = '<ol class="modal-steps">';
+  for (var i = 0; i < steps.length; i++) {
+    html += '<li><span class="n">' + (i + 1) + "</span><span>" + esc(steps[i]) + "</span></li>";
+  }
+  return html + "</ol>";
+}
+function limitsHtml(items) {
+  if (!items || !items.length) return "";
+  var html = '<ul class="connect-notes">';
+  for (var i = 0; i < items.length; i++) html += "<li>" + esc(items[i]) + "</li>";
+  return html + "</ul>";
+}
+function snippetBlock(title, body, copyLabel) {
+  if (!body) return "";
+  return '<div class="connect-config"><div class="connect-config-hd"><span>' + esc(title) + "</span>" +
+    '<button class="btn btn--sm" type="button" data-act="copy" data-copy="' + esc(body) + '" data-swap="Copied!">' + ic("copy", 13) + esc(copyLabel) + "</button></div>" +
+    "<pre>" + esc(body) + "</pre></div>";
+}
+function metaLine(c) {
+  var parts = [];
+  var plats = c.platforms || [];
+  for (var i = 0; i < plats.length; i++) parts.push(plats[i]);
+  parts.push("Streamable HTTP");
+  parts.push("No authentication");
+  return parts.join(" · ");
+}
+function providerButton(c) {
+  return '<button class="prov" type="button" data-act="connect-pick" data-client="' + esc(c.id) + '" aria-label="' + esc(c.name + ". " + c.badge + ". " + c.summary) + '">' +
+    '<span class="prov-mark">' + ic(c.icon || "plug") + "</span>" +
+    '<span class="prov-txt"><span class="prov-name">' + esc(c.name) + ' <span class="' + pillClass(c.method) + '">' + esc(c.badge) + "</span></span>" +
+    '<span class="prov-sum">' + esc(c.summary) + "</span></span>" +
+    '<span class="prov-chev" aria-hidden="true">' + ic("chev", 14) + "</span></button>";
+}
+function launchAnchor(c) {
+  var href = safeHref(c.connectionUrl);
+  if (!href) return "";
+  var app = c.connectionOpensIn === "app";
+  var aria = c.actionLabel + (app ? ", opens the app" : ", opens in a new tab");
+  var extra = app ? "" : ' target="_blank" rel="noreferrer noopener"';
+  return '<a class="btn btn--primary" id="connect-primary" data-act="connect-launch" data-protocol="' + (app ? "1" : "0") + '" href="' + esc(href) + '"' + extra + ' aria-label="' + esc(aria) + '">' +
+    esc(c.actionLabel) + (app ? "" : ic("external")) + "</a>";
+}
+function linksHtml(c) {
+  var html = '<div class="connect-links">';
+  var any = false;
+  if (c.documentationUrl) {
+    any = true;
+    var docs = safeHref(c.documentationUrl);
+    if (docs) html += '<a href="' + esc(docs) + '" target="_blank" rel="noreferrer noopener">' + ic("book", 12) + "Official documentation" + ic("external", 12) + "</a>";
+  }
+  var alts = c.alternates || [];
+  for (var i = 0; i < alts.length; i++) {
+    any = true;
+    var a = alts[i];
+    var app = a.kind === "app";
+    var href = safeHref(a.url);
+    if (!href) continue;
+    html += '<a href="' + esc(href) + '"' +
+      (app
+        ? ' data-act="connect-launch" data-protocol="1"'
+        : ' target="_blank" rel="noreferrer noopener"') + ">" +
+      esc(a.label) + (app ? "" : ic("external", 12)) + "</a>";
+  }
+  if (!any) return "";
+  return html + "</div>";
+}
+function pickerHtml() {
+  var title = CONNECT.title || "Connect DEMO";
+  var sub = CONNECT.subtitle || "Choose where you want to connect DEMO.";
+  var body = "";
+  if (!CLIENTS.length) {
+    body = '<p class="connect-callout">Client list unavailable. Copy the endpoint and add it manually.</p>' + endpointBlock(true);
+  } else {
+    body = '<div class="prov-list" role="group" aria-label="Choose where you want to connect DEMO">';
+    for (var i = 0; i < CLIENTS.length; i++) body += providerButton(CLIENTS[i]);
+    body += "</div>";
+  }
+  return connectHeader(title, sub, false) +
+    '<div class="modal-bd connect-pane" id="connect-panel">' + body + "</div>" +
+    connectFooter(!CLIENTS.length ? false : true);
+}
+function confirmHtml(c) {
+  var copyIsPrimary = c.method === "manual" && !c.manualCommand;
+  var actions = "";
+  var launch = c.connectionUrl ? launchAnchor(c) : "";
+  if (launch || c.manualCommand || (c.connectionUrl && c.connectionOpensIn === "app")) {
+    actions = '<div class="connect-actions">';
+    if (launch) actions += launch;
+    if (c.connectionOpensIn === "app" && safeHref(c.connectionUrl)) {
+      actions += '<button class="btn" type="button" data-act="copy" data-copy="' + esc(c.connectionUrl) + '" data-swap="Copied!">' + ic("copy") + "Copy install link</button>";
+    }
+    if (!launch && c.manualCommand) {
+      actions += '<button class="btn btn--primary" type="button" id="connect-primary" data-act="copy" data-copy="' + esc(c.manualCommand) + '" data-swap="Copied!">' + ic("copy") + esc(c.actionLabel || "Copy command") + "</button>";
+    }
+    actions += "</div>";
+  }
+  return connectHeader(c.confirmTitle, c.confirmBody, true) +
+    '<div class="modal-bd connect-pane" id="connect-panel">' +
+      '<p class="connect-meta">' + esc(metaLine(c)) + "</p>" +
+      endpointBlock(copyIsPrimary) +
+      (c.callout ? '<p class="connect-callout">' + esc(c.callout) + "</p>" : "") +
+      actions +
+      '<p id="connect-status" class="connect-status" role="status" aria-live="polite"></p>' +
+      stepsHtml(c.steps) +
+      snippetBlock(c.manualCommand ? "Terminal" : "", c.manualCommand, "Copy") +
+      snippetBlock(c.manualConfigTitle || "Configuration", c.manualConfig, "Copy") +
+      limitsHtml(c.limitations) +
+      linksHtml(c) +
     "</div>" +
-    '<div class="modal-ft">' + ic("shield") + "<span>Public endpoint · requests go straight to this Worker</span></div>";
+    connectFooter(false);
+}
+function connectHtml() {
+  var client = S.connectId ? clientById(S.connectId) : null;
+  if (S.connectId && !client) S.connectId = "";
+  if (!client) return pickerHtml();
+  return confirmHtml(client);
+}
+function renderConnect() {
+  var root = qs("#connect-root");
+  if (root) root.innerHTML = connectHtml();
+}
+function focusClient(id) {
+  var btn = id ? qs('.prov[data-client="' + id + '"]') : null;
+  if (btn) btn.focus();
+  else {
+    var first = qs(".prov");
+    if (first) first.focus();
+  }
+}
+function showClient(id) {
+  S.connectId = id;
+  S.connectNote = "";
+  renderConnect();
+  var back = qs('[data-act="connect-back"]');
+  if (back) back.focus();
+}
+function backToClients() {
+  var id = S.connectId;
+  S.connectId = "";
+  S.connectNote = "";
+  renderConnect();
+  focusClient(id);
 }
 
 /* ------------------------------------------------------- command palette */
@@ -1190,7 +1370,7 @@ function paletteItems() {
       items.push({ label: s.label, hint: s.blurb || "section", icon: s.icon, run: function () { go(s.id); } });
     })(secs[i]);
   }
-  items.push({ label: "Copy MCP endpoint", hint: "clipboard", icon: "copy", run: function () { copyText(ENDPOINT, true); } });
+  items.push({ label: "Copy MCP endpoint", hint: "https URL", icon: "copy", run: function () { copyText(SERVER_URL || ENDPOINT, true); } });
   items.push({ label: "Connect MCP — show dialog", hint: "modal", icon: "plug", run: function () { openConnect(); } });
   items.push({ label: "Refresh telemetry", hint: "re-fetch", icon: "refresh", run: function () { loadCore(true); loadRoblox(true); } });
   items.push({ label: "Capability explorer", hint: CAT.length + " tools", icon: "search", run: function () { go("capabilities"); setTimeout(function () { var el = qs("#tool-search"); if (el) el.focus(); }, 60); } });
@@ -1270,7 +1450,10 @@ function closeOverlays() {
 function openConnect() {
   setMenu(false);
   S.modalOpen = true;
-  openOverlay("#connect-overlay", "#copy-endpoint");
+  S.connectId = "";
+  S.connectNote = "";
+  renderConnect();
+  openOverlay("#connect-overlay", ".prov, #copy-endpoint");
 }
 function openPalette() {
   setMenu(false);
@@ -1293,6 +1476,21 @@ function overlayKeys(ev) {
     if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last.focus(); }
     else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus(); }
     return;
+  }
+  if (S.modalOpen && !S.paletteOpen && (ev.key === "ArrowDown" || ev.key === "ArrowUp" || ev.key === "Home" || ev.key === "End")) {
+    var provs = qsa(".prov", qs("#connect-overlay"));
+    var idx = -1;
+    for (var pi = 0; pi < provs.length; pi++) if (provs[pi] === document.activeElement) idx = pi;
+    if (idx !== -1) {
+      ev.preventDefault();
+      var next = idx;
+      if (ev.key === "ArrowDown") next = Math.min(provs.length - 1, idx + 1);
+      else if (ev.key === "ArrowUp") next = Math.max(0, idx - 1);
+      else if (ev.key === "Home") next = 0;
+      else next = provs.length - 1;
+      provs[next].focus();
+      return;
+    }
   }
   if (S.paletteOpen) {
     if (ev.key === "ArrowDown") { ev.preventDefault(); S.pSel++; renderPalette(); var e1 = qs("#p-opt-" + S.pSel); if (e1 && e1.scrollIntoView) e1.scrollIntoView({ block: "nearest" }); }
@@ -1462,6 +1660,16 @@ document.addEventListener("click", function (ev) {
   }
   else if (act === "connect-open") openConnect();
   else if (act === "connect-close") closeOverlays();
+  else if (act === "connect-pick") showClient(el.getAttribute("data-client") || "");
+  else if (act === "connect-back") backToClients();
+  else if (act === "connect-launch") {
+    var note = qs("#connect-status");
+    var protocol = el.getAttribute("data-protocol") === "1";
+    var msg = protocol
+      ? "If the app did not open, it is not installed or this browser blocked the link. Use the manual setup below. DEMO cannot tell whether it launched."
+      : "Finish in the new tab. DEMO cannot tell whether you approved the connection.";
+    if (note) note.textContent = msg;
+  }
   else if (act === "palette-open") openPalette();
   else if (act === "palette-close") closeOverlays();
   else if (act === "menu-toggle") setMenu(!body().classList.contains("menu-open"));

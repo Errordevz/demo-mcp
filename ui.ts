@@ -34,6 +34,7 @@ import {
   ARCHITECTURE_TEXT,
   AVAILABILITY_HINTS,
 } from "./src/ui/content.js";
+import { CONNECT_PICKER, MCP_SERVER_URL, connectClientPayload } from "./src/ui/mcp-clients.js";
 
 /** UI build stamp — safe to expose; contains no secret values. */
 const VERSION = "0.9.0";
@@ -46,6 +47,9 @@ function bootPayload(): string {
   const json = JSON.stringify({
     version: VERSION,
     endpoint: MCP_ENDPOINT,
+    serverUrl: MCP_SERVER_URL,
+    connect: CONNECT_PICKER,
+    clients: connectClientPayload(),
     catalog: TOOL_CATALOG,
     groups: TOOL_GROUPS,
     data: {
