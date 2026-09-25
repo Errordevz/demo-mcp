@@ -26,6 +26,15 @@ which exists independently of the skill.
 LLM, and DEMO never asks it to produce prose, code or tool calls. It is only ever asked to
 choose among options DEMO enumerated in code.
 
+**A note on routing.** Jev remains exactly this — but it is no longer the only provider
+behind these templates. If an operator configures a **Laya** server (`LAYA_BASE_URL`,
+see [`LAYA.md`](LAYA.md)), a decision in the default `auto` mode asks Laya first and falls
+back to Jev on any provider failure (timeout, 5xx, 429, malformed or out-of-set answer,
+guard-blocked endpoint). `DECISION_PROVIDER_MODE=jev` or a per-call `provider: "jev"` on
+`jev_decide` pins the pre-Laya behaviour bit-for-bit. Every outcome's `source` field
+(`"laya"` / `"jev"` / `"rules"`) says which engine really answered — nothing in the Jev
+path claims a decision Jev did not make.
+
 ---
 
 ## 2. The API contract this integration implements

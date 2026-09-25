@@ -97,13 +97,21 @@ const JEV_VARS: Record<string, string> = {
   TYPESAFE_ACCEPT_THRESHOLD: "0.7",
 };
 
+/** Laya decision-provider policy. The endpoint and credential must never appear here. */
+const LAYA_VARS: Record<string, string> = {
+  LAYA_ENABLED: "true",
+  LAYA_TIMEOUT_MS: "2500",
+  LAYA_MODEL: "laya-latest",
+  DECISION_PROVIDER_MODE: "auto",
+};
+
 describe("wrangler.jsonc", () => {
   it("declares every required browser/video variable exactly once, with the documented string value", async () => {
     const source = await readFile(path.join(ROOT, "wrangler.jsonc"), "utf8");
     const data = await config();
     expect(typeof data.vars).toBe("object");
 
-    for (const [name, value] of Object.entries({ ...REQUIRED_VARS, ...JEV_VARS, ...EXPANSION_VARS })) {
+    for (const [name, value] of Object.entries({ ...REQUIRED_VARS, ...JEV_VARS, ...LAYA_VARS, ...EXPANSION_VARS })) {
       const occurrences = [...source.matchAll(new RegExp(`"${name}"\\s*:`, "g"))].length;
       expect(occurrences, `${name} must be declared exactly once`).toBe(1);
       // Strings, not numbers/booleans: the code parses them with its own coercion, and
@@ -118,10 +126,14 @@ describe("wrangler.jsonc", () => {
     expect(credentialShaped).toEqual([]);
     // …while still documenting them, so a reader cannot conclude they are forgotten.
     const source = await readFile(path.join(ROOT, "wrangler.jsonc"), "utf8");
-    for (const name of ["DEMO_API_KEY", "ROBLOX_CLIENT_SECRET", "ROBLOX_TOKEN_KEY", "TYPESAFE_API_KEY"]) {
+    for (const name of ["DEMO_API_KEY", "ROBLOX_CLIENT_SECRET", "ROBLOX_TOKEN_KEY", "TYPESAFE_API_KEY", "LAYA_API_KEY"]) {
       expect(source).toContain(name);
     }
     expect(source).not.toMatch(/TYPESAFE_API_KEY"\s*:/);
+    expect(source).not.toMatch(/LAYA_API_KEY"\s*:/);
+    // The Laya endpoint is per-deployment infrastructure: documented, never defaulted.
+    expect(source).toContain("LAYA_BASE_URL");
+    expect(source).not.toMatch(/LAYA_BASE_URL"\s*:/);
     expect(source).not.toMatch(/"sk-[A-Za-z0-9_-]{16,}"/);
   });
 
@@ -146,7 +158,7 @@ describe("wrangler.jsonc", () => {
   it("only declares variables the code actually reads, and reads the flags it declares", async () => {
     const data = await config();
     const readers = await Promise.all(
-      ["index.ts", "platform-entry.ts", "src/session/factory.ts", "src/video/processor.ts", "src/video/capabilities.ts", "src/jev/config.ts", "src/roblox/config.ts", "src/git/config.ts", "src/core/rate-limit.ts", "src/web/storage.ts", "src/web/monitor.ts"].map((file) =>
+      ["index.ts", "platform-entry.ts", "src/session/factory.ts", "src/video/processor.ts", "src/video/capabilities.ts", "src/jev/config.ts", "src/laya/config.ts", "src/decisions/provider.ts", "src/roblox/config.ts", "src/git/config.ts", "src/core/rate-limit.ts", "src/web/storage.ts", "src/web/monitor.ts"].map((file) =>
         readFile(path.join(ROOT, file), "utf8"),
       ),
     );
@@ -166,6 +178,16 @@ describe("wrangler.jsonc", () => {
     // The engine is on by policy but inert without a secret, so deploying this file
     // cannot start paid calls or break anything.
     expect(data.vars.TYPESAFE_ENABLED).toBe("true");
+  });
+
+  it("declares exactly the Laya policy the code reads, and nothing that points anywhere by default", async () => {
+    const data = await config();
+    const laya = Object.keys(data.vars as Record<string, unknown>).filter((name) => name.startsWith("LAYA_") || name === "DECISION_PROVIDER_MODE");
+    expect(laya.sort()).toEqual(Object.keys(LAYA_VARS).sort());
+    // On by policy but inert without LAYA_BASE_URL, which is never committed:
+    // deploying this file cannot send a single byte to an undeclared endpoint.
+    expect(data.vars.LAYA_ENABLED).toBe("true");
+    expect(data.vars.DECISION_PROVIDER_MODE).toBe("auto");
   });
 
 /**

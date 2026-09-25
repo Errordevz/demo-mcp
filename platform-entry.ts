@@ -1,5 +1,7 @@
 import demoWorker, { TOOL_COUNT } from "./index";
 import { resolveJevConfig } from "./src/jev/config.js";
+import { resolveLayaConfig } from "./src/laya/config.js";
+import { resolveDecisionRoutingMode } from "./src/decisions/provider.js";
 import { demoUi } from "./ui";
 import { handleRobloxOAuthRoute, isRobloxOAuthPath } from "./src/roblox/routes.js";
 import { SessionManager } from "./src/session/manager.js";
@@ -46,6 +48,13 @@ type Env = {
   TYPESAFE_DECISION_TIMEOUT_MS?: string | number;
   TYPESAFE_REVIEW_THRESHOLD?: string | number;
   TYPESAFE_ACCEPT_THRESHOLD?: string | number;
+  /** Laya decision provider: external server; optional credential is a secret, never a var. */
+  LAYA_ENABLED?: string;
+  LAYA_BASE_URL?: string;
+  LAYA_API_KEY?: string;
+  LAYA_TIMEOUT_MS?: string | number;
+  LAYA_MODEL?: string;
+  DECISION_PROVIDER_MODE?: string;
   /** DEMO 0.9 expanded capability policy (non-secret). */
   GIT_MAX_PACK_MB?: string;
   GIT_REQUEST_TIMEOUT_MS?: string;
@@ -129,6 +138,26 @@ function jevSurface(env: Env) {
   };
 }
 
+/**
+ * Laya decision-provider surface for telemetry: presence and policy only. The
+ * endpoint is reported as a hostname, the optional credential as a boolean — never
+ * a value, and never a credential-shaped string in this payload.
+ */
+function layaSurface(env: Env) {
+  const config = resolveLayaConfig(env as unknown as Record<string, unknown>);
+  return {
+    available: config.available,
+    enabled: config.enabled,
+    configured: config.configured,
+    credentialConfigured: config.credentialConfigured,
+    model: config.model,
+    endpointHost: config.endpointHost,
+    httpsOnly: true,
+    routingMode: resolveDecisionRoutingMode(env as unknown as Record<string, unknown>),
+    reason: config.available ? null : (config.disabledReason ?? "Laya is not configured on this Worker."),
+  };
+}
+
 function robloxSurface(env: Env) {
   const clientId = String(env.ROBLOX_CLIENT_ID ?? "").trim();
   const secret = String(env.ROBLOX_CLIENT_SECRET ?? "").trim();
@@ -193,7 +222,8 @@ function telemetry(env: Env) {
       composio: false,
       robloxOAuth: robloxSurface(env),
       jevDecisionEngine: jevSurface(env),
-      typedDecisions: jevSurface(env).available,
+      layaDecisionProvider: layaSurface(env),
+      typedDecisions: jevSurface(env).available || layaSurface(env).available,
       youtube: youtubeSurface(env),
       expanded: {
         git: true,
@@ -221,6 +251,7 @@ function telemetry(env: Env) {
       { name: "Roblox OAuth", type: "Roblox Open Cloud (official OAuth 2.0)", connected: robloxSurface(env).configured },
       { name: "Roblox session store", type: "Durable Object (RobloxAuth)", connected: robloxSurface(env).storage === "durable-object" },
       { name: "TypeSafe Jev", type: "Structured decision engine (HTTP API)", connected: jevSurface(env).available },
+      { name: "Laya", type: "External typed-decision provider (HTTP API)", connected: layaSurface(env).available },
       { name: "YouTube Data API", type: "Public metadata (Data API v3)", connected: youtubeSurface(env).available },
       { name: "Git (smart HTTP)", type: "Public repositories, no API key", connected: true },
       { name: "Internet Archive", type: "Wayback + archive.org public APIs", connected: true },
@@ -236,6 +267,7 @@ function telemetry(env: Env) {
       screenshots: "/screenshots/:id",
       robloxOAuth: "/oauth/roblox/{start,callback,logout,status}",
       jevCapabilities: "/capabilities/jev",
+      layaCapabilities: "/capabilities/laya",
       youtubeCapabilities: "/capabilities/youtube",
       expandedCapabilities: "/capabilities/expanded",
     },

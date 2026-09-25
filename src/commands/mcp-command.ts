@@ -17,6 +17,8 @@ import type { ToolResult } from "../mcp/results.js";
 import type { CommandHandler } from "./router.js";
 import { resolveYouTubeConfig } from "../youtube/config.js";
 import { resolveJevConfig } from "../jev/config.js";
+import { resolveLayaConfig } from "../laya/config.js";
+import { resolveDecisionRoutingMode } from "../decisions/provider.js";
 
 interface McpCommandDeps {
   version: string;
@@ -60,6 +62,7 @@ function groupTools(toolNames: readonly string[]): Record<string, string[]> {
     YouTube: [],
     Roblox: [],
     JEV: [],
+    Laya: [],
     Skills: [],
     Git: [],
     "Internet Archive": [],
@@ -84,6 +87,8 @@ function groupTools(toolNames: readonly string[]): Record<string, string[]> {
       groups.Roblox.push(name);
     } else if (name.startsWith("jev_")) {
       groups.JEV.push(name);
+    } else if (name.startsWith("laya_")) {
+      groups.Laya.push(name);
     } else if (name.startsWith("skills_") || name.startsWith("skill_")) {
       groups.Skills.push(name);
     } else if (name === "git_repository") {
@@ -165,6 +170,13 @@ function subsystemHealth(env: Record<string, unknown>): Record<string, { status:
     detail: jevConfig.available ? `TypeSafe ${jevConfig.model} configured` : (jevConfig.disabledReason ?? "Not configured"),
   };
 
+  // Laya (external typed-decision provider)
+  const layaConfig = resolveLayaConfig(env);
+  health.Laya = {
+    status: layaConfig.available ? "online" : "limited",
+    detail: layaConfig.available ? `Laya ${layaConfig.model} at ${layaConfig.endpointHost ?? "configured host"}` : (layaConfig.disabledReason ?? "Not configured"),
+  };
+
   // DEMO 0.9 expanded capabilities (public read-only; presence only).
   health["Public Git"] = { status: "online", detail: "Public repositories over Git smart-HTTP (no API key; private repos refused)" };
   health["Internet Archive"] = { status: "online", detail: "Wayback + archive.org public APIs (no key)" };
@@ -200,6 +212,11 @@ export function createMcpCommand(deps: McpCommandDeps): CommandHandler {
         status: statusEmoji(status),
         version: deps.version,
         capabilities: buildCapabilitiesList(env),
+        decision_routing: {
+          mode: resolveDecisionRoutingMode(env),
+          chain: "auto: Laya → Jev (TypeSafe) → DEMO deterministic rules",
+          safety: "Typed-decision providers are advisory only; DEMO's permissions, confirmations and security policy stay authoritative.",
+        },
         tools: toolGroups,
         tool_count: deps.toolNames.length,
         commands: deps.commands.map((cmd) => ({
@@ -229,6 +246,7 @@ function buildCapabilitiesList(env: Record<string, unknown>): string[] {
   const robloxSecret = String(env.ROBLOX_CLIENT_SECRET ?? "").trim();
   if (robloxClientId && robloxSecret) caps.push("Roblox");
   if (resolveJevConfig(env).available) caps.push("JEV");
+  if (resolveLayaConfig(env).available) caps.push("Laya");
   caps.push(
     "HTTP fetching", "JSON utilities", "Hashing", "UUID generation",
     "Public Git (no API key)", "Internet Archive / Wayback", "RSS / Atom feeds",

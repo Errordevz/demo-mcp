@@ -60,6 +60,8 @@
     //   ROBLOX_CLIENT_SECRET  — Roblox OAuth app secret (ROBLOX_CLIENT_ID may be a var)
     //   ROBLOX_TOKEN_KEY      — 32+ random bytes; encrypts tokens at rest
     //   TYPESAFE_API_KEY      — TypeSafe/Jev decision API key
+    //   LAYA_API_KEY          — optional Laya decision-server credential (only when
+    //                           the configured Laya server requires a bearer)
     //   YOUTUBE_API_KEY       — YouTube Data API v3 key for public YouTube operations
     //   TRANSCRIPTION_API_KEY — optional external speech-to-text provider
     "DEMO_PLATFORM_ORIGIN": "https://demo-platform.pages.dev",
@@ -103,6 +105,24 @@
     // applied with a review flag; at or above `accept` it is applied quietly.
     "TYPESAFE_REVIEW_THRESHOLD": "0.5",
     "TYPESAFE_ACCEPT_THRESHOLD": "0.7",
+
+    // ── Laya decision provider (external System One server) ──────────────────
+    // Policy only. Laya is an EXTERNAL typed-decision server that speaks the same
+    // Jev-compatible API (POST /v1/systemone); DEMO never hosts, runs or bundles
+    // the Laya model. The endpoint itself (LAYA_BASE_URL) is deliberately NOT set
+    // here: it is per-deployment infrastructure, set it in the dashboard or your
+    // own wrangler overrides. LAYA_API_KEY is optional (some Laya servers are
+    // unauthenticated) and must be a *secret* (`wrangler secret put LAYA_API_KEY`) —
+    // it is intentionally absent here: a committed credential is a leaked one.
+    // The configured endpoint passes DEMO's full SSRF guard (https only, no
+    // private/metadata targets, DNS-checked) on every call, and Laya answers are
+    // advisory only — they can never authorize tools or bypass DEMO's checks.
+    "LAYA_ENABLED": "true",
+    // Without LAYA_BASE_URL the provider stays off and nothing here costs anything.
+    "LAYA_TIMEOUT_MS": "2500",
+    "LAYA_MODEL": "laya-latest",
+    // Typed-decision routing: auto (Laya → Jev → deterministic fallback) | laya | jev.
+    "DECISION_PROVIDER_MODE": "auto",
 
     // Optional Workers AI model ids (only used when the AI binding exists).
     // VIDEO_VISION_MODEL is also reused for PDF OCR + image describe/OCR.
