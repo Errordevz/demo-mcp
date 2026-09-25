@@ -18,6 +18,10 @@ import { ROBLOX_CAPABILITIES_URI } from "./src/roblox/capabilities.js";
 import { registerJevTools, JEV_TOOL_NAMES, jevCapabilitiesReport } from "./src/mcp/jev-tools.js";
 import { JEV_CAPABILITIES_URI } from "./src/jev/capabilities.js";
 import { jevFlags, type JevEnv } from "./src/jev/config.js";
+import { registerLayaTools, LAYA_TOOL_NAMES, layaCapabilitiesReport } from "./src/mcp/laya-tools.js";
+import { LAYA_CAPABILITIES_URI } from "./src/laya/capabilities.js";
+import { layaFlags, type LayaEnv } from "./src/laya/config.js";
+import { resolveDecisionRoutingMode } from "./src/decisions/provider.js";
 import type { RobloxAuthEnv } from "./src/roblox/types.js";
 import { VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI, registerVideoResources, videoStatusFlags } from "./src/mcp/video-resources.js";
 import { describeVideoCapabilities } from "./src/video/capabilities.js";
@@ -37,8 +41,11 @@ import { youTubeFlags, type YouTubeEnv } from "./src/youtube/config.js";
 import { registerCommand, routeCommand, listCommands } from "./src/commands/router.js";
 import { createMcpCommand } from "./src/commands/mcp-command.js";
 import { createJevCommand } from "./src/commands/jev-command.js";
+import { createLayaCommand } from "./src/commands/laya-command.js";
 
-type Env = SessionManagerEnv & VideoEnv & RobloxAuthEnv & JevEnv & YouTubeEnv & {
+type Env = SessionManagerEnv & VideoEnv & RobloxAuthEnv & JevEnv & LayaEnv & YouTubeEnv & {
+  /** Typed-decision routing mode: auto | laya | jev (default auto). */
+  DECISION_PROVIDER_MODE?: string;
   DEMO_API_KEY?: string;
   SSRF_GUARD_HTTP_FETCH?: string;
   /** DEMO 0.9 expanded capability policy (non-secret). */
@@ -294,6 +301,8 @@ function server(env: Env, requestUrl: string | null = null, authorization: strin
         provider: capabilities.provider,
         ...robloxFlags(env),
         ...jevFlags(env as unknown as Record<string, unknown>),
+        ...layaFlags(env as unknown as Record<string, unknown>),
+        decisionRoutingMode: resolveDecisionRoutingMode(env as unknown as Record<string, unknown>),
         ...youTubeFlags(env as unknown as Record<string, unknown>),
         ...gitFlags(env as unknown as Record<string, unknown>),
         expanded: expandedCapabilitiesReport(env as unknown as Record<string, unknown>, { version: VERSION, browserAvailable: capabilities.browserAvailable }),
@@ -570,6 +579,10 @@ function server(env: Env, requestUrl: string | null = null, authorization: strin
 
   registerJevTools(mcp, { env: env as unknown as Record<string, unknown>, requestUrl, authorization });
 
+  /* --------------------------- Laya decision provider (external server) */
+
+  registerLayaTools(mcp, { env: env as unknown as Record<string, unknown>, requestUrl });
+
   /* ---------------------------------------------- public YouTube Data API v3 */
 
   registerYouTubeTools(mcp, { env: env as unknown as Record<string, unknown> & YouTubeEnv, requestUrl });
@@ -811,6 +824,8 @@ export const DEMO_TOOL_NAMES = [
   "skill_builtin_typesafe",
   // Jev decision engine (TypeSafe)
   ...JEV_TOOL_NAMES,
+  // Laya decision provider (external System One server)
+  ...LAYA_TOOL_NAMES,
   // Public YouTube Data API v3
   ...YOUTUBE_TOOL_NAMES,
   // DEMO 0.9 capability expansion (public, read-only)
@@ -845,23 +860,27 @@ export default {
       ...video,
       ...robloxFlags(env),
       ...jevFlags(env as unknown as Record<string, unknown>),
+      ...layaFlags(env as unknown as Record<string, unknown>),
+      decisionRoutingMode: resolveDecisionRoutingMode(env as unknown as Record<string, unknown>),
       ...youTubeFlags(env as unknown as Record<string, unknown>),
       ...gitFlags(env as unknown as Record<string, unknown>),
       expandedCapabilities: true,
       skillsSh: true,
       composio: false,
       toolCount: TOOL_COUNT,
-      resources: [VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI, ROBLOX_CAPABILITIES_URI, JEV_CAPABILITIES_URI, YOUTUBE_CAPABILITIES_URI, EXPANDED_CAPABILITIES_URI],
+      resources: [VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI, ROBLOX_CAPABILITIES_URI, JEV_CAPABILITIES_URI, LAYA_CAPABILITIES_URI, YOUTUBE_CAPABILITIES_URI, EXPANDED_CAPABILITIES_URI],
     };
-    // Register commands for the /mcp and /jev command system
+    // Register commands for the /mcp, /jev and /laya command system
     registerCommand(createMcpCommand({ version: VERSION, toolNames: DEMO_TOOL_NAMES, commands: listCommands() }));
     registerCommand(createJevCommand());
+    registerCommand(createLayaCommand());
     const headers = securityHeaders();
     if (url.pathname === "/") return Response.json({ ...status, capabilities }, { headers });
     if (url.pathname === "/health") return Response.json({ ok: true, ...status }, { headers });
     if (url.pathname === "/tools") return Response.json({ count: TOOL_COUNT, tools: DEMO_TOOL_NAMES, resources: [VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI, YOUTUBE_CAPABILITIES_URI, EXPANDED_CAPABILITIES_URI] }, { headers });
     if (url.pathname === "/capabilities/expanded") return Response.json(expandedCapabilitiesReport(env as unknown as Record<string, unknown>, { version: VERSION, browserAvailable: capabilities.browserAvailable }), { headers });
     if (url.pathname === "/capabilities/jev") return Response.json(jevCapabilitiesReport(env as unknown as Record<string, unknown>), { headers });
+    if (url.pathname === "/capabilities/laya") return Response.json(layaCapabilitiesReport(env as unknown as Record<string, unknown>), { headers });
     if (url.pathname === "/capabilities/youtube") return Response.json(youTubeCapabilitiesReport(env as unknown as Record<string, unknown>), { headers });
     if (url.pathname === "/capabilities/video") {
       return Response.json(describeVideoCapabilities(env as Env & Record<string, unknown>, browserCapabilitiesFor(env, request.url)), { headers });

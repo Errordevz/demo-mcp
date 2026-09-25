@@ -21,6 +21,9 @@ import { redactValue, safeLog } from "../core/redact.js";
 import { bearerCredentialMatches } from "../core/credential.js";
 import { resolveJevConfig } from "../jev/config.js";
 import { decideResultReview, decideToolRoute, resolveVideoIntentWithJev, RESULT_REVIEW_LEVELS, VIDEO_FOCUS_CRITERIA, type DecisionOutcome, type JevDecisionContext } from "../jev/decisions.js";
+import { resolveDecisionRoutingMode } from "../decisions/provider.js";
+import { DECISION_ROUTING_MODES } from "../decisions/provider.js";
+import type { DecisionRoutingMode } from "../decisions/types.js";
 import { detectVideoIntent } from "../video/intent.js";
 import { describeJevCapabilities, JEV_CAPABILITIES_URI, JEV_SCHEMA } from "../jev/capabilities.js";
 import { listJevModels } from "../jev/client.js";
@@ -37,8 +40,8 @@ export interface JevToolContext {
   authorization?: string | null;
 }
 
-function jevContext(ctx: JevToolContext): JevDecisionContext {
-  return { env: ctx.env };
+function jevContext(ctx: JevToolContext, mode?: DecisionRoutingMode): JevDecisionContext {
+  return { env: ctx.env, ...(mode ? { mode } : {}) };
 }
 
 /**
@@ -114,7 +117,7 @@ export function registerJevTools(mcp: McpServer, ctx: JevToolContext): void {
     {
       title: "Ask Jev for a Typed Decision",
       description:
-        "Run one of DEMO's predefined TypeSafe/Jev decision templates over the text you supply and return the typed answer with its probabilities, confidence and how DEMO's policy treated it. Choices are limited to the options in code: this is a judgment primitive, not a chat model, and it cannot call tools or authorize anything. Returns the deterministic fallback with policy `unavailable_fallback` when TypeSafe is not configured or fails.",
+        "Run one of DEMO's predefined typed-decision templates (TypeSafe/Jev and/or Laya, per the provider argument and DECISION_PROVIDER_MODE) over the text you supply and return the typed answer with its probabilities, confidence and how DEMO's policy treated it. Choices are limited to the options in code: this is a judgment primitive, not a chat model, and it cannot call tools or authorize anything. Returns the deterministic fallback with policy `unavailable_fallback` when no provider is configured or every provider fails.",
       annotations: {
         title: "Ask Jev for a Typed Decision",
         readOnlyHint: true,
@@ -129,14 +132,21 @@ export function registerJevTools(mcp: McpServer, ctx: JevToolContext): void {
         request: z.string().max(4_000).optional().describe("The user's own words. Required for tool_route and video_intent_focus. Capped and redacted before it leaves the Worker; never sent as an instruction, only as state."),
         result: z.string().max(4_000).optional().describe("For result_review: the result text or JSON a person would otherwise have to skim."),
         evidence: z.string().max(4_000).optional().describe("For result_review: the evidence the result claims to rest on, so the judgment can compare the two."),
+        provider: z.enum(DECISION_ROUTING_MODES).optional().describe(
+          "Which typed-decision provider to ask. auto (default): Laya first when configured, then Jev, then the deterministic fallback. laya: only the external Laya server — an unavailable Laya is reported, never faked. jev: only the existing TypeSafe/Jev integration. Overrides DECISION_PROVIDER_MODE for this call.",
+        ),
       },
     },
-    async ({ decision, request, result, evidence }) => {
+    async ({ decision, request, result, evidence, provider }) => {
       const blocked = await guardPaidEndpoint(ctx);
       if (blocked) return blocked;
       return run(async () => {
-        const jev = jevContext(ctx);
+        const jev = jevContext(ctx, provider);
         const config = resolveJevConfig(ctx.env);
+        const routingExtra = {
+          requestedProvider: provider ?? "auto",
+          effectiveRoutingMode: resolveDecisionRoutingMode(ctx.env, provider ?? null),
+        };
         if (decision === "result_review") {
           if (!result) throw new Error("result is required for the result_review decision.");
           const outcome = await decideResultReview(jev, {
@@ -146,6 +156,7 @@ export function registerJevTools(mcp: McpServer, ctx: JevToolContext): void {
           });
           return decisionPayload(outcome, {
             decisionTemplate: "result_review",
+            ...routingExtra,
             thresholdsNote: `Levels 0-${RESULT_REVIEW_LEVELS.length - 1} map to ${["no_review", "flag_for_review", "hold_for_review"].join(" / ")}. A hold never blocks anything: it reports that a person should look.`,
           });
         }
@@ -155,6 +166,7 @@ export function registerJevTools(mcp: McpServer, ctx: JevToolContext): void {
           const resolved = await resolveVideoIntentWithJev(jev, { userIntent: request }, deterministic);
           return decisionPayload(resolved.decision ?? noDecision(config, "video_intent_focus"), {
             decisionTemplate: "video_intent_focus",
+            ...routingExtra,
             rulesFocus: deterministic.focus,
             resolvedFocus: resolved.intent.focus,
             resolvedReactionMode: resolved.intent.reactionMode,
@@ -162,7 +174,7 @@ export function registerJevTools(mcp: McpServer, ctx: JevToolContext): void {
           });
         }
         const outcome = await decideToolRoute(jev, request);
-        return decisionPayload(outcome, { decisionTemplate: "tool_route", suggestedToolFamilies: outcome.notSupported ? [] : [outcome.decision] });
+        return decisionPayload(outcome, { decisionTemplate: "tool_route", ...routingExtra, suggestedToolFamilies: outcome.notSupported ? [] : [outcome.decision] });
       });
     },
   );

@@ -27,6 +27,7 @@ DEMO MCP Worker  ─────────────────────
         ├── /oauth/roblox/*   Roblox OAuth 2.0 + PKCE (state, callback, status, logout)
         │        └── RobloxAuth Durable Object (encrypted tokens, single-use state)│
         ├── /capabilities/jev  Jev decision-engine report (presence + policy only)
+        ├── /capabilities/laya Laya decision-provider report (presence + policy only)
         ├── /                    inspector UI (demoUi asset)   │
         └── skills.sh (remote)                                 │
                                                               │
@@ -40,7 +41,9 @@ DEMO MCP Worker  ─────────────────────
         ├── MediaInspector       metadata + rendered video frame sampling
         ├── VideoPipeline         safe resolve/download/audio/transcript orchestration
         ├── JevDecisionEngine     TypeSafe structured decisions (advisory, opt-in)
-        └── UrlGuard             SSRF protection
+        ├── LayaDecisionProvider  external Laya typed-decision server (advisory, opt-in)
+        │        └── DecisionRouter  auto: Laya → Jev → deterministic fallback
+        └── UrlGuard             SSRF protection (applies to LAYA_BASE_URL too)
 ```
 
 Two independent browser layers live side by side:
@@ -529,6 +532,27 @@ Guarantees:
   identified as bot traffic, so some pages will block it regardless of what we
   do — the tools report that rather than hiding it.
 
+## Typed Decision Providers (Laya + Jev/TypeSafe)
+
+DEMO can ask a **typed decision provider** for narrow structured judgments inside its
+workflows. Two providers exist behind one routing chain, and a provider is a **decision
+capability, not a chat model**: it produces no user-facing prose, it is not selectable in
+any model picker, it cannot name a tool to run, and it cannot satisfy or skip a permission
+check.
+
+* **Laya** — an external, operator-hosted decision server speaking the Jev-compatible
+  `POST /v1/systemone` API. DEMO never hosts, runs or bundles the Laya model; without
+  `LAYA_BASE_URL` the provider is simply off. The configured endpoint passes the full
+  SSRF guard on every call. Full contract: [`docs/LAYA.md`](docs/LAYA.md).
+* **Jev (TypeSafe)** — the pinned vendor integration. The full contract, every question,
+  the thresholds and the fallback matrix live in [`docs/JEV.md`](docs/JEV.md).
+
+Routing (`DECISION_PROVIDER_MODE`, or per-call `provider` on `jev_decide`): `auto` asks
+Laya, then Jev, then falls back to DEMO's deterministic rules; `laya` or `jev` pin the
+decision to that provider with an explicit, honest error if it is unavailable — never a
+fabricated success. Every outcome reports `source: "laya" | "jev" | "rules"` and says who
+failed before the provider that answered.
+
 ## Jev Decision Engine (TypeSafe)
 
 DEMO can ask **Jev** — TypeSafe's System One decision model — for narrow typed judgments
@@ -539,8 +563,9 @@ thresholds and the fallback matrix live in [`docs/JEV.md`](docs/JEV.md).
 
 | Tool | What it does |
 | --- | --- |
-| `jev_decide` | Run one of the **three decision templates defined in code** (`tool_route`, `result_review`, `video_intent_focus`) over bounded state and return the typed answer with its `probabilities`, the `certainty` the model reported, the `policy` band DEMO applied, and DEMO's own deterministic value alongside. Refuses caller-supplied instructions or option sets, and requires the existing `DEMO_API_KEY` bearer on the tool call — an open endpoint must not be able to spend your API quota. |
+| `jev_decide` | Run one of the **three decision templates defined in code** (`tool_route`, `result_review`, `video_intent_focus`) over bounded state and return the typed answer with its `probabilities`, the `certainty` the model reported, the `policy` band DEMO applied, and DEMO's own deterministic value alongside. Accepts an optional `provider` (`auto`/`laya`/`jev`) to steer the routing chain; the result reports `source` plus `requestedProvider`/`effectiveRoutingMode` so nothing pretends. Refuses caller-supplied instructions or option sets, and requires the existing `DEMO_API_KEY` bearer on the tool call — an open endpoint must not be able to spend your API quota. |
 | `jev_capabilities` | Live report: configured/enabled state, model id, thresholds, limits, the templates, documented status codes, and what this is *not*. Presence-only — it never reads or echoes the credential, and it names no endpoint the operator can redirect. |
+| `laya_capabilities` | Live report for the Laya decision provider: enabled/configured state, endpoint **hostname only**, model, routing mode and chain, reliability budgets, SSRF guarantees and what this is *not*. Presence-only — the optional credential is reported as `credentialConfigured`, never a value, and the variable name stays out of runtime output (see `.env.example`). The `/laya` command adds operator status, a live `/laya check` probe and `/laya mode`. |
 | `skill_builtin_typesafe` | The bundled TypeSafe guidance note for a connected AI, same shape as `skill_builtin_caveman`. Documentation only: DEMO does not install or execute skill code. |
 
 One workflow calls it automatically, and only as a tie-breaker: `inspect_video` asks Jev to
@@ -625,6 +650,12 @@ Variables (all optional):
 | `TYPESAFE_DECISION_TIMEOUT_MS` | `2500` | Per-request budget (250–15 000 ms). Past it the decision is abandoned and the fallback used, never queued. |
 | `TYPESAFE_REVIEW_THRESHOLD` / `TYPESAFE_ACCEPT_THRESHOLD` | `0.5` / `0.7` | Confidence bands: below review → recorded but not acted on; between → applied with `requiresReview`; at or above accept → applied. `accept` is clamped to `≥ review`. Validate both on your own traffic. |
 | `TYPESAFE_API_KEY` | *(unset = engine off)* | TypeSafe key. **Worker secret only** — never a `vars` value, never in a URL, log, tool result or error message. |
+| `LAYA_ENABLED` | `true` (inert without `LAYA_BASE_URL`) | Laya decision-provider switch. `false`/`0`/`off`/`no` removes the provider with **zero network traffic**. |
+| `LAYA_BASE_URL` | *(unset = provider off)* | Public https origin (+ optional path prefix) of an external Laya server (`POST <LAYA_BASE_URL>/v1/systemone`). Not a secret; SSRF-guarded on every call — no loopback/private/metadata targets, no infrastructure ports, no embedded credentials. |
+| `LAYA_API_KEY` | *(unset = unauthenticated server)* | Optional Laya credential. **Worker secret only** — sent as exactly one `Authorization: Bearer …` header; never in a URL, log, error, tool result or status surface. |
+| `LAYA_TIMEOUT_MS` | `2500` | Laya per-request budget (250–15 000 ms). Past it the decision is abandoned and the chain continues, never queued. |
+| `LAYA_MODEL` | `laya-latest` | The `model` id sent to the Laya server. |
+| `DECISION_PROVIDER_MODE` | `auto` | Typed-decision routing: `auto` (Laya → Jev → deterministic fallback) / `laya` / `jev`. Overridable per call via `jev_decide`'s `provider`. |
 
 `AI` and `VIDEO_ARTIFACTS` are optional bindings. The current deployment reuses
 `SCREENSHOTS` for temporary video artifacts so adding these bindings is not
@@ -666,7 +697,10 @@ DEMO reports these limits through `browser_capabilities` and surfaces
   though `/mcp` transport is public.
 * **Structured decisions** — the TypeSafe key is a Worker secret read at call time, never
   stored on a config object, never in a URL or result, and the API origin is pinned in code.
-  Jev answers only from option sets DEMO enumerated in code; an out-of-set answer is rejected
+  The optional Laya credential gets the same treatment, and its configurable endpoint is
+  re-checked against the SSRF guard on every call; a hostile Laya server echoing the key
+  back still can't smuggle it into DEMO's errors or logs (pinned by tests). Both providers
+  answer only from option sets DEMO enumerated in code; an out-of-set answer is rejected
   rather than mapped, and no decision can widen a limit, skip a confirmation or enable a tool.
 * **Auth separation** — `/mcp` transport is public. Existing private-tool checks
   and Roblox OAuth remain enforced; all tools remain registered.

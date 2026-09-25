@@ -17,22 +17,34 @@
  * 5. **A decision never authorizes anything.** It cannot grant a permission, skip a
  *    confirmation, unlock a gated tool or make a destructive action permitted; it can
  *    only *add* review flags on top of DEMO's existing checks.
+ *
+ * Provider routing: the questions here are answered through `src/decisions/router.ts`,
+ * which picks a typed-decision provider per the deployment's routing mode
+ * (`DECISION_PROVIDER_MODE` or a per-call override): Laya first in `auto` mode when
+ * configured, then TypeSafe/Jev, then the deterministic fallback. The templates,
+ * thresholds and policy in this file are identical for every provider.
  */
 
 import { redactText } from "../core/redact.js";
 import type { DetectedIntent, IntentFocus, IntentInput } from "../video/intent.js";
 import { analysisHintFor } from "../video/intent.js";
-import { askJev, type JevAnswer, type JevQuestionSpec } from "./client.js";
+import { askRoutedDecision, anyProviderAvailable, describeFailover, describeRoutedMiss, type RoutedAsk } from "../decisions/router.js";
+import { resolveDecisionRoutingMode } from "../decisions/provider.js";
+import type { DecisionRoutingMode } from "../decisions/types.js";
+import type { JevAnswer, JevQuestionSpec } from "./client.js";
 import { resolveJevConfig, type JevConfig } from "./config.js";
 import { BrowserError } from "../core/errors.js";
 
 export interface JevDecisionContext {
   env: Record<string, unknown> | undefined;
   config?: JevConfig;
+  /** Per-call routing override ("auto" | "laya" | "jev"). Defaults to the
+   *  deployment's DECISION_PROVIDER_MODE, then "auto". */
+  mode?: DecisionRoutingMode;
   fetchImpl?: (input: string, init?: Record<string, unknown>) => Promise<Response>;
 }
 
-export type DecisionSource = "jev" | "rules" | "explicit";
+export type DecisionSource = "jev" | "laya" | "rules" | "explicit";
 export type DecisionPolicy = "applied" | "applied_with_review" | "low_confidence_fallback" | "unavailable_fallback" | "not_applicable";
 
 export interface DecisionOutcome {
@@ -153,6 +165,7 @@ function errorNote(error: unknown): string {
  */
 export async function runDecision(ctx: JevDecisionContext, options: AskOptions): Promise<EngineResult> {
   const config = ctx.config ?? resolveJevConfig(ctx.env);
+  const mode = resolveDecisionRoutingMode(ctx.env, ctx.mode ?? null);
   const thresholds = { review: config.reviewThreshold, accept: config.acceptThreshold };
   const base = {
     template: options.template,
@@ -187,13 +200,9 @@ export async function runDecision(ctx: JevDecisionContext, options: AskOptions):
     },
   });
 
-  if (!config.available) return fallback("unavailable_fallback", config.disabledReason);
-
-  let result: Awaited<ReturnType<typeof askJev>>;
+  let routed: RoutedAsk;
   try {
-    result = await askJev({
-      config,
-      apiKey: typeof ctx.env?.TYPESAFE_API_KEY === "string" ? ctx.env.TYPESAFE_API_KEY : "",
+    routed = await askRoutedDecision(ctx.env, mode, {
       state: options.state,
       questions: options.questions,
       ...(ctx.fetchImpl ? { fetchImpl: ctx.fetchImpl } : {}),
@@ -201,10 +210,17 @@ export async function runDecision(ctx: JevDecisionContext, options: AskOptions):
   } catch (error) {
     return fallback("unavailable_fallback", errorNote(error));
   }
+  if (routed.kind !== "answered") {
+    return fallback("unavailable_fallback", describeRoutedMiss(routed));
+  }
+  const result = routed.result;
+  const provider = routed.provider;
+  const providerLabel = routed.label;
+  const failoverNote = describeFailover(routed);
 
   const choice = result.answers.primary;
   if (!choice || choice.type !== "choice") {
-    return fallback("unavailable_fallback", "TypeSafe did not return a Choice answer for this decision.", {
+    return fallback("unavailable_fallback", `${providerLabel} did not return a Choice answer for this decision.`, {
       model: result.model,
       usage: { input: result.usage.inputTokens, output: result.usage.outputTokens },
       attempts: result.attempts,
@@ -226,7 +242,7 @@ export async function runDecision(ctx: JevDecisionContext, options: AskOptions):
   if (mapped === null) {
     // An answer outside the allowed set was already rejected by the client; this is
     // the belt-and-braces path. Report it rather than guessing.
-    return fallback("low_confidence_fallback", `TypeSafe selected "${redactText(choice.choice, 40)}", which this decision does not allow.`, {
+    return fallback("low_confidence_fallback", `${providerLabel} selected "${redactText(choice.choice, 40)}", which this decision does not allow.`, {
       ...identity,
       proposedDecision: choice.choice,
     });
@@ -234,12 +250,12 @@ export async function runDecision(ctx: JevDecisionContext, options: AskOptions):
 
   const label = options.labels?.[mapped] ?? null;
   const verdict: Omit<DecisionOutcome, "policy" | "requiresReview" | "reviewReason"> = {
-    note: null,
+    note: failoverNote,
     ...base,
     ...identity,
     decision: mapped,
     label,
-    source: "jev",
+    source: provider,
     ...flagsFor(mapped),
     proposedDecision: null,
   };
@@ -255,7 +271,7 @@ export async function runDecision(ctx: JevDecisionContext, options: AskOptions):
         policy: "low_confidence_fallback",
         requiresReview: true,
         ...flagsFor(options.fallbackDecision),
-        reviewReason: `TypeSafe answered ${mapped} at confidence ${choice.confidence.toFixed(2)}, below the ${thresholds.review} floor, so DEMO kept its deterministic result.`,
+        reviewReason: `${providerLabel} answered ${mapped} at confidence ${choice.confidence.toFixed(2)}, below the ${thresholds.review} floor, so DEMO kept its deterministic result.`,
         proposedDecision: mapped,
         note: null,
       },
@@ -266,13 +282,14 @@ export async function runDecision(ctx: JevDecisionContext, options: AskOptions):
   const reviewBand = choice.confidence < thresholds.accept;
   return {
     outcome: {
+      // verdict.note carries the failover explanation when an earlier provider in
+      // the chain failed and this one answered; it is null on a clean first answer.
       ...verdict,
       policy: reviewBand ? "applied_with_review" : "applied",
       requiresReview: reviewBand,
       reviewReason: reviewBand
         ? `Confidence ${choice.confidence.toFixed(2)} is above the floor but under the ${thresholds.accept} accept bar, so this routing is recorded for review.`
         : null,
-      note: null,
     },
     answers: result.answers,
   };
@@ -365,6 +382,7 @@ function obviousRoute(text: string): string | null {
  */
 export async function decideResultReview(ctx: JevDecisionContext, input: { result: unknown; evidence?: unknown; note?: string | null }): Promise<DecisionOutcome & { level: number; levelLabel: string }> {
   const config = ctx.config ?? resolveJevConfig(ctx.env);
+  const mode = resolveDecisionRoutingMode(ctx.env, ctx.mode ?? null);
   const base = {
     template: "result_review",
     thresholds: { review: config.reviewThreshold, accept: config.acceptThreshold },
@@ -386,12 +404,9 @@ export async function decideResultReview(ctx: JevDecisionContext, input: { resul
     label: "no review requested",
   } satisfies DecisionOutcome & { level?: number };
 
-  if (!config.available) return { ...base, level: 0, levelLabel: RESULT_REVIEW_LEVELS[0] };
-
+  let routed: RoutedAsk;
   try {
-    const result = await askJev({
-      config,
-      apiKey: typeof ctx.env?.TYPESAFE_API_KEY === "string" ? ctx.env.TYPESAFE_API_KEY : "",
+    routed = await askRoutedDecision(ctx.env, mode, {
       state: { result: input.result, ...(input.evidence !== undefined ? { evidence: input.evidence } : {}), ...(input.note ? { note: input.note } : {}) },
       questions: {
         review: {
@@ -402,14 +417,23 @@ export async function decideResultReview(ctx: JevDecisionContext, input: { resul
       },
       ...(ctx.fetchImpl ? { fetchImpl: ctx.fetchImpl } : {}),
     });
+  } catch (error) {
+    return { ...base, level: 0, levelLabel: RESULT_REVIEW_LEVELS[0], note: errorNote(error) };
+  }
+  if (routed.kind !== "answered") {
+    return { ...base, level: 0, levelLabel: RESULT_REVIEW_LEVELS[0], note: describeRoutedMiss(routed) };
+  }
+  {
+    const result = routed.result;
+    const failoverNote = describeFailover(routed);
     const answer = result.answers.review;
-    if (!answer || answer.type !== "score") return { ...base, level: 0, levelLabel: RESULT_REVIEW_LEVELS[0], note: "TypeSafe returned no Score answer." };
+    if (!answer || answer.type !== "score") return { ...base, level: 0, levelLabel: RESULT_REVIEW_LEVELS[0], note: `${routed.label} returned no Score answer.` };
     const level = Math.min(RESULT_REVIEW_LEVELS.length - 1, Math.max(0, Math.round(answer.score)));
     const decision = RESULT_REVIEW_DECISIONS[level];
     const uncertain = answer.confidence < config.reviewThreshold;
     return {
       ...base,
-      source: "jev",
+      source: routed.provider,
       model: result.model,
       usage: { input: result.usage.inputTokens, output: result.usage.outputTokens },
       attempts: result.attempts,
@@ -421,16 +445,14 @@ export async function decideResultReview(ctx: JevDecisionContext, input: { resul
       policy: uncertain ? "low_confidence_fallback" : answer.confidence < config.acceptThreshold ? "applied_with_review" : "applied",
       requiresReview: !uncertain && decision !== "no_review",
       reviewReason: uncertain
-        ? `TypeSafe scored this ${level}/${RESULT_REVIEW_LEVELS.length - 1} at confidence ${answer.confidence.toFixed(2)}, under the ${config.reviewThreshold} floor, so no review flag is applied.`
+        ? `${routed.label} scored this ${level}/${RESULT_REVIEW_LEVELS.length - 1} at confidence ${answer.confidence.toFixed(2)}, under the ${config.reviewThreshold} floor, so no review flag is applied.`
         : decision === "hold_for_review"
-          ? "TypeSafe recommends a person looks at this before it is used. Nothing is blocked: DEMO's own permission and confirmation checks still decide."
+          ? `${routed.label} recommends a person looks at this before it is used. Nothing is blocked: DEMO's own permission and confirmation checks still decide.`
           : null,
-      note: uncertain ? "Low-confidence review score ignored." : null,
+      note: uncertain ? "Low-confidence review score ignored." : failoverNote,
       level: uncertain ? 0 : level,
       levelLabel: RESULT_REVIEW_LEVELS[uncertain ? 0 : level],
     };
-  } catch (error) {
-    return { ...base, level: 0, levelLabel: RESULT_REVIEW_LEVELS[0], note: errorNote(error) };
   }
 }
 
@@ -468,7 +490,8 @@ export async function resolveVideoIntentWithJev(ctx: JevDecisionContext, input: 
   }
 
   const config = ctx.config ?? resolveJevConfig(ctx.env);
-  if (!config.available) return { intent: deterministic, decision: null };
+  const mode = resolveDecisionRoutingMode(ctx.env, ctx.mode ?? null);
+  if (!anyProviderAvailable(ctx.env, mode)) return { intent: deterministic, decision: null };
 
   const questions: Record<string, JevQuestionSpec> = {
     primary: {
@@ -498,8 +521,9 @@ export async function resolveVideoIntentWithJev(ctx: JevDecisionContext, input: 
   });
 
   const { outcome: decision, answers } = outcome;
-  const focusChoice = decision.source === "jev" ? decision.decision : decision.proposedDecision;
-  const usable = decision.source === "jev" && (VIDEO_FOCUS_KEYS as string[]).includes(focusChoice ?? "");
+  const providerAnswered = decision.source === "jev" || decision.source === "laya";
+  const focusChoice = providerAnswered ? decision.decision : decision.proposedDecision;
+  const usable = providerAnswered && (VIDEO_FOCUS_KEYS as string[]).includes(focusChoice ?? "");
 
   let intent = deterministic;
   if (usable && focusChoice && focusChoice !== deterministic.focus) {
