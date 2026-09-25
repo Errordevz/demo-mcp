@@ -11,7 +11,8 @@
     "test:watch": "vitest",
     "test:live": "DEMO_MCP_LIVE=1 vitest run tests/live.test.ts tests/video-live.test.ts",
     "test:live:video": "DEMO_MCP_LIVE=1 vitest run tests/video-live.test.ts",
-    "build:check": "CI=1 wrangler deploy --dry-run --outdir dist"
+    "build:check": "CI=1 wrangler deploy --dry-run --outdir dist",
+    "ui:catalog": "node scripts/generate-tool-catalog.mjs"
   },
   "dependencies": {
     "@cloudflare/puppeteer": "^1.1.0",

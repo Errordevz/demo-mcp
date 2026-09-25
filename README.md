@@ -58,7 +58,35 @@ Both layers talk to the same `BrowserProvider`, so a change in the environment
 everywhere: a structured `capability_unavailable` / `rate_limited` error, never a
 crash.
 
+## Inspector UI (`/`)
+
+The Worker serves a self-contained inspector at `/` (`ui.ts` + `src/ui/*`): a
+dark-first, zero-dependency status console for the deployment — Overview
+(live capability state), a searchable tool explorer, Browser/Video/Research/
+Routing/Roblox/Skills/About sections, a command palette and a **Connect MCP**
+dialog that reveals and copies the public endpoint
+`demo-mcp.amidevz.workers.dev/mcp`.
+
+Design invariants (enforced by `tests/ui-shell.test.ts`):
+
+* **No login.** DEMO is no-account by design; the UI contains no sign-up, no
+  account system and no credential inputs. The only authorization flow is the
+  *optional* external Roblox OAuth, reachable from the Roblox section.
+* **No mocking.** Every status, count and flag is read live from same-origin
+  routes (`/health`, `/platform/stats`, `/capabilities/*`, `/oauth/roblox/*`).
+  Unreachable data renders an honest error state instead of fake values.
+* **No secrets.** Telemetry presence booleans only — keys, tokens, cookies and
+  env values never reach the page. The strict CSP (`default-src 'none'`,
+  `connect-src 'self'`, inline style/script only, no external requests) is
+  locked down by `tests/security-hardening.test.ts`.
+
+The tool catalog shown in the explorer is **generated** from the real
+registrations: run `npm run ui:catalog` after adding/renaming a tool and
+`tests/tool-catalog.test.ts` will fail if the catalog drifts from
+`DEMO_TOOL_NAMES`.
+
 ## Quick start
+
 
 ```bash
 npm install
