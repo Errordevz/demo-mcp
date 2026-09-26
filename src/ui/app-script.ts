@@ -1,23 +1,19 @@
 /**
- * DEMO inspector UI — client application.
+ * DEMO inspector UI — client application 2.0
  *
- * A zero-dependency, self-contained single-page app. It is inlined into the
- * one HTML document the Worker serves (the CSP locks the page to inline
- * script + same-origin fetches, which is why this is a string and not a
- * bundler app — and why there is deliberately no framework here).
+ * Zero-dependency, self-contained single-page app, premium overhaul.
+ * Inlined into one HTML document (CSP locks to inline script + same-origin
+ * fetches, hence String.raw and no framework).
  *
- * Every panel renders from live data fetched off the Worker's own public
- * routes (/health, /platform/stats, /capabilities/*, /oauth/roblox/status)
- * or from static facts generated out of this repository (the tool catalog is
- * extracted from the real tool registrations). Nothing is mocked, no metrics
- * are invented, and there is no login: DEMO is open by default.
+ * Live data from same-origin /health, /platform/stats, /capabilities/*,
+ * /oauth/roblox/status; static facts from generated catalog. No mocking,
+ * no secrets, no login.
  *
- * Style constraints for this file:
- *  - it is embedded via String.raw, so the body must not contain backticks
- *    or dollar-brace sequences;
- *  - the Roblox connect control is pinned by tests to the exact assignment
- *    location.href='/oauth/roblox/start' and the labels "Connect Roblox
- *    account" / "Disconnect" — keep those literals.
+ * Style constraints:
+ *  - embedded via String.raw, so body must not contain backticks or
+ *    dollar-brace sequences;
+ *  - Roblox connect control pinned to exact literal location.href='/oauth/roblox/start'
+ *    and labels "Connect Roblox account" / "Disconnect" — keep those literals.
  */
 export const APP_SCRIPT = String.raw`(function () {
 "use strict";
@@ -45,7 +41,8 @@ var S = {
   expandedPlatforms: {},
   core: null,
   modalOpen: false, paletteOpen: false, lastFocus: null, pSel: 0, pQuery: "", pItems: [],
-  connectId: "", connectNote: ""
+  connectId: "", connectNote: "",
+  menuFocusTrap: null
 };
 
 var LAZY_ROUTES = {
@@ -53,8 +50,6 @@ var LAZY_ROUTES = {
   expanded: "/capabilities/expanded"
 };
 
-/* Explorer filters: a small stable grouping over the raw tool groups.
- * "storage" selects R2-backed tools by availability instead of group. */
 var EXPLORER_FILTERS = [
   { id: "", label: "All" },
   { id: "browser", label: "Browser", groups: ["Browser"] },
@@ -66,10 +61,9 @@ var EXPLORER_FILTERS = [
   { id: "storage", label: "Storage", availability: ["artifacts", "snapshots"] }
 ];
 
-/* ------------------------------------------------------------- utilities */
-
+/* utilities */
 function esc(v) {
-  return String(v == null ? "" : v).replace(/[&<>"]/g, function (c) {
+  return String(v == null ? "" : v).replace(/[&<>\"]/g, function (c) {
     return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
   });
 }
@@ -152,7 +146,9 @@ var ICONS = {
   layers: ["M12 2l9 5-9 5-9-5z", "M3 12l9 5 9-5", "M3 17l9 5 9-5"],
   camera: ["M4.5 8h3.2l1.8-2.5h5l1.8 2.5h3.2V19h-15z", "M12 16.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z"],
   users: ["M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2", "M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z", "M22 21v-2a4 4 0 0 0-3-3.87", "M16 3.13a4 4 0 0 1 0 7.75"],
-  dot: ["M12 13.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3z"]
+  dot: ["M12 13.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3z"],
+  inbox: ["M4 4h16v16H4z", "M4 7l8 6 8-6"],
+  star: ["M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"]
 };
 
 function ic(name, size) {
@@ -163,7 +159,6 @@ function ic(name, size) {
   return out + "</svg>";
 }
 
-/* status pill — icon + text; color is never the only signal */
 var ST_ICONS = { ok: "check", warn: "alert", err: "xc", off: "slash", info: "dot", idle: "clock" };
 function st(kind, label) {
   return '<span class="st st--' + kind + '">' + ic(ST_ICONS[kind] || "dot") + esc(label) + "</span>";
@@ -172,8 +167,7 @@ function boolSt(v, okLabel, offLabel) {
   return v ? st("ok", okLabel) : st("off", offLabel || "Unavailable");
 }
 
-/* ------------------------------------------------------------- app state */
-
+/* app state helpers */
 function body() { return document.body; }
 function caps() { return (S.health && S.health.capabilities) || {}; }
 function statCaps() { return (S.stats && S.stats.capabilities) || {}; }
@@ -226,7 +220,6 @@ function robloxState() {
   return { s: "idle", l: "Not connected", short: "Not connected" };
 }
 
-/* Honest per-category status, derived only from live telemetry. */
 function catStatus(id) {
   var c = caps(), sc = statCaps();
   if (id === "browser") {
@@ -293,8 +286,7 @@ function decisionsState() {
   return { s: "warn", l: "Built-in rules" };
 }
 
-/* ------------------------------------------------------------ navigation */
-
+/* navigation */
 function sectionMeta(id) {
   var secs = DATA.SECTIONS || [];
   for (var i = 0; i < secs.length; i++) if (secs[i].id === id) return secs[i];
@@ -318,8 +310,7 @@ function go(route) {
   location.hash = "#/" + route;
 }
 
-/* ------------------------------------------------------------- rendering */
-
+/* rendering */
 function externalLinks() {
   var proj = DATA.PROJECT || {};
   var out = "";
@@ -417,11 +408,11 @@ function renderFoot() {
   var bits = [];
   if (S.stats) {
     bits.push('<span class="mono">v' + esc(S.stats.version || VERSION || "—") + "</span>");
-    bits.push('<span class="mono">' + S.stats.toolCount + " tools</span>");
+    bits.push('<span class="mono">' + S.stats.toolCount + ' tools</span>');
     if (S.stats.generatedAt) bits.push("<span>telemetry " + esc(fmtTs(S.stats.generatedAt)) + "</span>");
     if (typeof S.stats.uptimeSeconds === "number") bits.push("<span>isolate age " + esc(fmtDur(S.stats.uptimeSeconds)) + "</span>");
   } else {
-    bits.push('<span class="mono">' + CAT.length + " tools</span>");
+    bits.push('<span class="mono">' + CAT.length + ' tools</span>');
   }
   bits.push("<span>no cookies · no tracking · no login</span>");
   var links = '<span class="foot-links">' +
@@ -432,8 +423,7 @@ function renderFoot() {
   f.innerHTML = bits.join('<span aria-hidden="true">·</span>') + links;
 }
 
-/* ---------------------------------------------------------------- shared */
-
+/* shared */
 function panel(title, icon, bodyHtml, opts) {
   opts = opts || {};
   var head = '<div class="panel-hd">' + (icon ? '<span class="hd-ic">' + ic(icon) + "</span>" : "") + "<h3>" + esc(title) + "</h3>" +
@@ -460,17 +450,24 @@ function skeletonPanel(lines) {
 function errPanel(title, path, key, msg) {
   return panel(title || "Telemetry unavailable", "alert",
     '<p class="note">' + esc(msg || "Could not read this deployment status.") + "</p>" +
-    '<p class="hint mono" style="margin-top:6px">GET ' + esc(path || "/platform/stats") + "</p>" +
-    '<div class="row" style="margin-top:10px"><button class="btn" type="button" data-act="retry" data-key="' + esc(key || "") + '">' + ic("refresh") + "Try again</button>" +
+    '<p class="hint mono" style="margin-top:8px">GET ' + esc(path || "/platform/stats") + "</p>" +
+    '<div class="row" style="margin-top:12px"><button class="btn" type="button" data-act="retry" data-key="' + esc(key || "") + '">' + ic("refresh") + "Try again</button>" +
     '<a class="btn" href="' + esc(path || "/platform/stats") + '" target="_blank" rel="noreferrer noopener">Raw response</a></div>',
     { cls: "err-card" });
+}
+
+function emptyState(icon, title, text, actionHtml) {
+  return '<div class="empty-state">' + ic(icon || "search", 32) +
+    "<h4>" + esc(title || "Nothing here") + "</h4>" +
+    (text ? "<p>" + esc(text) + "</p>" : "") +
+    (actionHtml || "") + "</div>";
 }
 
 function techDetails(summary, obj) {
   var json = "";
   try { json = JSON.stringify(obj, null, 2) || ""; } catch (e) { json = String(obj); }
   if (json.length > 20000) json = json.slice(0, 20000) + "\n… (truncated)";
-  return '<details class="tech"><summary>' + ic("chev", 13) + esc(summary || "Technical details") + "</summary>" +
+  return '<details class="tech"><summary>' + ic("chev", 14) + esc(summary || "Technical details") + "</summary>" +
     '<div class="tech-bd"><pre class="codeblock">' + esc(json) + "</pre></div></details>";
 }
 
@@ -481,30 +478,31 @@ function pageHead(eyebrow, title, blurb) {
 
 function note(html) { return '<p class="note">' + html + "</p>"; }
 
-/* -------------------------------------------------------------- overview */
-
+/* overview */
 function heroBlock() {
   var proj = DATA.PROJECT || {};
   var dot = "live-dot--idle live-dot--pulse", t = "Checking status", sub = "Reading live deployment telemetry";
+  var icon = "clock";
   if (S.stats) {
-    if (S.stats.status === "online") { dot = ""; t = "Operational"; sub = "MCP endpoint available"; }
-    else { dot = "live-dot--warn"; t = "Degraded"; sub = "Deployment answered with an unexpected status"; }
+    if (S.stats.status === "online") { dot = ""; t = "Operational"; sub = "MCP endpoint available"; icon = "checkc"; }
+    else { dot = "live-dot--warn"; t = "Degraded"; sub = "Deployment answered with an unexpected status"; icon = "alert"; }
   } else if (S.statsErr && S.healthErr) {
-    dot = "live-dot--err"; t = "Status unavailable"; sub = "Could not reach deployment telemetry";
+    dot = "live-dot--err"; t = "Status unavailable"; sub = "Could not reach deployment telemetry"; icon = "xc";
   } else if (S.statsErr || S.healthErr) {
-    dot = "live-dot--warn"; t = "Partial telemetry"; sub = "Some deployment signals did not answer";
+    dot = "live-dot--warn"; t = "Partial telemetry"; sub = "Some deployment signals did not answer"; icon = "alert";
   }
   return '<div class="hero">' +
-    '<div class="eyebrow">' + esc(proj.name || "DEMO") + "</div>" +
+    '<div class="eyebrow"><span>' + esc(proj.name || "DEMO") + ' — v' + esc((S.stats && S.stats.version) || VERSION || "0.9.0") + "</span></div>" +
     "<h1>Execution infrastructure for AI agents.</h1>" +
     '<p class="lede">' + esc(proj.blurb || "") + "</p>" +
     '<div class="hero-cta">' +
       '<button class="btn btn--primary btn--lg" type="button" data-act="connect-open">' + ic("plug") + "Connect MCP</button>" +
       '<a class="btn btn--lg" href="#/capabilities">Explore capabilities</a>' +
+      '<button class="btn btn--lg" type="button" data-act="palette-open" aria-label="Command palette">' + ic("search") + "Search tools</button>" +
     "</div>" +
     '<div class="hero-status"><span class="live-dot ' + dot + '" aria-hidden="true"></span>' +
-      "<span><b>" + esc(t) + "</b> · " + esc(sub) + "</span>" +
-      ((S.statsErr && S.healthErr) ? '<button class="link-btn" type="button" data-act="refresh">Retry</button>' : "") +
+      '<span style="display:inline-flex;align-items:center;gap:6px">' + ic(icon, 14) + "<b>" + esc(t) + "</b> · " + esc(sub) + "</span>" +
+      ((S.statsErr && S.healthErr) ? '<button class="link-btn" type="button" data-act="refresh" style="margin-left:6px">Retry</button>' : "") +
     "</div>" +
   "</div>";
 }
@@ -516,7 +514,7 @@ function catCard(cat) {
   var count = cat.groups && cat.groups.length ? n + (n === 1 ? " tool" : " tools") : "live status";
   var tags = "";
   for (var t = 0; t < (cat.highlights || []).length; t++) tags += '<span class="cat-tag">' + esc(cat.highlights[t]) + "</span>";
-  return '<a class="cat" href="#/' + esc(cat.route || "capabilities") + '">' +
+  return '<a class="cat" href="#/' + esc(cat.route || "capabilities") + '" title="' + esc(cat.title + " — " + (cat.description || "")) + '">' +
     '<div class="cat-top"><span class="cat-ic">' + ic(cat.icon) + "</span><h3>" + esc(cat.title) + "</h3>" + st(cs.s, cs.l) + "</div>" +
     "<p>" + esc(cat.description || "") + "</p>" +
     '<div class="cat-tags">' + tags + "</div>" +
@@ -543,9 +541,9 @@ function overviewStatusRows() {
 function accessPanel() {
   var proj = DATA.PROJECT || {};
   return panel("Access model", "shield",
-    '<div class="row" style="margin-bottom:10px"><span class="badge-secure">' + ic("shield") + "No account required</span></div>" +
+    '<div class="row" style="margin-bottom:12px"><span class="badge-secure">' + ic("shield") + "No account required</span></div>" +
     note("Connect DEMO directly to your MCP-compatible client. The browser, video, research and utility tools work immediately — external authorization is asked for only where a capability genuinely needs it: today that is <b>Roblox OAuth</b>, and only for Roblox-account features.") +
-    '<div class="row" style="margin-top:12px">' +
+    '<div class="row" style="margin-top:14px">' +
       '<button class="btn btn--primary" type="button" data-act="connect-open">' + ic("plug") + "Connect MCP</button>" +
       (proj.docsTreeUrl ? '<a class="btn" href="' + esc(proj.docsTreeUrl) + '" target="_blank" rel="noreferrer noopener">' + ic("book") + "Docs</a>" : "") +
       '<a class="btn" href="#/roblox">Roblox status</a>' +
@@ -575,8 +573,7 @@ function overviewView() {
   );
 }
 
-/* ------------------------------------------------------- capability explorer */
-
+/* capability explorer */
 function filterDef(id) {
   for (var i = 0; i < EXPLORER_FILTERS.length; i++) if (EXPLORER_FILTERS[i].id === id) return EXPLORER_FILTERS[i];
   return EXPLORER_FILTERS[0];
@@ -618,11 +615,11 @@ function filteredTools() {
 function toolRow(t) {
   var a = toolAvail(t.availability);
   var open = S.openTool === t.name;
-  return '<button class="trow" type="button" data-act="open-tool" data-name="' + esc(t.name) + '" aria-expanded="' + (open ? "true" : "false") + '">' +
+  return '<button class="trow" type="button" data-act="open-tool" data-name="' + esc(t.name) + '" aria-expanded="' + (open ? "true" : "false") + '" title="' + esc(t.name + " — " + (t.description || t.title)) + '">' +
     '<span class="tname"><span class="tstat tstat--' + a.s + '" title="' + esc(a.l) + '"><span class="vh">' + esc(a.l) + "</span></span>" + esc(t.name) + "</span>" +
     '<span class="tdesc">' + esc(t.description || t.title) + "</span>" +
     '<span class="tgrp">' + esc(t.group) + "</span>" +
-    '<span class="tw">' + ic("chev", 14) + "</span>" +
+    '<span class="tw">' + ic("chev", 16) + "</span>" +
     "</button>";
 }
 
@@ -633,14 +630,15 @@ function toolDetail(t) {
   var shown = inputs.slice(0, 2).map(function (n) { return '"' + n + '": "…"'; }).join(", ");
   var example = '{"name": "' + t.name + '", "arguments": {' + shown + "}}";
   return '<div class="tdetail">' +
-    '<div class="row" style="gap:8px;margin-bottom:8px">' + st(a.s, a.l) + (hint ? '<span class="hint">' + esc(hint) + "</span>" : "") + "</div>" +
+    '<div class="row" style="gap:8px;margin-bottom:10px">' + st(a.s, a.l) + (hint ? '<span class="hint">' + esc(hint) + "</span>" : "") + "</div>" +
     '<p class="tdesc-full">' + esc(t.title) + (t.description ? " — " + esc(t.description) : " — description is available via tools/list over /mcp.") + "</p>" +
     (inputs.length ? "<h4>Inputs</h4>" + '<div class="pill-row">' + inputs.map(function (n) {
       return '<span class="in-chip">' + esc(n) + "</span>";
     }).join("") + "</div>" : "") +
     "<h4>Example usage</h4>" + '<pre class="codeblock">POST /mcp · tools/call\n' + esc(example) + "</pre>" +
-    '<p class="hint" style="margin-top:8px">Results come back as MCP content blocks. The full JSON Schema for every field comes from tools/list on /mcp — nothing here is mocked.</p>' +
+    '<p class="hint" style="margin-top:10px">Results come back as MCP content blocks. The full JSON Schema for every field comes from tools/list on /mcp — nothing here is mocked.</p>' +
     '<div class="tfoot"><button class="btn btn--sm" type="button" data-act="copy" data-copy="' + esc(t.name) + '">' + ic("copy", 13) + "Copy name</button>" +
+    '<button class="btn btn--sm" type="button" data-act="copy" data-copy="' + esc(SERVER_URL) + '">' + ic("copy", 13) + "Copy endpoint</button>" +
     '<span class="hint">Invoke it from any connected MCP client.</span></div>' +
     "</div>";
 }
@@ -652,7 +650,9 @@ function toolsRowsHtml() {
     rows += toolRow(list[r]);
     if (S.openTool === list[r].name) rows += toolDetail(list[r]);
   }
-  if (!list.length) rows = '<div class="p-empty">No tool matches this filter.</div>';
+  if (!list.length) {
+    rows = emptyState("search", "No matching tools", "Try a different search or clear the filters to see all " + CAT.length + " tools.", '<button class="btn btn--sm" type="button" data-act="clear-filters" style="margin-top:8px">' + ic("x", 13) + 'Clear filters</button>');
+  }
   return rows;
 }
 
@@ -667,15 +667,18 @@ function explorerPanel() {
     return '<button class="chip" type="button" data-act="filter-avail" data-a="' + o[0] + '" aria-pressed="' + (S.tf.avail === o[0] ? "true" : "false") + '">' + o[1] + "</button>";
   }).join("");
 
-  var head = '<div class="panel-bd" style="border-bottom:1px solid var(--border);display:flex;flex-wrap:wrap;gap:10px;align-items:center">' +
+  var activeFilters = S.tf.group || S.tf.avail || S.tf.q;
+  var clearBtn = activeFilters ? '<button class="btn btn--sm" type="button" data-act="clear-filters">' + ic("x", 12) + "Clear</button>" : "";
+
+  var head = '<div class="panel-bd" style="border-bottom:1px solid var(--border);display:flex;flex-wrap:wrap;gap:12px;align-items:center">' +
     '<div class="search">' + ic("search") + '<input id="tool-search" type="search" placeholder="Search ' + CAT.length + ' tools by name, description or group…" aria-label="Search tools" value="' + esc(S.tf.q) + '"></div>' +
-    '<span class="tcount" id="tool-count">' + list.length + " shown · " + (S.stats ? S.stats.toolCount + " live on /mcp" : CAT.length + " in catalog") + "</span></div>" +
-    '<div style="padding:10px 16px;border-bottom:1px solid var(--border)"><div class="chips" role="group" aria-label="Filter by capability">' + chips + "</div></div>" +
-    '<div style="padding:10px 16px;border-bottom:1px solid var(--border);display:flex;gap:6px;flex-wrap:wrap;align-items:center"><span class="eyebrow" style="margin-right:4px">State</span><div class="chips" role="group" aria-label="Filter by availability">' + availChips + "</div></div>";
+    '<span class="tcount" id="tool-count">' + list.length + " shown · " + (S.stats ? S.stats.toolCount + " live on /mcp" : CAT.length + " in catalog") + "</span>" + clearBtn + "</div>" +
+    '<div style="padding:12px 18px;border-bottom:1px solid var(--border)"><div class="chips" role="group" aria-label="Filter by capability">' + chips + "</div></div>" +
+    '<div style="padding:12px 18px;border-bottom:1px solid var(--border);display:flex;gap:8px;flex-wrap:wrap;align-items:center"><span class="eyebrow" style="margin-right:6px">State</span><div class="chips" role="group" aria-label="Filter by availability">' + availChips + "</div></div>";
 
   return panel("Tool explorer", "tools", head + '<div class="panel-bd--flush" id="tool-rows">' + toolsRowsHtml() + "</div>", {
     flush: true,
-    right: S.health || S.stats ? "" : '<span class="hint">resolving live state…</span>'
+    right: S.health || S.stats ? '<span class="hint mono">' + list.length + "/" + CAT.length + "</span>" : '<span class="hint">resolving live state…</span>'
   });
 }
 
@@ -685,20 +688,18 @@ function capabilitiesView() {
   if (showCats) {
     var cards = "";
     for (var i = 0; i < CATS.length; i++) cards += catCard(CATS[i]);
-    cats = '<div class="cat-grid" style="margin-bottom:16px">' + cards + "</div>";
+    cats = '<div class="cat-grid" style="margin-bottom:20px">' + cards + "</div>";
   }
   return pageHead("Capabilities", "Capability explorer", "Every MCP tool DEMO exposes, with live availability. Select a tool for its inputs and usage.") +
-    '<div style="height:16px"></div>' + cats + explorerPanel();
+    '<div style="height:20px"></div>' + cats + explorerPanel();
 }
 
-/* "Tools" stays routable as a compact alias of the explorer. */
 function toolsView() {
   return pageHead("Capabilities", "Tools", "Every MCP tool DEMO exposes, with live availability.") +
-    '<div style="height:16px"></div>' + explorerPanel();
+    '<div style="height:20px"></div>' + explorerPanel();
 }
 
-/* ----------------------------------------------------------------- status */
-
+/* status */
 function deploymentRows() {
   var c = caps();
   var live = !!S.health;
@@ -766,34 +767,33 @@ function statusView() {
   } else {
     epHtml = skeletonPanel(4);
   }
+  var lastRefresh = S.stats && S.stats.generatedAt ? '<span class="hint mono">Last refresh ' + esc(fmtTs(S.stats.generatedAt)) + '</span>' : "";
   return (
     pageHead("Status", "System status", "Live deployment state — every value below is read from this Worker's own telemetry, never hardcoded.") +
-    '<div style="height:16px"></div>' +
+    '<div style="height:20px"></div>' +
     '<div class="grid grid--2">' +
-      statusCard("Deployment", "gauge", deploymentRows()) +
-      statusCard("Capabilities", "cpu", capabilityRows()) +
+      statusCard("Deployment", "gauge", deploymentRows(), { right: lastRefresh }) +
+      statusCard("Capabilities", "cpu", capabilityRows(), { right: '<button class="btn btn--sm" type="button" data-act="refresh">' + ic("refresh", 12) + "Refresh</button>" }) +
     "</div>" +
     '<div class="grid grid--2" style="margin-top:16px">' +
-      panel("Connections", "users", conns, { flush: true }) +
-      panel("Endpoints (same origin)", "terminal", '<div class="panel-bd--flush">' + epHtml + "</div>", { flush: true }) +
+      panel("Connections", "users", conns, { flush: true, right: S.stats ? '<span class="hint">' + S.stats.connections.length + " connections</span>" : "" }) +
+      panel("Endpoints (same origin)", "terminal", '<div class="panel-bd--flush">' + epHtml + "</div>", { flush: true, right: '<span class="hint mono">same-origin only</span>' }) +
     "</div>" +
     '<div style="margin-top:16px">' + techDetails("Technical details", { health: S.health, stats: S.stats }) + "</div>"
   );
 }
 
-/* -------------------------------------------------------------------- 404 */
-
+/* 404 */
 function notfoundView() {
   return '<div class="center-404">' +
     '<div class="eyebrow">DEMO</div>' +
     "<h1>Page not found</h1>" +
-    "<p>That route doesn't exist.</p>" +
-    '<a class="btn btn--primary" href="#/overview">Back to DEMO</a>' +
+    "<p>That route doesn't exist. Check the URL or return to the overview.</p>" +
+    '<div class="row" style="justify-content:center"><a class="btn btn--primary btn--lg" href="#/overview">' + ic("arrow", 14) + "Back to DEMO</a><a class=\"btn btn--lg\" href=\"#/capabilities\">Browse capabilities</a></div>" +
   "</div>";
 }
 
-/* --------------------------------------------------------------- browser */
-
+/* browser */
 function browserView() {
   if (!S.health) {
     if (S.healthErr) return pageHead("Browser", "Browser", "Persistent sessions, screenshots, and human handoff.") + '<div style="height:16px"></div>' +
@@ -822,13 +822,13 @@ function browserView() {
   }).join("");
 
   var bt = CAT.filter(function (t) { return t.group === "Browser"; });
-  var trows = bt.map(function (t) { return toolRow(t); }).join("");
+  var trows = bt.length ? bt.map(function (t) { return toolRow(t); }).join("") : emptyState("globe", "No browser tools", "The browser binding is not attached on this deployment.");
 
   return (
-    pageHead("Browser", "Browser", "A real persistent browser, driven by an MCP client through these tools.") +
-    '<div style="height:16px"></div>' +
+    pageHead("Browser", "Browser", "A real persistent browser, driven by an MCP client through these tools. Sessions are scoped to the conversation that opened them.") +
+    '<div style="height:20px"></div>' +
     '<div class="grid grid--2">' +
-      panel("Subsystem state", "gauge", '<div class="panel-bd--flush">' + rows + "</div>", { flush: true }) +
+      panel("Subsystem state", "gauge", '<div class="panel-bd--flush">' + rows + "</div>", { flush: true, right: c.browserAvailable ? st("ok", "Operational") : st("off", "Unavailable") }) +
       panel("Session workflow — via MCP tools", "terminal", '<div class="flow">' + flow + "</div>", {
         flush: true,
         right: (DATA.PROJECT && DATA.PROJECT.docsTreeUrl) ? '<a class="btn btn--sm" href="' + esc(DATA.PROJECT.docsTreeUrl + "/BROWSER.md") + '" target="_blank" rel="noreferrer noopener">' + ic("book", 13) + "Docs</a>" : ""
@@ -838,15 +838,14 @@ function browserView() {
       flush: true,
       right: '<button class="btn btn--sm" type="button" data-act="tools-tab">Open explorer</button>'
     }) + "</div>" +
-    '<div style="margin-top:16px">' + note("This page shows live capability state and never drives the browser itself. Screenshots land in R2 and are readable at <code class=\"chip-v\">/screenshots/:id</code> until they expire. Login walls and CAPTCHAs are surfaced for a human through the Live View and never bypassed. Active sessions are scoped to the MCP conversation that opened them; there is no shared, cross-user session browser.") + "</div>"
+    '<div style="margin-top:16px">' + note("This page shows live capability state and never drives the browser itself. Screenshots land in R2 and are readable at <code class=\"chip-v\">/screenshots/:id</code> until they expire. Login walls and CAPTCHAs are surfaced for a human through the Live View and never bypassed.") + "</div>"
   );
 }
 
-/* ----------------------------------------------------------------- video */
-
+/* video */
 function videoView() {
   var v = S.lazy.video, err = S.lazyErr.video;
-  var head = pageHead("Video", "Video", "Public video understanding with explicit, inspectable evidence.") + '<div style="height:16px"></div>';
+  var head = pageHead("Video", "Video", "Public video understanding with explicit, inspectable evidence. Every claim must be grounded in delivered frames or transcript.") + '<div style="height:20px"></div>';
   if (err && !v) return head + errPanel("Video capabilities unavailable", LAZY_ROUTES.video, "video", "The capability report did not return. Try again or inspect deployment status.");
 
   var stages = (DATA.VIDEO_STAGES || []).map(function (s) {
@@ -861,11 +860,11 @@ function videoView() {
       var p = v.supportedPlatforms[i];
       var open = !!S.expandedPlatforms[p.platform];
       var notes = p.notes || "";
-      platforms += '<button class="trow" type="button" data-act="plat" data-p="' + esc(p.platform) + '" aria-expanded="' + (open ? "true" : "false") + '">' +
+      platforms += '<button class="trow" type="button" data-act="plat" data-p="' + esc(p.platform) + '" aria-expanded="' + (open ? "true" : "false") + '" title="' + esc(p.platform + " — " + notes.slice(0, 200)) + '">' +
         '<span class="tname">' + esc(p.platform) + "</span>" +
         '<span class="tdesc">' + esc(open ? notes : notes.slice(0, 160)) + (notes.length > 160 && !open ? "…" : "") + "</span>" +
         '<span class="tgrp">' + (p.frameDecoding ? "frames" : "metadata") + "</span>" +
-        '<span class="tw">' + ic("chev", 14) + "</span></button>";
+        '<span class="tw">' + ic("chev", 16) + "</span></button>";
       if (open && notes.length > 160) {
         platforms += '<div class="tdetail"><p class="tdesc-full">' + esc(notes) + "</p></div>";
       }
@@ -896,11 +895,11 @@ function videoView() {
   }).join("") + "</ul>";
 
   var vt = CAT.filter(function (t) { return t.group === "Video" || t.group === "YouTube"; });
-  var vrows = vt.map(function (t) { return toolRow(t); }).join("");
+  var vrows = vt.length ? vt.map(function (t) { return toolRow(t); }).join("") : emptyState("play", "No video tools", "Video capability is not available on this deployment.");
 
   return (
     head +
-    panel("Pipeline stages", "film", '<div class="panel-bd--flush">' + stages + "</div>", { flush: true }) +
+    panel("Pipeline stages", "film", '<div class="panel-bd--flush">' + stages + "</div>", { flush: true, right: S.health ? st(videoPipe().s, videoPipe().l) : "" }) +
     '<div style="margin-top:16px">' + panel("Platform support", "layers", v ? '<div class="panel-bd--flush">' + platforms + "</div>" : skeletonPanel(4), {
       flush: true,
       right: v ? '<span class="hint mono">' + esc(v.schema || "") + "</span>" : ""
@@ -908,18 +907,17 @@ function videoView() {
     (providers ? '<div style="margin-top:16px">' + panel("Providers — presence only, never values", "cpu", '<div class="panel-bd--flush">' + providers + "</div>", { flush: true }) + "</div>" : "") +
     (limits ? '<div style="margin-top:16px">' + panel("Guardrails", "shield", limits + note("Every URL and redirect hop passes the SSRF guard. Signed CDN URLs are never persisted — only the original public page URL is stored. Manifests (HLS/DASH) are reported, never assembled.")) + "</div>" : "") +
     '<div class="grid grid--2" style="margin-top:16px">' +
-      panel("Honesty contract", "info", honesty) +
+      panel("Honesty contract", "info", honesty, { right: '<span class="hint">evidence rules</span>' }) +
       panel("Video & YouTube tools — " + vt.length, "play", '<div class="panel-bd--flush">' + vrows + "</div>", { flush: true }) +
     "</div>" +
     '<div style="margin-top:16px">' + note("Artifacts are temporary and expiring: retrieved bytes are served from <code class=\"chip-v\">/video-assets/:ref</code> (Range-aware for playback), decoded frames from <code class=\"chip-v\">/screenshots/:id</code>. This page shows pipeline capability, not results — never claim a video was analyzed unless the connected client received real frames or a transcript from the tool.") + "</div>"
   );
 }
 
-/* -------------------------------------------------------------- research */
-
+/* research */
 function researchView() {
   var e = S.lazy.expanded, err = S.lazyErr.expanded;
-  var head = pageHead("Web & Research", "Web & research", "Fetch, extract, and compare public sources — with full provenance.") + '<div style="height:16px"></div>';
+  var head = pageHead("Web & Research", "Web & research", "Fetch, extract, and compare public sources — with full provenance. Every finding keeps its source URL and retrieval timestamp.") + '<div style="height:20px"></div>';
   if (err && !e) return head + errPanel("Expanded capabilities report unavailable", LAZY_ROUTES.expanded, "expanded", "The report endpoint did not return. Try again or inspect deployment status.");
   var g = e;
   if (!g) return head + panel("Research capabilities", "search", skeletonPanel(6));
@@ -959,7 +957,8 @@ function researchView() {
   var rt = CAT.filter(function (t) {
     return ["Git", "Internet Archive", "Feeds", "Documents", "Web Intelligence", "Research", "Network"].indexOf(t.group) !== -1;
   });
-  cards += panel("Research tool surface — " + rt.length + " tools", "search", '<div class="panel-bd--flush">' + rt.map(function (t) { return toolRow(t); }).join("") + "</div>", {
+  var rtRows = rt.length ? rt.map(function (t) { return toolRow(t); }).join("") : emptyState("search", "No research tools", "Research capabilities are not available.");
+  cards += panel("Research tool surface — " + rt.length + " tools", "search", '<div class="panel-bd--flush">' + rtRows + "</div>", {
     flush: true,
     right: '<button class="btn btn--sm" type="button" data-act="tools-tab">Open explorer</button>'
   });
@@ -968,8 +967,7 @@ function researchView() {
     '<div style="margin-top:16px">' + note("Run research from an MCP client — ask it to call <code class=\"chip-v\">web_research</code>, <code class=\"chip-v\">web_extract</code>, <code class=\"chip-v\">feed_read</code> or <code class=\"chip-v\">wayback</code>. This page shows live capability state only; it never fabricates results, sources or timestamps.") + "</div>";
 }
 
-/* --------------------------------------------------------------- routing */
-
+/* routing */
 function routingView() {
   var sc = statCaps();
   var jev = sc.jevDecisionEngine || {}, laya = sc.layaDecisionProvider || {};
@@ -988,13 +986,14 @@ function routingView() {
   }).join("");
 
   var dt = CAT.filter(function (t) { return t.group === "JEV" || t.group === "Laya"; });
-  var head = pageHead("Routing", "Decision routing", "Typed Jev and Laya judgments — advisory only, never authoritative.") + '<div style="height:16px"></div>';
+  var dtRows = dt.length ? dt.map(function (t) { return toolRow(t); }).join("") : emptyState("cpu", "No decision tools", "Decision routing is using built-in rules.");
+  var head = pageHead("Routing", "Decision routing", "Typed Jev and Laya judgments — advisory only, never authoritative. They can influence frame sampling or task splitting, never authorize tools or bypass checks.") + '<div style="height:20px"></div>';
 
   return (
     head +
     '<div class="grid grid--2">' +
       panel("Decision routing", "branch",
-        '<div class="row" style="gap:10px;align-items:baseline"><span class="mono" style="font-size:22px;letter-spacing:-.02em">' + esc(mode) + "</span>" + st("info", "auto: Laya → Jev → deterministic rules") + "</div>" +
+        '<div class="row" style="gap:12px;align-items:baseline"><span class="mono" style="font-size:24px;letter-spacing:-.02em;font-weight:700">' + esc(mode) + "</span>" + st("info", "auto: Laya → Jev → deterministic rules") + "</div>" +
         note("Typed decisions are <b>advisory only</b>. Jev and Laya are components of DEMO's decision layer — they can influence which frames to sample or how to split a task, but they never authorize tools, bypass checks or touch credentials.") +
         "<div class=\"note-warn\">DEMO's permissions, confirmations and security policy stay authoritative no matter what a routing answer says.</div>") +
       panel("Configuration — safe metadata only", "key",
@@ -1012,43 +1011,40 @@ function routingView() {
     '<div class="grid grid--2" style="margin-top:16px">' +
       panel("Jev decision engine", "cpu",
         '<div class="row">' + (jev.available ? st("ok", "Operational") : st("off", "Not configured")) + (jev.enabled ? st("info", "enabled") : "") + "</div>" +
-        '<p class="note" style="margin-top:10px">' + esc(jevDetail) + "</p>" +
+        '<p class="note" style="margin-top:12px">' + esc(jevDetail) + "</p>" +
         '<p class="hint">Full policy: <code class="chip-v">GET /capabilities/jev</code> — presence + policy, never the credential.</p>') +
       panel("Laya decision provider", "layers",
         '<div class="row">' + (laya.available ? st("ok", "Operational") : st("off", "Not configured")) + (laya.configured ? st("info", "endpoint bound") : "") + "</div>" +
-        '<p class="note" style="margin-top:10px">' + esc(layaDetail) + "</p>" +
+        '<p class="note" style="margin-top:12px">' + esc(layaDetail) + "</p>" +
         '<p class="hint">HTTPS-only and SSRF-guarded on every call. Full policy: <code class="chip-v">GET /capabilities/laya</code>.</p>') +
     "</div>" +
     '<div class="grid grid--2" style="margin-top:16px">' +
       panel("Commands — run in your MCP client", "terminal", '<div class="panel-bd--flush">' + commands + "</div>", { flush: true }) +
-      panel("Decision tools", "zap", '<div class="panel-bd--flush">' + dt.map(function (t) { return toolRow(t); }).join("") + "</div>", { flush: true }) +
+      panel("Decision tools", "zap", '<div class="panel-bd--flush">' + dtRows + "</div>", { flush: true }) +
     "</div>"
   );
 }
 
-/* ---------------------------------------------------------------- roblox */
-
+/* roblox */
 function robloxView() {
   var s = robloxState();
   var r = S.roblox;
   var conf = (r && r.configuration) || {};
   var acc = (r && r.account) || null;
-  /* Connect is offered whenever this browser is not linked and the flow could
-     plausibly work; not-configured / disabled states explain setup instead. */
   var canConnect = (s.l === "Not connected" || s.l === "Authorization required" || s.l === "Insufficient scope" || s.l === "Checking");
 
   var head = '<div class="panel"><div class="panel-bd">' +
     '<div class="eyebrow">Optional external authorization — not a DEMO login</div>' +
-    '<h1 style="font-size:20px;margin:8px 0;letter-spacing:-.02em">Roblox account connection</h1>' +
+    '<h1 style="font-size:22px;margin:10px 0 12px;letter-spacing:-.02em;font-weight:800;line-height:1.2">Roblox account connection</h1>' +
     '<div class="row" style="gap:10px">' + st(s.s, s.l) +
-      (acc && acc.username ? '<span class="mono" style="font-size:14px">@' + esc(acc.username) + "</span>" : "") +
+      (acc && acc.username ? '<span class="mono" style="font-size:14px;font-weight:600">@' + esc(acc.username) + "</span>" : "") +
     "</div>" +
     (s.s === "err" && S.robloxErr ? note(esc(S.robloxErr.message || "Status could not be read.")) : "") +
     (s.l === "Not configured" && S.robloxErr && S.robloxErr.payload && S.robloxErr.payload.hint ? note("<b>Setup:</b> " + esc(S.robloxErr.payload.hint)) : "") +
     (s.l === "Insufficient scope" ? note("<b>Missing scope:</b> " + esc(s.missing || "a requested scope") + " is not on the granted token. Reconnect and approve every scope — account tools report <code class=\"chip-v\">scope_required</code> until then.") : "") +
     (s.l === "Disabled" && conf.disabledReason ? note(esc(conf.disabledReason)) : "") +
     (s.l === "Not configured" && conf.enabled === false && conf.disabledReason ? note(esc(conf.disabledReason)) : "") +
-    '<div class="row" style="margin-top:12px">' +
+    '<div class="row" style="margin-top:16px">' +
       (s.l === "Connected" ? '<button class="btn btn--danger btn--touch" type="button" data-act="roblox-disconnect">' + ic("x") + "Disconnect</button>" :
         canConnect ? '<button class="btn btn--primary btn--touch" type="button" data-act="roblox-connect">' + ic("external") + "Connect Roblox account</button>" : "") +
       '<button class="btn" type="button" data-act="roblox-refresh">' + ic("refresh") + "Re-check status</button>" +
@@ -1094,48 +1090,48 @@ function robloxView() {
   }
 
   var rtools = CAT.filter(function (t) { return t.group === "Roblox"; });
+  var rRows = rtools.length ? rtools.map(function (t) { return toolRow(t); }).join("") : emptyState("game", "No Roblox tools", "Roblox tools are not registered on this deployment.");
 
-  return pageHead("Roblox", "Roblox", "Optional OAuth for your own account — public lookups need nothing at all.") +
-    '<div style="height:16px"></div>' +
+  return pageHead("Roblox", "Roblox", "Optional OAuth for your own account — public lookups need nothing at all. DEMO has no account system.") +
+    '<div style="height:20px"></div>' +
     '<div style="margin-bottom:16px">' + head + "</div>" + connectNote +
     '<div style="margin-top:16px">' + details + "</div>" +
-    '<div style="margin-top:16px">' + panel("Roblox tools", "game", '<div class="panel-bd--flush">' + rtools.map(function (t) { return toolRow(t); }).join("") + "</div>", { flush: true }) + "</div>";
+    '<div style="margin-top:16px">' + panel("Roblox tools", "game", '<div class="panel-bd--flush">' + rRows + "</div>", { flush: true, right: '<span class="hint">' + rtools.length + ' tools</span>' }) + "</div>";
 }
 
-/* ---------------------------------------------------------------- skills */
-
+/* skills */
 function skillsView() {
   var cards = (DATA.BUILTIN_SKILLS || []).map(function (sk) {
     return panel(sk.title, "zap",
-      '<div class="row" style="justify-content:space-between"><span class="mono muted">' + esc(sk.name) + '</span><span class="row" style="gap:6px">' + st("ok", "bundled") + '<code class="chip-v">' + esc(sk.invoke) + "</code></span></div>" +
+      '<div class="row" style="justify-content:space-between"><span class="mono muted">' + esc(sk.name) + '</span><span class="row" style="gap:8px">' + st("ok", "bundled") + '<code class="chip-v">' + esc(sk.invoke) + "</code></span></div>" +
       note(esc(sk.description)) +
-      '<div class="row" style="margin-top:10px;justify-content:space-between">' +
+      '<div class="row" style="margin-top:12px;justify-content:space-between">' +
         '<span class="hint">' + esc(sk.note || "") + (sk.license ? " · " + esc(sk.license) : "") + "</span>" +
         (sk.source ? '<a class="btn btn--sm" href="' + esc(sk.source) + '" target="_blank" rel="noreferrer noopener">' + ic("external", 13) + esc(sk.sourceLabel || "source") + "</a>" : "") +
       "</div>");
   }).join('<div style="height:16px"></div>');
 
   var skt = CAT.filter(function (t) { return t.group === "Skills"; });
+  var sktRows = skt.length ? skt.map(function (t) { return toolRow(t); }).join("") : emptyState("puzzle", "No skill tools", "Skills are not available.");
 
-  return pageHead("Skills", "Skills", "Bundled skills plus the live skills.sh catalog — text in, guidance out, nothing executed.") +
-    '<div style="height:16px"></div>' +
+  return pageHead("Skills", "Skills", "Bundled skills plus the live skills.sh catalog — text in, guidance out, nothing executed. DEMO does not install or run skill code.") +
+    '<div style="height:20px"></div>' +
     '<div class="grid grid--2">' + cards + "</div>" +
     '<div style="margin-top:16px">' + panel("skills.sh surface — via MCP tools", "layers",
       '<div class="panel-bd"><p class="note">Live search, browse, retrieval and security audit run through the <b>skills_* tools over /mcp</b> against the public skills.sh catalog. No account, no local install, no execution: skill text is returned for review, and the <code class="chip-v">npx skills add …</code> line is printed, never run.</p>' +
-      '<div class="row" style="margin-top:10px"><button class="btn btn--sm" type="button" data-act="skills-tools">' + ic("search", 13) + "Search & browse skills tools</button>" +
+      '<div class="row" style="margin-top:12px"><button class="btn btn--sm" type="button" data-act="skills-tools">' + ic("search", 13) + "Search & browse skills tools</button>" +
       '<span class="hint">' + skt.length + " skill tools · filterable with the live availability of each</span></div></div>" +
-      '<div class="panel-bd--flush">' + skt.map(function (t) { return toolRow(t); }).join("") + "</div>", { flush: true }) + "</div>";
+      '<div class="panel-bd--flush">' + sktRows + "</div>", { flush: true }) + "</div>";
 }
 
-/* ----------------------------------------------------------------- about */
-
+/* about */
 function aboutView() {
   var proj = DATA.PROJECT || {};
   var routes = (DATA.API_ROUTES || []).map(function (rt) {
     return kv(rt.path, '<span class="d">' + esc(rt.note) + "</span>");
   }).join("");
   var priv = (DATA.PRIVACY_FACTS || []).map(function (p) {
-    return '<li><span class="li-k">' + esc(p) + "</span></li>";
+    return "<li><span class=\"li-k\">" + esc(p) + "</span></li>";
   }).join("");
   var s1 = S.stats;
   var info =
@@ -1150,17 +1146,17 @@ function aboutView() {
     '<div class="page-head"><div class="eyebrow">' + esc(proj.name || "DEMO") + "</div>" +
       "<h1>" + esc(proj.tagline || "Execution infrastructure for AI agents.") + "</h1>" +
       "<p>" + esc(proj.blurb || "") + "</p>" +
-      '<div class="row" style="margin-top:14px">' +
-        '<button class="btn btn--primary" type="button" data-act="connect-open">' + ic("plug") + "Connect MCP</button>" +
-        (proj.repoUrl ? '<a class="btn" href="' + esc(proj.repoUrl) + '" target="_blank" rel="noreferrer noopener">' + ic("code") + "Source repository</a>" : "") +
-        (proj.docsTreeUrl ? '<a class="btn" href="' + esc(proj.docsTreeUrl) + '" target="_blank" rel="noreferrer noopener">' + ic("book") + "Documentation</a>" : "") +
+      '<div class="row" style="margin-top:18px">' +
+        '<button class="btn btn--primary btn--lg" type="button" data-act="connect-open">' + ic("plug") + "Connect MCP</button>" +
+        (proj.repoUrl ? '<a class="btn btn--lg" href="' + esc(proj.repoUrl) + '" target="_blank" rel="noreferrer noopener">' + ic("code") + "Source repository</a>" : "") +
+        (proj.docsTreeUrl ? '<a class="btn btn--lg" href="' + esc(proj.docsTreeUrl) + '" target="_blank" rel="noreferrer noopener">' + ic("book") + "Documentation</a>" : "") +
       "</div>" +
     "</div>" +
-    '<div class="grid grid--2" style="margin-top:16px">' +
+    '<div class="grid grid--2" style="margin-top:20px">' +
       panel("Project", "info", '<div class="panel-bd--flush">' + info + "</div>", { flush: true }) +
-      panel("Security & privacy", "shield", '<ul class="list">' + priv + "</ul>", { flush: true }) +
+      panel("Security & privacy", "shield", '<ul class="list">' + priv + "</ul>", { flush: true, right: '<span class="badge-secure">' + ic("shield", 12) + 'No login</span>' }) +
     "</div>" +
-    '<div style="margin-top:16px">' + panel("This Worker's routes", "terminal", '<div class="panel-bd--flush">' + routes + "</div>", { flush: true }) + "</div>" +
+    '<div style="margin-top:16px">' + panel("This Worker's routes", "terminal", '<div class="panel-bd--flush">' + routes + "</div>", { flush: true, right: '<span class="hint mono">same-origin</span>' }) + "</div>" +
     '<div style="margin-top:16px">' + panel("Architecture", "layers",
       '<pre class="codeblock">' + esc(DATA.ARCHITECTURE_TEXT || "") + "</pre>" +
       note("DEMO is open source: read it, self-host it, extend it. The inspector you are using is served by the same Worker as <code class=\"chip-v\">/mcp</code> — one deployment, no separate control plane, no login.")) +
@@ -1168,12 +1164,7 @@ function aboutView() {
   );
 }
 
-/* --------------------------------------------------------- connect modal */
-/*
- * Provider URLs come only from BOOT.clients (src/ui/mcp-clients.ts).
- * This script does not invent schemes or query parameters.
- */
-
+/* connect modal — provider URLs only from BOOT.clients */
 function clientById(id) {
   for (var i = 0; i < CLIENTS.length; i++) if (CLIENTS[i].id === id) return CLIENTS[i];
   return null;
@@ -1209,7 +1200,7 @@ function connectFooter(withUrl) {
 }
 function endpointBlock(primary) {
   var cls = primary ? "btn btn--primary" : "btn";
-  return '<p class="endpoint-label">DEMO MCP</p>' +
+  return '<p class="endpoint-label">DEMO MCP endpoint</p>' +
     '<div class="endpoint"><code id="mcp-endpoint" tabindex="0">' + esc(SERVER_URL) + "</code>" +
     '<button class="' + cls + '" type="button" id="copy-endpoint" data-act="copy" data-copy="' + esc(SERVER_URL) + '" data-swap="Copied!">' + ic("copy") + "Copy endpoint</button></div>";
 }
@@ -1246,7 +1237,7 @@ function providerButton(c) {
     '<span class="prov-mark">' + ic(c.icon || "plug") + "</span>" +
     '<span class="prov-txt"><span class="prov-name">' + esc(c.name) + ' <span class="' + pillClass(c.method) + '">' + esc(c.badge) + "</span></span>" +
     '<span class="prov-sum">' + esc(c.summary) + "</span></span>" +
-    '<span class="prov-chev" aria-hidden="true">' + ic("chev", 14) + "</span></button>";
+    '<span class="prov-chev" aria-hidden="true">' + ic("chev", 16) + "</span></button>";
 }
 function launchAnchor(c) {
   var href = safeHref(c.connectionUrl);
@@ -1359,28 +1350,28 @@ function backToClients() {
   focusClient(id);
 }
 
-/* ------------------------------------------------------- command palette */
-
+/* command palette */
 function paletteItems() {
   var items = [];
   var secs = DATA.SECTIONS || [];
   for (var i = 0; i < secs.length; i++) {
     (function (s) {
       if (s.nav === "hidden") return;
-      items.push({ label: s.label, hint: s.blurb || "section", icon: s.icon, run: function () { go(s.id); } });
+      items.push({ label: s.label, hint: s.blurb || "section", icon: s.icon, group: "Navigate", run: function () { go(s.id); } });
     })(secs[i]);
   }
-  items.push({ label: "Copy MCP endpoint", hint: "https URL", icon: "copy", run: function () { copyText(SERVER_URL || ENDPOINT, true); } });
-  items.push({ label: "Connect MCP — show dialog", hint: "modal", icon: "plug", run: function () { openConnect(); } });
-  items.push({ label: "Refresh telemetry", hint: "re-fetch", icon: "refresh", run: function () { loadCore(true); loadRoblox(true); } });
-  items.push({ label: "Capability explorer", hint: CAT.length + " tools", icon: "search", run: function () { go("capabilities"); setTimeout(function () { var el = qs("#tool-search"); if (el) el.focus(); }, 60); } });
+  items.push({ label: "Copy MCP endpoint", hint: "https URL", icon: "copy", group: "Actions", run: function () { copyText(SERVER_URL || ENDPOINT, true); } });
+  items.push({ label: "Connect MCP — show dialog", hint: "modal", icon: "plug", group: "Actions", run: function () { openConnect(); } });
+  items.push({ label: "Refresh telemetry", hint: "re-fetch", icon: "refresh", group: "Actions", run: function () { loadCore(true); loadRoblox(true); } });
+  items.push({ label: "Capability explorer", hint: CAT.length + " tools", icon: "search", group: "Navigate", run: function () { go("capabilities"); setTimeout(function () { var el = qs("#tool-search"); if (el) el.focus(); }, 60); } });
   var cmds = DATA.MCP_COMMANDS || [];
   for (var j = 0; j < cmds.length; j++) {
     (function (cmd) {
-      items.push({ label: "Command " + cmd.name, hint: "via MCP", icon: "terminal", run: function () { go(cmd.name === "/mcp" ? "overview" : "routing"); } });
+      items.push({ label: "Command " + cmd.name, hint: "via MCP", icon: "terminal", group: "Commands", run: function () { go(cmd.name === "/mcp" ? "overview" : "routing"); } });
     })(cmds[j]);
   }
-  if (DATA.PROJECT && DATA.PROJECT.repoUrl) items.push({ label: "Open source repository", hint: "new tab", icon: "code", run: function () { window.open(DATA.PROJECT.repoUrl, "_blank", "noopener"); } });
+  if (DATA.PROJECT && DATA.PROJECT.repoUrl) items.push({ label: "Open source repository", hint: "new tab", icon: "code", group: "Resources", run: function () { window.open(DATA.PROJECT.repoUrl, "_blank", "noopener"); } });
+  if (DATA.PROJECT && DATA.PROJECT.docsTreeUrl) items.push({ label: "Open documentation", hint: "new tab", icon: "book", group: "Resources", run: function () { window.open(DATA.PROJECT.docsTreeUrl, "_blank", "noopener"); } });
   return items;
 }
 
@@ -1398,18 +1389,23 @@ function renderPalette() {
   var items = [];
   for (var i = 0; i < all.length; i++) {
     var it = all[i];
-    if (!q || (it.label + " " + (it.hint || "")).toLowerCase().indexOf(q) !== -1) items.push(it);
+    if (!q || (it.label + " " + (it.hint || "") + " " + (it.group || "")).toLowerCase().indexOf(q) !== -1) items.push(it);
   }
   if (S.pSel >= items.length) S.pSel = items.length ? items.length - 1 : 0;
   if (S.pSel < 0) S.pSel = 0;
   if (!items.length) {
-    box.innerHTML = '<div class="p-empty">Nothing matches that.</div>';
+    box.innerHTML = '<div class="p-empty">' + ic("search", 24) + '<p style="margin:8px 0 0">Nothing matches that.</p><p class="hint" style="margin-top:4px">Try a different term or browse capabilities.</p></div>';
     S.pItems = [];
     return;
   }
   var html = "";
+  var lastGroup = "";
   for (var k = 0; k < items.length; k++) {
     var m = items[k];
+    if (m.group !== lastGroup) {
+      html += '<div class="mi-sec" style="padding:12px 12px 4px">' + esc(m.group || "Other") + "</div>";
+      lastGroup = m.group || "";
+    }
     html += '<button class="p-item" type="button" role="option" aria-selected="' + (k === S.pSel ? "true" : "false") + '" data-pidx="' + k + '" id="p-opt-' + k + '">' +
       ic(m.icon) + '<span class="p-lbl">' + esc(m.label) + "</span>" +
       (m.hint ? '<span class="p-kind">' + esc(m.hint) + "</span>" : "") + "</button>";
@@ -1426,25 +1422,44 @@ function runPalette(i) {
   if (it && it.run) it.run();
 }
 
-/* ------------------------------------------------------------- overlays */
+/* overlays — focus trap, scroll lock, return focus */
+function lockScroll() {
+  var sb = window.innerWidth - document.documentElement.clientWidth;
+  body().style.overflow = "hidden";
+  if (sb > 0) body().style.paddingRight = sb + "px";
+}
+function unlockScroll() {
+  body().style.overflow = "";
+  body().style.paddingRight = "";
+}
+
+function getFocusable(root) {
+  if (!root) return [];
+  return qsa('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])', root).filter(function (el) {
+    return el.offsetParent !== null || el === document.activeElement;
+  });
+}
 
 function openOverlay(overlaySel, focusSel) {
   var ov = qs(overlaySel);
   if (!ov) return;
   S.lastFocus = document.activeElement;
   ov.hidden = false;
+  lockScroll();
   document.addEventListener("keydown", overlayKeys, true);
   var f = qs(focusSel || "input, button", ov);
   if (f) f.focus();
 }
 function closeOverlays() {
   var a = qs("#connect-overlay"), b = qs("#palette-overlay");
+  var wasOpen = (a && !a.hidden) || (b && !b.hidden);
   if (a) a.hidden = true;
   if (b) b.hidden = true;
   S.modalOpen = false;
   S.paletteOpen = false;
   document.removeEventListener("keydown", overlayKeys, true);
-  if (S.lastFocus && S.lastFocus.focus) { try { S.lastFocus.focus(); } catch (e) { /* noop */ } }
+  if (wasOpen) unlockScroll();
+  if (S.lastFocus && S.lastFocus.focus) { try { S.lastFocus.focus(); } catch (e) {} }
   S.lastFocus = null;
 }
 function openConnect() {
@@ -1469,8 +1484,8 @@ function overlayKeys(ev) {
   if (ev.key === "Escape") { ev.preventDefault(); closeOverlays(); return; }
   if (ev.key === "Tab") {
     var scope = S.paletteOpen ? qs("#palette-overlay") : qs("#connect-overlay");
-    if (!scope) return;
-    var f = qsa('a[href], button:not([disabled]), input, [tabindex]:not([tabindex="-1"])', scope);
+    if (!scope || scope.hidden) return;
+    var f = getFocusable(scope);
     if (!f.length) return;
     var first = f[0], last = f[f.length - 1];
     if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last.focus(); }
@@ -1479,15 +1494,17 @@ function overlayKeys(ev) {
   }
   if (S.modalOpen && !S.paletteOpen && (ev.key === "ArrowDown" || ev.key === "ArrowUp" || ev.key === "Home" || ev.key === "End")) {
     var provs = qsa(".prov", qs("#connect-overlay"));
+    if (!provs.length) return;
     var idx = -1;
     for (var pi = 0; pi < provs.length; pi++) if (provs[pi] === document.activeElement) idx = pi;
-    if (idx !== -1) {
+    if (idx !== -1 || ev.key === "Home" || ev.key === "End") {
       ev.preventDefault();
       var next = idx;
       if (ev.key === "ArrowDown") next = Math.min(provs.length - 1, idx + 1);
       else if (ev.key === "ArrowUp") next = Math.max(0, idx - 1);
       else if (ev.key === "Home") next = 0;
       else next = provs.length - 1;
+      if (next < 0) next = 0;
       provs[next].focus();
       return;
     }
@@ -1500,20 +1517,48 @@ function overlayKeys(ev) {
 }
 
 function setMenu(open) {
-  body().classList.toggle("menu-open", !!open);
+  var isOpen = !!open;
+  var wasOpen = body().classList.contains("menu-open");
+  body().classList.toggle("menu-open", isOpen);
   var btn = qs('[data-act="menu-toggle"]');
   if (btn) {
-    btn.setAttribute("aria-expanded", open ? "true" : "false");
-    btn.setAttribute("aria-label", open ? "Close menu" : "Open menu");
+    btn.setAttribute("aria-expanded", isOpen ? "true" : "false");
+    btn.setAttribute("aria-label", isOpen ? "Close menu" : "Open menu");
   }
-  if (open) {
+  if (isOpen && !wasOpen) {
+    lockScroll();
     var fi = qs("#menu a.mi, #menu button.mi");
     if (fi) fi.focus();
+    // focus trap for menu
+    document.addEventListener("keydown", menuKeys, true);
+    document.addEventListener("click", menuOutside, true);
+  } else if (!isOpen && wasOpen) {
+    unlockScroll();
+    document.removeEventListener("keydown", menuKeys, true);
+    document.removeEventListener("click", menuOutside, true);
   }
 }
+function menuKeys(ev) {
+  if (ev.key === "Escape") { ev.preventDefault(); setMenu(false); var b = qs('[data-act="menu-toggle"]'); if (b) b.focus(); return; }
+  if (ev.key === "Tab") {
+    var scope = qs("#menu");
+    if (!scope) return;
+    var f = getFocusable(scope);
+    if (!f.length) return;
+    var first = f[0], last = f[f.length - 1];
+    if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last.focus(); }
+    else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus(); }
+  }
+}
+function menuOutside(ev) {
+  var menu = qs("#menu");
+  var btn = qs('[data-act="menu-toggle"]');
+  if (!menu || !body().classList.contains("menu-open")) return;
+  if (menu.contains(ev.target) || (btn && btn.contains(ev.target))) return;
+  setMenu(false);
+}
 
-/* ---------------------------------------------------------------- toast */
-
+/* toast */
 function toast(msg) {
   var box = qs("#toasts");
   if (!box) return;
@@ -1521,8 +1566,8 @@ function toast(msg) {
   el.className = "toast";
   el.innerHTML = ic("checkc") + "<span>" + esc(msg) + "</span>";
   box.appendChild(el);
-  setTimeout(function () { el.style.opacity = "0"; el.style.transition = "opacity 160ms"; }, 1900);
-  setTimeout(function () { el.remove(); }, 2150);
+  setTimeout(function () { el.style.opacity = "0"; el.style.transform = "translateY(4px)"; el.style.transition = "opacity 180ms var(--ease-out), transform 180ms var(--ease-out)"; }, 2200);
+  setTimeout(function () { el.remove(); }, 2500);
 }
 
 function copyText(text, notify) {
@@ -1552,8 +1597,7 @@ function fallbackCopy(text) {
   } catch (e) { return false; }
 }
 
-/* ------------------------------------------------------------ data loads */
-
+/* data loads */
 function loadCore(force) {
   if (S.core && !force) return S.core;
   S.statsErr = null;
@@ -1602,8 +1646,7 @@ function loadLazy(key) {
   });
 }
 
-/* ---------------------------------------------------------------- events */
-
+/* events */
 document.addEventListener("click", function (ev) {
   var t = ev.target;
   if (!t || !t.closest) return;
@@ -1636,7 +1679,16 @@ document.addEventListener("click", function (ev) {
       go("capabilities");
     } else {
       S.openTool = S.openTool === nm ? null : nm;
-      renderView();
+      var rowsBox = qs("#tool-rows");
+      if (rowsBox) {
+        rowsBox.innerHTML = toolsRowsHtml();
+        if (S.openTool === nm) {
+          var detail = rowsBox.querySelector(".tdetail");
+          if (detail && detail.scrollIntoView) detail.scrollIntoView({ block: "nearest", behavior: "smooth" });
+        }
+      } else {
+        renderView();
+      }
     }
   }
   else if (act === "plat") {
@@ -1681,6 +1733,12 @@ document.addEventListener("click", function (ev) {
     S.tf.avail = S.tf.avail === el.getAttribute("data-a") ? "" : el.getAttribute("data-a");
     renderView();
   }
+  else if (act === "clear-filters") {
+    S.tf.group = ""; S.tf.avail = ""; S.tf.q = "";
+    var inp = qs("#tool-search");
+    if (inp) inp.value = "";
+    renderView();
+  }
   else if (act === "refresh") {
     loadCore(true);
     loadRoblox(true);
@@ -1715,7 +1773,6 @@ document.addEventListener("input", function (ev) {
   if (!el) return;
   if (el.id === "tool-search") {
     S.tf.q = el.value;
-    /* scoped update: keep the input (focus, caret, mobile keyboard) alive */
     var rowsBox = qs("#tool-rows");
     if (rowsBox) rowsBox.innerHTML = toolsRowsHtml();
     else { renderView(); return; }
@@ -1723,6 +1780,11 @@ document.addEventListener("input", function (ev) {
     if (count) {
       var n = filteredTools().length;
       count.textContent = n + " shown · " + (S.stats ? S.stats.toolCount + " live on /mcp" : CAT.length + " in catalog");
+    }
+    var tcount2 = qs(".panel-hd .hd-note .mono");
+    if (tcount2) {
+      var list = filteredTools();
+      tcount2.textContent = list.length + "/" + CAT.length;
     }
   }
   if (el.id === "palette-input") {
@@ -1739,6 +1801,8 @@ document.addEventListener("keydown", function (ev) {
     else openPalette();
   } else if (ev.key === "Escape" && !S.modalOpen && !S.paletteOpen && body().classList.contains("menu-open")) {
     setMenu(false);
+    var b = qs('[data-act="menu-toggle"]');
+    if (b) b.focus();
   }
 });
 
@@ -1749,8 +1813,7 @@ window.addEventListener("hashchange", function () {
   enterRoute();
 });
 
-/* ------------------------------------------------------------------ boot */
-
+/* boot */
 function enterRoute() {
   if (S.route === "roblox" && !S.roblox && !S.robloxErr) loadRoblox();
   if (S.route === "video") loadLazy("video");
