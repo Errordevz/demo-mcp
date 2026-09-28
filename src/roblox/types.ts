@@ -57,6 +57,12 @@ export interface RobloxOAuthConfig {
   /** Scopes whose syntax is fine but which Roblox does not document (surfaced, never sent blindly). */
   unrecognizedScopes: string[];
   redirectUri: string;
+  /**
+   * Non-null when a configured ROBLOX_REDIRECT_URI override disagreed with the
+   * pinned MCP_PUBLIC_ORIGIN and was ignored. The value is a diagnostic label,
+   * never the stale URI itself.
+   */
+  staleRedirectOverride: string | null;
   stateTtlSeconds: number;
   rateLimitPerMinute: number;
   openCloudRatePerMinute: number;
@@ -193,6 +199,8 @@ export interface AccountStatusPayload {
     clientIdConfigured: boolean;
     clientSecretConfigured: boolean;
     redirectUri: string;
+    /** Non-null when a stale ROBLOX_REDIRECT_URI override was ignored (diagnostic label, never the stale value). */
+    redirectUriOverride?: string | null;
     requestedScopes: string[];
     storage: "durable-object" | "memory";
     tokenEncryption: "aes-gcm-256" | "none";

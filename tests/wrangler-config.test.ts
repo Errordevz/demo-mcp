@@ -154,8 +154,8 @@ describe("wrangler.jsonc", () => {
 
   it("binds the Durable Objects and migrations the code expects", async () => {
     const data = await config();
-    expect(data.durable_objects.bindings.map((entry: { name: string }) => entry.name).sort()).toEqual(["BROWSER_SESSIONS", "MCP_AUTH", "ROBLOX_AUTH"]);
-    expect(data.migrations.map((entry: { tag: string }) => entry.tag)).toEqual(["v1", "v2", "v3"]);
+    expect(data.durable_objects.bindings.map((entry: { name: string }) => entry.name).sort()).toEqual(["BROWSER_SESSIONS", "DEMO_ACCOUNTS", "MCP_AUTH", "ROBLOX_AUTH"]);
+    expect(data.migrations.map((entry: { tag: string }) => entry.tag)).toEqual(["v1", "v2", "v3", "v4"]);
     expect(data.r2_buckets.map((entry: { binding: string }) => entry.binding)).toContain("SCREENSHOTS");
     expect(data.browser.binding).toBe("BROWSER");
     expect(data.ai.binding).toBe("AI");
@@ -164,7 +164,7 @@ describe("wrangler.jsonc", () => {
   it("only declares variables the code actually reads, and reads the flags it declares", async () => {
     const data = await config();
     const readers = await Promise.all(
-      ["index.ts", "platform-entry.ts", "src/auth/oauth-config.ts", "src/auth/access-identity.ts", "src/session/factory.ts", "src/video/processor.ts", "src/video/capabilities.ts", "src/jev/config.ts", "src/laya/config.ts", "src/decisions/provider.ts", "src/roblox/config.ts", "src/git/config.ts", "src/core/rate-limit.ts", "src/web/storage.ts", "src/web/monitor.ts"].map((file) =>
+      ["index.ts", "platform-entry.ts", "src/auth/oauth-config.ts", "src/auth/access-identity.ts", "src/session/factory.ts", "src/video/processor.ts", "src/video/capabilities.ts", "src/jev/config.ts", "src/laya/config.ts", "src/decisions/provider.ts", "src/roblox/config.ts", "src/account/config.ts", "src/git/config.ts", "src/core/rate-limit.ts", "src/web/storage.ts", "src/web/monitor.ts"].map((file) =>
         readFile(path.join(ROOT, file), "utf8"),
       ),
     );

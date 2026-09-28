@@ -4,7 +4,10 @@
  */
 
 import { randomOpaqueToken, sha256Hex, verifyPkcePair } from "../roblox/crypto.js";
-import { verifyCloudflareAccessIdentity, type VerifiedAccessIdentity } from "./access-identity.js";
+import type { VerifiedAccessIdentity } from "./access-identity.js";
+import { resolveRequestIdentity, validRequestIdentity, type RequestIdentity } from "./request-identity.js";
+import { resolveAccountStore } from "../account/store.js";
+import { verifyPassword } from "../account/passwords.js";
 import {
   authorizationServerMetadata,
   MCP_OAUTH_SCOPES,
@@ -43,9 +46,25 @@ export interface McpOAuthRouteEnv extends Record<string, unknown> {
 
 export interface McpOAuthRouteDeps {
   store?: McpAuthStoreApi;
+  /**
+   * Test seam: a custom identity provider. Production resolves the unified
+   * request identity (DEMO account session first, then Cloudflare Access).
+   */
   identity?: (request: Request, env: McpOAuthRouteEnv) => Promise<VerifiedAccessIdentity | null>;
   fetch?: typeof fetch;
   now?: () => number;
+}
+
+type Principal = { subjectHash: string };
+
+/** Adapt the legacy Access-only dep shape to the unified principal, or resolve the real identity. */
+async function currentIdentity(request: Request, env: McpOAuthRouteEnv, deps: McpOAuthRouteDeps): Promise<Principal | null> {
+  if (deps.identity) {
+    const legacy = await deps.identity(request, env);
+    return legacy && /^[a-f0-9]{64}$/.test(legacy.subjectHash) ? { subjectHash: legacy.subjectHash } : null;
+  }
+  const identity: RequestIdentity | null = await resolveRequestIdentity(request, env);
+  return validRequestIdentity(identity) ? { subjectHash: identity.subjectHash } : null;
 }
 
 interface ChatGptClientMetadata {
@@ -170,9 +189,17 @@ async function authorizationGet(
   const scopeParse = parseScopes(scopeValue.value || "roblox:read");
   if (!scopeParse) return authorizationErrorRedirect(config, redirectUri, state, "invalid_scope", "One or more requested scopes are not supported.");
 
-  const identity = await (deps.identity ?? defaultIdentity)(request, env);
+  const identity = await currentIdentity(request, env, deps);
   if (!validIdentity(identity)) {
-    return oauthJsonError(401, "login_required", "Sign in through the configured Cloudflare Access application to authorize DEMO.");
+    // Production: this route is reached by a browser from ChatGPT, so answer with
+    // the DEMO sign-in page instead of a bare JSON error. The page posts the
+    // credentials back here; a successful sign-in redirects into this same GET,
+    // which then re-validates every parameter before showing consent.
+    if (!deps.identity) {
+      const accounts = resolveAccountStore(env);
+      if (accounts) return signInPageResponse(request, params, null);
+    }
+    return oauthJsonError(401, "login_required", "Sign in to your DEMO account (or the configured Cloudflare Access application) to authorize DEMO.");
   }
 
   const requestId = randomOpaqueToken(32);
@@ -217,6 +244,10 @@ async function authorizationPost(
   if (!sameOriginFormAllowed(request, config.origin)) return oauthJsonError(403, "invalid_request", "The consent form must be submitted from DEMO.");
   const form = await readForm(request);
   if (!form) return oauthJsonError(400, "invalid_request", "The consent form is malformed.");
+  const authAction = singleParam(form, "auth_action");
+  if (authAction.ok && authAction.value === "demo_session" && !deps.identity) {
+    return sessionLoginPost(request, env, form, now);
+  }
   const requestId = singleParam(form, "request_id");
   const csrf = singleParam(form, "csrf_token");
   const decision = singleParam(form, "decision");
@@ -225,8 +256,8 @@ async function authorizationPost(
     return oauthJsonError(400, "invalid_request", "The consent request is missing required state.");
   }
 
-  const identity = await (deps.identity ?? defaultIdentity)(request, env);
-  if (!validIdentity(identity)) return oauthJsonError(401, "login_required", "Sign in through Cloudflare Access before submitting consent.");
+  const identity = await currentIdentity(request, env, deps);
+  if (!validIdentity(identity)) return oauthJsonError(401, "login_required", "Sign in to your DEMO account (or Cloudflare Access) before submitting consent.");
 
   const record = await store.consumeConsent(
     await sha256Hex(requestId.value),
@@ -263,9 +294,81 @@ async function authorizationPost(
   return redirectResponse(callback.toString(), true);
 }
 
+/* ----------------------------------------------------- DEMO session sign-in */
+
+/** Hidden authorize parameters carried through the session sign-in form. */
+const SIGNIN_PASSTHROUGH = ["client_id", "redirect_uri", "state", "response_type", "code_challenge", "code_challenge_method", "resource", "scope"] as const;
+
+function signInHiddenFields(params: URLSearchParams): string {
+  let html = "";
+  for (const key of SIGNIN_PASSTHROUGH) {
+    const value = params.get(key);
+    if (value == null) continue;
+    if (value.length > 2_048) return "";
+    html += `<input type="hidden" name="${escapeHtml(key)}" value="${escapeHtml(value)}">`;
+  }
+  return html;
+}
+
+function signInPageHtml(params: URLSearchParams, errorMessage: string | null): string {
+  const hidden = signInHiddenFields(params);
+  const error = errorMessage ? `<p class="formerr" role="alert">${escapeHtml(errorMessage)}</p>` : "";
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Sign in to DEMO</title><style>${CONSENT_STYLE}.field{display:grid;gap:8px;margin:14px 0}.field label{font-size:13px;color:#aab4c3}.field input{width:100%;min-height:46px;padding:11px 12px;border:1px solid #3a4350;border-radius:11px;background:#090c11;color:#f4f6fa;font:500 15px inherit}.formerr{margin:12px 0;padding:11px 13px;border:1px solid #5c3138;border-radius:11px;background:#2a1518;color:#ffb3b8;font-size:13px;line-height:1.5}</style></head><body><main><div class="mark">D</div><p class="eyebrow">DEMO · authorization</p><h1>Sign in to DEMO</h1><p class="lead">ChatGPT is asking to authorize protected DEMO tools. Sign in with your DEMO account to keep your protected data (for example, your linked Roblox account) separate from everyone else.</p>${error}<form method="post" action="/oauth/authorize">${hidden}<div class="field"><label for="email">Email</label><input id="email" name="email" type="email" autocomplete="email" required maxlength="254"></div><div class="field"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required maxlength="128"></div><div class="actions"><button class="allow" type="submit" name="auth_action" value="demo_session">Sign in and continue</button></div></form><p class="foot">No DEMO account yet? Open DEMO, choose <strong>Create account</strong>, then restart this connection from ChatGPT. Public tools need no sign-in at all.</p></main></body></html>`;
+}
+
+function signInPageResponse(request: Request, params: URLSearchParams, errorMessage: string | null): Response {
+  void request;
+  return new Response(signInPageHtml(params, errorMessage), {
+    status: errorMessage ? 401 : 200,
+    headers: { "Content-Type": "text/html; charset=UTF-8", "Content-Security-Policy": consentCsp(), "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY" },
+  });
+}
+
+async function sessionLoginPost(request: Request, env: McpOAuthRouteEnv, form: URLSearchParams, now: number): Promise<Response> {
+  if (!sameOriginFormAllowed(request, new URL(request.url).origin)) {
+    return oauthJsonError(403, "invalid_request", "The sign-in form must be submitted from DEMO.");
+  }
+  const store = resolveAccountStore(env);
+  if (!store) return oauthJsonError(503, "temporarily_unavailable", "The DEMO account system is not configured on this Worker.");
+  const emailParam = singleParam(form, "email");
+  const passwordParam = singleParam(form, "password");
+  const email = emailParam.ok && emailParam.value ? emailParam.value.trim().toLowerCase() : "";
+  const password = passwordParam.ok && typeof passwordParam.value === "string" ? passwordParam.value : "";
+  const retry = () => signInPageResponse(request, form, "That email and password combination did not match a DEMO account.");
+  if (!email || !password) return retry();
+
+  const acctLimit = await store.charge("oauth-login-acct", (await sha256Hex(email)).slice(0, 32), 8, 300_000, now);
+  if (!acctLimit.allowed) return signInPageResponse(request, form, `Too many sign-in attempts. Try again in ${acctLimit.retryAfterSeconds}s.`);
+  const user = await store.getUserByEmail(email);
+  const valid = user ? await verifyPassword(password, user.passwordHash) : false;
+  if (!user || !valid) return retry();
+
+  const { resolveAccountConfig } = await import("../account/config.js");
+  const config = resolveAccountConfig(env);
+  const token = randomOpaqueToken(32);
+  await store.putSession(await sha256Hex(token), {
+    version: 1,
+    userId: user.id,
+    createdAt: now,
+    expiresAt: now + config.sessionTtlSeconds * 1000,
+    label: (request.headers.get("User-Agent") ?? "Unknown device").slice(0, 100),
+  });
+  // Identity is re-derived from the fresh session cookie on the redirected GET.
+  const target = new URL("/oauth/authorize", new URL(request.url).origin);
+  for (const key of SIGNIN_PASSTHROUGH) {
+    const value = form.get(key);
+    if (value != null && value.length <= 2_048) target.searchParams.set(key, value);
+  }
+  const headers = authHeaders();
+  headers.set("Location", target.toString());
+  const secure = new URL(request.url).protocol === "https:" || new URL(request.url).hostname === "localhost" || new URL(request.url).hostname === "127.0.0.1";
+  headers.append("Set-Cookie", `demo_session=${encodeURIComponent(token)}; Path=/; Max-Age=${config.sessionTtlSeconds}; HttpOnly;${secure ? " Secure;" : ""} SameSite=Lax`);
+  return new Response(null, { status: 302, headers });
+}
+
 function consentHtml(requestId: string, csrfToken: string, scopes: string[], expiresInSeconds: number): string {
   const list = scopes.map((scope) => `<li><code>${escapeHtml(scope)}</code><span>${escapeHtml(MCP_OAUTH_SCOPE_DESCRIPTIONS[scope as keyof typeof MCP_OAUTH_SCOPE_DESCRIPTIONS])}</span></li>`).join("");
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Authorize DEMO</title><style>${CONSENT_STYLE}</style></head><body><main><div class="mark">D</div><p class="eyebrow">DEMO · ChatGPT connection</p><h1>Authorize protected tools?</h1><p class="lead">You are signing in through your organization’s Cloudflare Access identity. DEMO uses that verified identity to keep your protected data separate from other users.</p><section><h2>ChatGPT is requesting</h2><ul>${list}</ul></section><p class="note"><strong>Public tools stay public.</strong> This approval does not connect a Roblox account. Roblox linking is a separate action that redirects to Roblox’s official consent page, and Roblox tokens remain encrypted on the Worker.</p><form method="post" action="/oauth/authorize"><input type="hidden" name="request_id" value="${escapeHtml(requestId)}"><input type="hidden" name="csrf_token" value="${escapeHtml(csrfToken)}"><div class="actions"><button class="deny" type="submit" name="decision" value="deny">Cancel</button><button class="allow" type="submit" name="decision" value="authorize">Authorize ChatGPT</button></div></form><p class="foot">Authorization request expires in ${expiresInSeconds} seconds. DEMO tokens last up to 15 minutes; no refresh token is issued.</p></main></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Authorize DEMO</title><style>${CONSENT_STYLE}</style></head><body><main><div class="mark">D</div><p class="eyebrow">DEMO · ChatGPT connection</p><h1>Authorize protected tools?</h1><p class="lead">You are signed in with your DEMO identity (DEMO account, or Cloudflare Access when the deployment uses it). DEMO uses that verified identity to keep your protected data separate from other users.</p><section><h2>ChatGPT is requesting</h2><ul>${list}</ul></section><p class="note"><strong>Public tools stay public.</strong> This approval does not connect a Roblox account. Roblox linking is a separate action that redirects to Roblox’s official consent page, and Roblox tokens remain encrypted on the Worker.</p><form method="post" action="/oauth/authorize"><input type="hidden" name="request_id" value="${escapeHtml(requestId)}"><input type="hidden" name="csrf_token" value="${escapeHtml(csrfToken)}"><div class="actions"><button class="deny" type="submit" name="decision" value="deny">Cancel</button><button class="allow" type="submit" name="decision" value="authorize">Authorize ChatGPT</button></div></form><p class="foot">Authorization request expires in ${expiresInSeconds} seconds. DEMO tokens last up to 15 minutes; no refresh token is issued.</p></main></body></html>`;
 }
 
 const CONSENT_STYLE = `:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#080a0e;color:#f4f6fa;font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;padding:24px}main{width:min(100%,560px);padding:30px;border:1px solid #252c37;border-radius:22px;background:#11151c;box-shadow:0 28px 80px #0008}.mark{width:34px;height:34px;display:grid;place-items:center;border-radius:11px;background:#f0f3f7;color:#111;font-weight:900}.eyebrow{margin:16px 0 6px;color:#98a4b5;font-size:12px;text-transform:uppercase;letter-spacing:.1em}h1{font-size:25px;line-height:1.2;letter-spacing:-.03em;margin:0 0 12px}.lead,.note,.foot{color:#aab4c3;line-height:1.55;font-size:14px}section{margin:22px 0;padding:18px;border:1px solid #2a3340;border-radius:15px;background:#0b0e13}h2{font-size:14px;margin:0 0 12px}ul{list-style:none;margin:0;padding:0;display:grid;gap:12px}li{display:grid;gap:4px}code{font:600 12px ui-monospace,monospace;color:#c3d5ff}li span{font-size:13px;color:#9ca7b7;line-height:1.45}.note{padding:13px 14px;border-left:2px solid #8798b2;background:#171c24;border-radius:0 10px 10px 0}.actions{display:flex;gap:10px;justify-content:flex-end;margin-top:22px}button{min-height:44px;padding:10px 16px;border:1px solid #3a4350;border-radius:12px;background:#1a202a;color:#f4f6fa;font:650 14px inherit;cursor:pointer}.allow{background:#f0f3f7;color:#101216;border-color:#f0f3f7}.foot{font-size:12px;margin:20px 0 0;color:#737f90}@media(max-width:480px){main{padding:22px}.actions{flex-direction:column-reverse}button{width:100%}}`;
@@ -432,11 +535,7 @@ async function fetchChatGptClient(clientId: string, fetcher: typeof fetch, now: 
 
 /* --------------------------------------------------------------- utilities */
 
-async function defaultIdentity(request: Request, env: McpOAuthRouteEnv): Promise<VerifiedAccessIdentity | null> {
-  return verifyCloudflareAccessIdentity(request, env);
-}
-
-function validIdentity(identity: VerifiedAccessIdentity | null): identity is VerifiedAccessIdentity {
+function validIdentity(identity: Principal | null): identity is Principal {
   return Boolean(identity && /^[a-f0-9]{64}$/.test(identity.subjectHash));
 }
 

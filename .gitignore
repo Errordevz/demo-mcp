@@ -16,3 +16,4 @@ dist-test/
 .claude/
 agent/
 wrangler.dev.local.jsonc
+wrangler.local.jsonc

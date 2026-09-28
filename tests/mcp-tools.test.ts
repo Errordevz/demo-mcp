@@ -191,15 +191,14 @@ describe("worker routes", () => {
     const html = await root.text();
     // The affordance a human looks for, wired to the real route.
     expect(html).toContain("Connect Roblox account");
-    expect(html).toMatch(/location\.href='\/oauth\/roblox\/link'/);
+    expect(html).toContain("/oauth/roblox/link");
     expect(html).toContain("/oauth/roblox/status");
     expect(html).toContain("/oauth/roblox/logout"); // disconnect/revoke is reachable too
     expect(html).toContain("Disconnect");
-    // The static dashboard does not collect credentials or tokens; the link route
-    // separately asks only for the short-lived code returned by the protected MCP tool.
-    expect(html).not.toMatch(/<form/i);
-    expect(html).not.toMatch(/type=["']?password/i);
-    expect(html).not.toMatch(/autocomplete=["']?(current-)?password/i);
+    // The dashboard only carries credentials in the dedicated DEMO-account
+    // forms (all server-side /account/*); password autofill is hardened and no
+    // OAuth token material is ever rendered.
+    expect(html).not.toMatch(/autocomplete=["']?password/i);
     expect(html).not.toMatch(/(access|refresh)[_-]?token\s*[:=]/i);
 
     const init = await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test-client", version: "1" } });

@@ -42,7 +42,11 @@ var S = {
   core: null,
   modalOpen: false, paletteOpen: false, lastFocus: null, pSel: 0, pQuery: "", pItems: [],
   connectId: "", connectNote: "",
-  menuFocusTrap: null
+  menuFocusTrap: null,
+  session: null, sessionLoaded: false,
+  authMode: "signin", authErr: "", authBusy: false, authMsg: "",
+  resetToken: "", deleteArmed: false, verifyBusy: false, verifyMsg: "", verifyErr: "",
+  pwBusy: false, pwMsg: "", pwErr: "", sessions: null, sessionsErr: ""
 };
 
 var LAZY_ROUTES = {
@@ -74,6 +78,10 @@ function jfetch(path, opts) {
   opts = opts || {};
   var init = { cache: "no-store", headers: { Accept: "application/json" } };
   if (opts.method) init.method = opts.method;
+  if (opts.body != null) {
+    init.headers["Content-Type"] = "application/json";
+    init.body = typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body);
+  }
   return fetch(path, init).then(function (r) {
     return r.text().then(function (t) {
       var j = null;
@@ -154,13 +162,19 @@ var ICONS = {
   users: ["M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2", "M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z", "M22 21v-2a4 4 0 0 0-3-3.87", "M16 3.13a4 4 0 0 1 0 7.75"],
   dot: ["M12 13.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3z"],
   inbox: ["M4 4h16v16H4z", "M4 7l8 6 8-6"],
-  star: ["M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"]
+  star: ["M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"],
+  user: ["M19 21v-1.5a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4V21", "M12 11.5a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"],
+  sun: ["M12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10z", "M12 1.5v2.2", "M12 20.3v2.2", "M4.2 4.2l1.6 1.6", "M18.2 18.2l1.6 1.6", "M1.5 12h2.2", "M20.3 12h2.2", "M4.2 19.8l1.6-1.6", "M18.2 5.8l1.6-1.6"],
+  moon: ["M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11z"],
+  auto: ["M3 5h18v12H3z", "M8 21h8", "M12 17v4"],
+  logout: ["M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4", "M10 17l5-5-5-5", "M15 12H3"]
 };
 
 function ic(name, size) {
   var paths = ICONS[name] || ICONS.dot;
   var out = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"';
   if (size) out += ' width="' + size + '" height="' + size + '"';
+  out += ">";
   for (var i = 0; i < paths.length; i++) out += '<path d="' + paths[i] + '"/>';
   return out + "</svg>";
 }
@@ -171,6 +185,69 @@ function st(kind, label) {
 }
 function boolSt(v, okLabel, offLabel) {
   return v ? st("ok", okLabel) : st("off", offLabel || "Unavailable");
+}
+
+/* Platform brand marks — inline SVG simplified from each vendor's official
+   logo geometry (currentColor except Cursor's solid black/white tile).
+   Static markup only — no scripts, no external assets, CSP-safe. */
+var PLATFORM_LOGOS = {
+  chatgpt: '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.073zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.8956zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 8.2774V5.9448a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/></svg>',
+  claude: '<svg viewBox="0 0 46 32" width="24" height="24" aria-hidden="true"><rect width="46" height="32" rx="4" fill="#D97757"/><path fill="#FFF" d="M8.85 21.5h13.1l-1.4-2.6H9.05l1.7-3.15h4.7l-1.13-2.6H10.6L9.7 10.5H7.05l-6.2 11h11.9zm8.12-11h2.45l5.65 10.05 1.25-2.5 1.25 5.5h2.45l-2.47-11h-6.83v.95l3.45 5.55-3.45-5.55H18zm12 11h2.45l2.7-9.7 2.65 9.7h4.65l-4.55-11h-2.4l-3.5 8.15-2.8-8.15h-2.2zm3.92-13.35l1.65 1.55-1.05 3.1-.6-4.65z"/></svg>',
+  cursor: '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><rect width="24" height="24" rx="5" fill="#000"/><path d="M5 4.8L18.9 12 5 19.2V4.8z" fill="#fff"/></svg>',
+  vscode: '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="#007ACC" d="M23.15 2.587L18.21.21a1.494 1.494 0 0 0-1.705.29l-9.46 8.63-4.12-3.128a.999.999 0 0 0-1.276.057L.327 7.261A1 1 0 0 0 .326 8.74L3.899 12 .326 15.26a1 1 0 0 0 .001 1.479L1.65 17.94a.999.999 0 0 0 1.276.057l4.12-3.128 9.46 8.63a1.492 1.492 0 0 0 1.704.29l4.942-2.377A1.5 1.5 0 0 0 24 20.06V3.939a1.5 1.5 0 0 0-.85-1.352zM18.212 16.25l-7.493-4.25 7.493-4.25v8.5z"/></svg>',
+  "claude-code": ""
+};
+PLATFORM_LOGOS["claude-code"] = PLATFORM_LOGOS.claude;
+
+function platLogo(id, icon) {
+  var mark = PLATFORM_LOGOS[id];
+  return '<span class="plat-logo" aria-hidden="true">' + (mark || ic(icon || "plug", 22)) + "</span>";
+}
+
+/* theme — explicit choice persisted in localStorage; "auto" follows the OS. */
+var THEME_KEY = "demo_theme_v1";
+function themeMode() {
+  try {
+    var v = localStorage.getItem(THEME_KEY) || "auto";
+    return (v === "light" || v === "dark") ? v : "auto";
+  } catch (e) { return "auto"; }
+}
+function applyStoredTheme() {
+  var root = document.documentElement, m = themeMode();
+  if (m === "light" || m === "dark") root.setAttribute("data-theme", m);
+  else root.removeAttribute("data-theme");
+  root.setAttribute("data-theme-mode", m);
+  var btn = qs("#theme-btn");
+  if (btn) {
+    btn.setAttribute("data-theme-state", m);
+    btn.setAttribute("aria-label", "Theme: " + (m === "auto" ? "system" : m) + ". Switch theme.");
+    btn.setAttribute("title", "Theme: " + (m === "auto" ? "system" : m));
+  }
+}
+function cycleTheme() {
+  var order = ["auto", "light", "dark"], cur = themeMode();
+  var next = order[(order.indexOf(cur) + 1) % order.length];
+  try { localStorage.setItem(THEME_KEY, next); } catch (e) {}
+  applyStoredTheme();
+  toast("Theme: " + (next === "auto" ? "system" : next));
+}
+
+/* session — DEMO account cookie state (HttpOnly; probed via /account/*). */
+function signedIn() { return !!(S.session && S.session.signedIn && S.session.account); }
+function accountEmail() { return signedIn() ? String(S.session.account.email || "") : ""; }
+function accountVerified() { return signedIn() ? !!S.session.account.emailVerified : false; }
+function loadSession() {
+  return jfetch("/account/session").then(function (d) {
+    S.session = (d && typeof d === "object") ? Object.assign({ accountsAvailable: true }, d) : { signedIn: false, accountsAvailable: true };
+    S.sessionLoaded = true;
+  }, function () {
+    // 503 when the account store is not bound, or the route is unreachable.
+    S.session = { signedIn: false, accountsAvailable: false };
+    S.sessionLoaded = true;
+  }).then(function () {
+    renderHeaderState();
+    if (S.route === "account" || S.route === "auth" || S.route === "roblox") renderView();
+  });
 }
 
 /* app state helpers */
@@ -361,6 +438,9 @@ function renderShell() {
           '<span class="grow"></span>' +
           '<div class="header-actions">' +
             '<button class="btn btn--smhide" type="button" data-act="palette-open" aria-label="Search (Ctrl+K)">' + ic("search") + '<span class="lbl">Search</span></button>' +
+            '<button class="btn theme-btn" id="theme-btn" type="button" data-act="theme-toggle" data-theme-state="auto" aria-label="Theme: system. Switch theme." title="Theme: system">' +
+              '<span class="th-ico th-sun">' + ic("sun") + '</span><span class="th-ico th-moon">' + ic("moon") + '</span><span class="th-ico th-auto">' + ic("auto") + "</span></button>" +
+            '<button class="btn" id="account-btn" type="button" data-act="account-open" aria-label="' + (signedIn() ? "Open account page" : "Sign in") + '">' + ic("user") + '<span class="lbl" id="account-btn-label">' + (signedIn() ? esc(accountEmail()) : "Sign in") + "</span></button>" +
             '<button class="btn btn--primary" type="button" data-act="connect-open">' + ic("plug") + "<span>Connect MCP</span></button>" +
             '<button class="menu-btn" type="button" data-act="menu-toggle" aria-label="Open menu" aria-expanded="false" aria-controls="menu">' + ic("menu") + "</button>" +
           "</div>" +
@@ -368,6 +448,8 @@ function renderShell() {
         '<nav class="menu" id="menu" aria-label="Menu">' +
           '<div class="menu-in">' + menuPrim +
             '<div class="mi-sec">Explore</div>' + menuSec +
+            '<div class="mi-sec">Account</div>' +
+            '<a class="mi" href="#/account" data-route="account">' + ic("user") + "<span>Account</span></a>" +
             '<div class="mi-sec">Resources</div>' +
             (proj.docsTreeUrl ? '<a class="mi" href="' + esc(proj.docsTreeUrl) + '" target="_blank" rel="noreferrer noopener">' + ic("book") + "<span>Docs</span></a>" : "") +
             (proj.repoUrl ? '<a class="mi" href="' + esc(proj.repoUrl) + '" target="_blank" rel="noreferrer noopener">' + ic("code") + "<span>Source on GitHub</span></a>" : "") +
@@ -391,6 +473,11 @@ function renderHeaderState() {
   var ver = qs("#brand-ver");
   var live = (S.stats && S.stats.version) || VERSION;
   if (ver) ver.textContent = live ? "v" + live : "";
+  var acct = qs("#account-btn"), acctLbl = qs("#account-btn-label");
+  if (acct && acctLbl) {
+    acctLbl.textContent = S.sessionLoaded ? (signedIn() ? accountEmail() : "Sign in") : "Sign in";
+    acct.setAttribute("aria-label", signedIn() ? "Open account page" : "Sign in");
+  }
 }
 
 function renderView() {
@@ -399,7 +486,8 @@ function renderView() {
   var views = {
     overview: overviewView, capabilities: capabilitiesView, tools: toolsView, status: statusView,
     browser: browserView, video: videoView, research: researchView, routing: routingView,
-    roblox: robloxView, skills: skillsView, about: aboutView, notfound: notfoundView
+    roblox: robloxView, skills: skillsView, about: aboutView,
+    auth: authView, account: accountView, reset: resetView, notfound: notfoundView
   };
   var fn = views[S.route] || notfoundView;
   var view = qs("#view");
@@ -1106,6 +1194,228 @@ function robloxView() {
     '<div style="margin-top:16px">' + panel("Roblox tools", "game", '<div class="panel-bd--flush">' + rRows + "</div>", { flush: true, right: '<span class="hint">' + rtools.length + ' tools</span>' }) + "</div>";
 }
 
+/* account & auth views */
+function accountApi(path, method, payload) {
+  S.authBusy = true;
+  return jfetch(path, payload != null ? { method: method || "POST", body: payload } : { method: method }).then(function (d) {
+    S.authBusy = false;
+    return d;
+  }, function (e) {
+    S.authBusy = false;
+    throw e;
+  });
+}
+function pwIssue(pw) {
+  if (pw.length < 10) return "At least 10 characters.";
+  if (pw.length > 128) return "At most 128 characters.";
+  if (!/[A-Za-z]/.test(pw) || !/[0-9]/.test(pw)) return "Use letters and numbers.";
+  return "";
+}
+function formField(id, label, type, extra) {
+  return '<div class="form-field"><label for="' + id + '">' + esc(label) + '</label>' +
+    '<input id="' + id + '" name="' + id + '" type="' + type + '" ' + (extra || "") + "></div>";
+}
+function authAlert() {
+  return (S.authErr ? '<p class="form-error" role="alert">' + esc(S.authErr) + "</p>" : "") +
+    (S.authMsg ? '<p class="form-success" role="status">' + esc(S.authMsg) + "</p>" : "");
+}
+function authTab(active, act, label) {
+  return '<button type="button" role="tab" aria-selected="' + (active === act ? "true" : "false") + '" data-act="auth-tab" data-tab="' + act + '">' + esc(label) + "</button>";
+}
+function authView() {
+  if (!S.sessionLoaded) {
+    return pageHead("Account", "Sign in", "Checking your session.") + '<div style="height:20px"></div>' +
+      '<div class="auth-wrap"><div class="auth-card"><div class="auth-body">' + skeletonPanel(4) + "</div></div></div>";
+  }
+  if (S.session && S.session.accountsAvailable === false) {
+    return pageHead("Account", "DEMO accounts", "The account store is not enabled on this deployment.") + '<div style="height:20px"></div>' +
+      errPanel("DEMO accounts unavailable", "/account/session", "core",
+        "This deployment has no DEMO_ACCOUNTS binding yet. Public MCP tools keep working without a login in the meantime.");
+  }
+  if (signedIn()) {
+    setTimeout(function () { go("account"); }, 0);
+    return "";
+  }
+  var head = pageHead("Account", S.authMode === "register" ? "Create your DEMO account" : "Sign in to DEMO",
+    "Sessions back protected account features — your Roblox link, and sign-in for MCP clients like ChatGPT and Claude. Public tools never require a login.");
+  var tabs = '<div class="auth-tabs" role="tablist">' + authTab(S.authMode, "signin", "Sign in") + authTab(S.authMode, "register", "Create account") + "</div>";
+  var bodyHtml = "";
+  if (S.authMode === "signin" || S.authMode === "register") {
+    var isReg = S.authMode === "register";
+    bodyHtml = '<div class="auth-body">' + authAlert() +
+      '<form data-form="' + S.authMode + '" novalidate>' +
+      formField("auth-email", "Email", "email", 'autocomplete="email" required') +
+      formField("auth-password", "Password", "password", 'autocomplete="' + (isReg ? "new-password" : "current-password") + '" required') +
+      (isReg ? '<ul class="password-rules"><li>10–128 characters</li><li>Use letters and numbers</li><li>Not a commonly breached password</li></ul>' : "") +
+      '<div class="form-actions"><button class="btn btn--primary" type="submit" ' + (S.authBusy ? "disabled aria-busy=\"true\"" : "") + ">" +
+        (S.authBusy ? '<span class="spin" aria-hidden="true"></span> ' : "") + esc(isReg ? "Create account" : "Sign in") + "</button></div>" +
+      "</form>" +
+      '<div class="auth-alt">' + (isReg
+        ? 'Already have an account? <button type="button" data-act="auth-tab" data-tab="signin">Sign in</button>'
+        : '<button type="button" data-act="auth-tab" data-tab="forgot">Forgot your password?</button>') +
+      "</div></div>";
+  } else {
+    bodyHtml = '<div class="auth-body">' + authAlert() +
+      '<form data-form="forgot" novalidate>' +
+      formField("auth-email", "Email", "email", 'autocomplete="email" required') +
+      '<p class="form-hint">If an account exists for this address we email a reset link. The link works once and expires within the hour.</p>' +
+      '<div class="form-actions"><button class="btn btn--primary" type="submit" ' + (S.authBusy ? "disabled" : "") + ">" +
+        (S.authBusy ? '<span class="spin" aria-hidden="true"></span> ' : "") + "Send reset link</button></div>" +
+      "</form>" +
+      '<div class="auth-alt"><button type="button" data-act="auth-tab" data-tab="signin">Back to sign in</button></div></div>';
+  }
+  return head + '<div style="height:20px"></div><div class="auth-wrap"><div class="auth-card">' + tabs + bodyHtml + "</div></div>";
+}
+
+function resetView() {
+  var head = pageHead("Account", "Choose a new password", "The emailed link works once and expires within about an hour.");
+  if (!S.resetToken) {
+    return head + '<div style="height:20px"></div><div class="auth-wrap"><div class="auth-card"><div class="auth-body">' +
+      '<p class="form-error">This reset link is missing its token. Request a fresh one from the <a href="#/auth">sign-in page</a>.</p>' +
+      "</div></div></div>";
+  }
+  return head + '<div style="height:20px"></div><div class="auth-wrap"><div class="auth-card"><div class="auth-body">' + authAlert() +
+    '<form data-form="reset" novalidate>' +
+    formField("auth-password", "New password", "password", 'autocomplete="new-password" required') +
+    '<ul class="password-rules"><li>10–128 characters</li><li>Use letters and numbers</li></ul>' +
+    '<div class="form-actions"><button class="btn btn--primary" type="submit" ' + (S.authBusy ? "disabled" : "") + ">" +
+      (S.authBusy ? '<span class="spin" aria-hidden="true"></span> ' : "") + "Set new password</button></div>" +
+    "</form></div></div></div>";
+}
+
+function verifyPanel() {
+  var bodyHtml = '<p class="note" id="verify-hint">The 8-character code arrived by email at registration. Request a new one any time — the newest code replaces older ones.</p>' +
+    (S.verifyErr ? '<p class="form-error" role="alert">' + esc(S.verifyErr) + "</p>" : "") +
+    (S.verifyMsg ? '<p class="form-success" role="status">' + esc(S.verifyMsg) + "</p>" : "") +
+    '<form data-form="verify-code" novalidate><div class="form-field"><label for="auth-code">Verification code</label>' +
+    '<input id="auth-code" type="text" inputmode="text" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" minlength="8" maxlength="8" pattern="[A-Z2-9]{8}" style="font-family:var(--mono);letter-spacing:.3em;text-transform:uppercase" required></div>' +
+    '<div class="form-actions"><button class="btn btn--primary" type="submit" ' + (S.verifyBusy ? "disabled" : "") + ">" +
+      (S.verifyBusy ? '<span class="spin" aria-hidden="true"></span> ' : "") + "Verify email</button>" +
+    '<button class="btn" type="button" data-act="verification-resend" ' + (S.verifyBusy ? "disabled" : "") + ">Email me a new code</button></div></form>";
+  return panel("Email verification", "inbox", bodyHtml);
+}
+
+function profilePanel() {
+  var a = S.session && S.session.account ? S.session.account : {};
+  var initials = String(a.email || "?").trim().charAt(0).toUpperCase();
+  var rows = [
+    kv("Email", '<code class="chip-v">' + esc(a.email || "—") + "</code>"),
+    kv("Verification", a.emailVerified ? st("ok", "Verified") : st("warn", "Not verified"), (S.session && S.session.emailDelivery) ? "codes arrive by email" : "email delivery is not configured — an operator shares the code"),
+    kv("Account created", '<span class="mono">' + esc(fmtTs(a.createdAt)) + "</span>"),
+    kv("Session expires", '<span class="mono">' + esc(fmtTs(a.sessionExpiresAt)) + "</span>", "absolute expiry — sign in again afterwards")
+  ].join("");
+  return panel("Profile", "user",
+    '<div class="acct-head"><span class="acct-avatar" aria-hidden="true">' + esc(initials) + "</span>" +
+    '<div class="acct-id"><h2>' + esc(a.email || "—") + "</h2><p>" + esc(a.id || "") + "</p></div></div>" +
+    '<div class="panel-bd--flush" style="margin-top:14px">' + rows + "</div>", { flush: false });
+}
+
+function passwordPanel() {
+  var bodyHtml = (S.pwErr ? '<p class="form-error" role="alert">' + esc(S.pwErr) + "</p>" : "") +
+    (S.pwMsg ? '<p class="form-success" role="status">' + esc(S.pwMsg) + "</p>" : "") +
+    '<form data-form="password-change" novalidate>' +
+    formField("pw-current", "Current password", "password", 'autocomplete="current-password" required') +
+    formField("pw-new", "New password", "password", 'autocomplete="new-password" required') +
+    '<ul class="password-rules"><li>10–128 characters, letters and numbers</li><li>Changing it signs out your other sessions</li></ul>' +
+    '<div class="form-actions"><button class="btn btn--primary" type="submit" ' + (S.pwBusy ? "disabled" : "") + ">" +
+      (S.pwBusy ? '<span class="spin" aria-hidden="true"></span> ' : "") + "Change password</button></div></form>";
+  return panel("Password", "key", bodyHtml);
+}
+
+function sessionsPanel() {
+  var inner;
+  if (S.sessionsErr) {
+    inner = '<p class="form-error">Could not list sessions: ' + esc(S.sessionsErr) + '</p><div class="row"><button class="btn btn--sm" type="button" data-act="sessions-reload">' + ic("refresh", 13) + "Retry</button></div>";
+  } else if (!S.sessions) {
+    inner = skeletonPanel(3);
+  } else if (!S.sessions.length) {
+    inner = '<p class="note">No active sessions.</p>';
+  } else {
+    inner = S.sessions.map(function (s) {
+      return '<div class="sess-row"><div class="sess-info"><div class="sess-label">' + esc(s.label || "Unknown device") + (s.current ? " " + st("info", "current") : "") + "</div>" +
+        '<div class="sess-meta">signed in ' + esc(fmtTs(s.createdAt)) + " · expires " + esc(fmtTs(s.expiresAt)) + " · id " + esc(s.id) + "</div></div>" +
+        (s.current ? "" : '<button class="btn btn--sm" type="button" data-act="session-revoke" data-id="' + esc(s.id) + '">Revoke</button>') +
+        "</div>";
+    }).join("");
+    inner += '<div class="row" style="margin-top:12px"><button class="btn" type="button" data-act="sessions-revoke-others">' + ic("logout") + "Sign out other sessions</button></div>";
+  }
+  return panel("Sessions", "shield", inner, { right: '<button class="btn btn--sm" type="button" data-act="sessions-reload">' + ic("refresh", 12) + "Refresh</button>" });
+}
+
+function robloxAccountPanel() {
+  var connected = !!(S.roblox && S.roblox.connected && S.roblox.account);
+  var canTryStatus = !S.robloxErr || (S.roblox && S.roblox.configuration && S.roblox.configuration.enabled !== false);
+  var bodyHtml = "";
+  var banner = accountVerified() ? "" :
+    '<div class="verify-banner">' + ic("alert") + '<span>Verify your email below before linking Roblox — reset links and Roblox notices go to that address. <button type="button" data-act="scroll-verify">Fix now</button></span></div>';
+  if (connected) {
+    var acc = S.roblox.account;
+    bodyHtml = '<div class="acct-head"><span class="acct-avatar" aria-hidden="true">R</span>' +
+      '<div class="acct-id"><h2>@' + esc(acc.username || "Roblox user") + "</h2><p>" + esc("user id " + (acc.userId || "—")) + "</p></div></div>" +
+      '<p class="note" style="margin-top:12px">Linked ' + esc(fmtTs(acc.connectedAt)) + '. Roblox tokens are stored encrypted server-side and are never shown here.</p>' +
+      '<div class="row" style="margin-top:14px"><a class="btn" href="#/roblox">Open the Roblox page</a>' +
+      '<button class="btn btn--danger" type="button" data-act="roblox-disconnect">Unlink Roblox account</button></div>';
+  } else if (S.robloxLoading) {
+    bodyHtml = skeletonPanel(3);
+  } else {
+    bodyHtml = '<p class="note">No Roblox account linked. You go straight to Roblox\'s official sign-in and consent page — DEMO never sees your Roblox password, and one DEMO account links at most one Roblox account.</p>' +
+      (canTryStatus
+        ? '<div class="row"><a class="btn btn--primary" href="/oauth/roblox/link">' + ic("external") + "Connect Roblox account</a></div>" +
+          '<p class="hint mono" style="margin-top:10px">/oauth/roblox/link · returns you here after consent</p>' +
+          '<p class="form-hint" style="margin-top:8px">' + esc(S.robloxErr ? "If connecting fails: " + (S.robloxErr.message || "Roblox is not fully configured yet.") : "") + "</p>"
+        : '<p class="form-error">Roblox OAuth is not configured on this deployment yet. The rest of your account keeps working.</p>');
+  }
+  return panel("Roblox link", "game", banner + bodyHtml);
+}
+
+function dangerPanel() {
+  var bodyHtml;
+  if (S.deleteArmed) {
+    bodyHtml = '<p class="form-error"><b>This permanently deletes your DEMO account:</b> the profile, every active session, the verification record, and the encrypted Roblox link. Any Roblox authorization you granted expires with your account. This cannot be undone.</p>' +
+      '<form data-form="delete-account" novalidate>' +
+      '<div class="form-field"><label for="del-confirm">Type <b>DELETE</b> to confirm</label><input id="del-confirm" type="text" autocomplete="off" spellcheck="false" required></div>' +
+      '<div class="form-field"><label for="del-password">Your password</label><input id="del-password" type="password" autocomplete="current-password" required></div>' +
+      (S.authErr ? '<p class="form-error" role="alert">' + esc(S.authErr) + "</p>" : "") +
+      '<div class="form-actions"><button class="btn btn--danger" type="submit" ' + (S.authBusy ? "disabled" : "") + ">" +
+        (S.authBusy ? '<span class="spin" aria-hidden="true"></span> ' : "") + "Delete my account permanently</button>" +
+      '<button class="btn" type="button" data-act="delete-cancel">Keep my account</button></div></form>';
+  } else {
+    bodyHtml = '<p class="note">Deleting your DEMO account removes your profile, sessions and your linked Roblox account with its encrypted tokens. MCP clients you signed into keep working until their tokens naturally expire.</p>' +
+      '<div class="row"><button class="btn btn--danger" type="button" data-act="delete-arm">Delete account…</button></div>';
+  }
+  return panel("Danger zone", "alert", bodyHtml, { cls: "danger-zone" });
+}
+
+function loadAccountExtras() {
+  S.sessions = null; S.sessionsErr = "";
+  jfetch("/account/sessions").then(function (d) {
+    S.sessions = (d && d.sessions) || [];
+  }, function (e) {
+    S.sessionsErr = e && e.message ? e.message : "request failed";
+  }).then(function () { if (S.route === "account") renderView(); });
+}
+
+function accountView() {
+  if (!S.sessionLoaded) {
+    return pageHead("Account", "Your DEMO account", "Loading session.") + '<div style="height:20px"></div>' + skeletonPanel(4);
+  }
+  if (S.session && S.session.accountsAvailable === false) {
+    return pageHead("Account", "DEMO accounts", "Not enabled on this deployment.") + '<div style="height:20px"></div>' +
+      errPanel("DEMO accounts unavailable", "/account/session", "core", "This deployment has no DEMO_ACCOUNTS binding yet.");
+  }
+  if (!signedIn()) {
+    setTimeout(function () { go("auth"); }, 0);
+    return "";
+  }
+  return pageHead("Account", "Your DEMO account", "Session, verification, linked Roblox account and security settings — everything here is read from and written to the backend, nothing is static.") +
+    '<div style="height:20px"></div>' +
+    (accountVerified() ? "" : '<div class="verify-banner" id="verify-banner">' + ic("alert") + '<span>Your email is not verified yet. Request or enter a code below — verification is required before Roblox linking and for reset emails.</span></div>') +
+    '<div class="grid grid--2">' + profilePanel() + (accountVerified() ? passwordPanel() : verifyPanel()) + "</div>" +
+    '<div style="height:16px"></div><div class="grid grid--2">' + robloxAccountPanel() + sessionsPanel() + "</div>" +
+    (accountVerified() ? "" : '<div style="height:16px"></div>' + passwordPanel()) +
+    '<div style="height:16px"></div>' + dangerPanel();
+}
+
 /* skills */
 function skillsView() {
   var cards = (DATA.BUILTIN_SKILLS || []).map(function (sk) {
@@ -1279,6 +1589,16 @@ function linksHtml(c) {
   if (!any) return "";
   return html + "</div>";
 }
+var FEATURED_CLIENTS = ["chatgpt", "claude", "cursor", "claude-code", "vscode"];
+
+function platCard(c) {
+  return '<button class="plat-card prov" type="button" data-act="connect-pick" data-client="' + esc(c.id) + '" aria-label="' + esc(c.name + ". " + c.badge) + '">' +
+    platLogo(c.id, c.icon) +
+    '<span class="plat-name">' + esc(c.name) + ' <span class="' + pillClass(c.method) + '">' + esc(c.badge) + "</span></span>" +
+    '<span class="plat-desc">' + esc(c.summary) + "</span>" +
+    '<span class="plat-cta">Setup ' + ic("arrow") + "</span></button>";
+}
+
 function pickerHtml() {
   var title = CONNECT.title || "Connect DEMO";
   var sub = CONNECT.subtitle || "Choose where you want to connect DEMO.";
@@ -1286,9 +1606,16 @@ function pickerHtml() {
   if (!CLIENTS.length) {
     body = '<p class="connect-callout">Client list unavailable. Copy the endpoint and add it manually.</p>' + endpointBlock(true);
   } else {
-    body = '<div class="prov-list" role="group" aria-label="Choose where you want to connect DEMO">';
-    for (var i = 0; i < CLIENTS.length; i++) body += providerButton(CLIENTS[i]);
-    body += "</div>";
+    var featured = "", others = "";
+    for (var i = 0; i < FEATURED_CLIENTS.length; i++) {
+      var c = clientById(FEATURED_CLIENTS[i]);
+      if (c) featured += platCard(c);
+    }
+    for (var j = 0; j < CLIENTS.length; j++) {
+      if (FEATURED_CLIENTS.indexOf(CLIENTS[j].id) === -1) others += providerButton(CLIENTS[j]);
+    }
+    body = '<div class="plat-grid" role="group" aria-label="Choose where you want to connect DEMO">' + featured + "</div>";
+    if (others) body += '<div class="prov-list">' + others + "</div>";
   }
   return connectHeader(title, sub, false) +
     '<div class="modal-bd connect-pane" id="connect-panel">' + body + "</div>" +
@@ -1309,9 +1636,12 @@ function confirmHtml(c) {
     }
     actions += "</div>";
   }
+  var logoHead = '<div class="plat-detail-head">' + platLogo(c.id, c.icon) + "<div>" +
+    '<div class="plat-name" style="font-size:16px">' + esc(c.name) + ' <span class="' + pillClass(c.method) + '">' + esc(c.badge) + "</span></div>" +
+    '<div class="plat-desc">' + esc(metaLine(c)) + "</div></div></div>";
   return connectHeader(c.confirmTitle, c.confirmBody, true) +
     '<div class="modal-bd connect-pane" id="connect-panel">' +
-      '<p class="connect-meta">' + esc(metaLine(c)) + "</p>" +
+      logoHead +
       endpointBlock(copyIsPrimary) +
       (c.callout ? '<p class="connect-callout">' + esc(c.callout) + "</p>" : "") +
       actions +
@@ -1773,7 +2103,186 @@ document.addEventListener("click", function (ev) {
     renderView();
     loadRoblox(true);
   }
+  else if (act === "theme-toggle") cycleTheme();
+  else if (act === "account-open") go(signedIn() ? "account" : "auth");
+  else if (act === "auth-tab") {
+    S.authMode = el.getAttribute("data-tab") || "signin";
+    S.authErr = ""; S.authMsg = "";
+    renderView();
+    var fe = qs("#auth-email"); if (fe) fe.focus();
+  }
+  else if (act === "auth-logout") {
+    el.disabled = true;
+    accountApi("/account/logout").then(function () {
+      S.session = { signedIn: false, accountsAvailable: true };
+      loadSession();
+      S.roblox = null;
+      S.deleteArmed = false; S.sessions = null;
+      toast("Signed out.");
+      go("overview");
+      renderView();
+    }, function (e) {
+      el.disabled = false;
+      toast("Sign out failed: " + (e.message || "unknown error"));
+    });
+  }
+  else if (act === "verification-resend") {
+    el.disabled = true;
+    S.verifyErr = ""; S.verifyMsg = "";
+    accountApi("/account/verify/request").then(function (d) {
+      S.verifyMsg = (d && d.delivery && d.delivery.ok) ? "Sent — check your inbox at " + accountEmail() + "."
+        : "Email delivery is unavailable on this deployment. Ask the operator to read the code from the verification record.";
+      if (d && d.nextCodeInSeconds) S.verifyMsg += " You can request another code in " + d.nextCodeInSeconds + "s.";
+      renderView();
+    }, function (e) {
+      S.verifyErr = e.message || "Could not request a code.";
+      renderView();
+    });
+  }
+  else if (act === "scroll-verify") {
+    var vp = qs("#verify-hint");
+    if (vp && vp.scrollIntoView) vp.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+  else if (act === "sessions-reload") loadAccountExtras();
+  else if (act === "session-revoke") {
+    el.disabled = true;
+    accountApi("/account/sessions/revoke", "POST", { id: el.getAttribute("data-id") }).then(function () {
+      toast("Session revoked.");
+      loadAccountExtras();
+    }, function (e) {
+      el.disabled = false;
+      toast("Revoke failed: " + (e.message || "unknown error"));
+    });
+  }
+  else if (act === "sessions-revoke-others") {
+    el.disabled = true;
+    accountApi("/account/sessions/revoke-others").then(function (d) {
+      toast((d && typeof d.revoked === "number" ? d.revoked : 0) + " other session(s) signed out.");
+      loadAccountExtras();
+    }, function (e) {
+      el.disabled = false;
+      toast("Failed: " + (e.message || "unknown error"));
+    });
+  }
+  else if (act === "delete-arm") { S.deleteArmed = true; S.authErr = ""; renderView(); var dc = qs("#del-confirm"); if (dc) dc.focus(); }
+  else if (act === "delete-cancel") { S.deleteArmed = false; S.authErr = ""; renderView(); }
 });
+
+document.addEventListener("submit", function (ev) {
+  var form = ev.target;
+  if (!form || !form.getAttribute) return;
+  var kind = form.getAttribute("data-form");
+  if (!kind) return;
+  ev.preventDefault();
+  var val = function (id) { var el2 = qs("#" + id); return el2 ? String(el2.value || "") : ""; };
+  S.authErr = ""; S.authMsg = ""; S.verifyErr = ""; S.verifyMsg = ""; S.pwErr = ""; S.pwMsg = "";
+
+  if (kind === "signin") {
+    accountApi("/account/login", "POST", { email: val("auth-email"), password: val("auth-password") }).then(function (d) {
+      afterAuthChange(d);
+      toast("Signed in.");
+      go("account");
+      renderView();
+    }, function (e) {
+      S.authErr = e.message || "Sign in failed.";
+      renderView();
+    });
+  } else if (kind === "register") {
+    var issue = pwIssue(val("auth-password"));
+    if (issue) { S.authErr = "Password: " + issue; renderView(); return; }
+    accountApi("/account/register", "POST", { email: val("auth-email"), password: val("auth-password") }).then(function (d) {
+      if (d && d.authenticated) {
+        afterAuthChange(d);
+        toast("Account created — check your inbox for the verification code.");
+        go("account");
+      } else {
+        S.authMsg = "If this email is not already registered, an account was created or verification was sent. Check your inbox — and try signing in.";
+      }
+      renderView();
+    }, function (e) {
+      S.authErr = e.message || "Registration failed.";
+      renderView();
+    });
+  } else if (kind === "forgot") {
+    accountApi("/account/password/forgot", "POST", { email: val("auth-email") }).then(function () {
+      S.authMsg = "If an account exists for that address, a reset link is on its way. It works once and expires within about an hour.";
+      renderView();
+    }, function (e) {
+      S.authErr = e.message || "Could not process the request.";
+      renderView();
+    });
+  } else if (kind === "reset") {
+    var issue2 = pwIssue(val("auth-password"));
+    if (issue2) { S.authErr = "Password: " + issue2; renderView(); return; }
+    accountApi("/account/password/reset", "POST", { token: S.resetToken, password: val("auth-password") }).then(function () {
+      S.resetToken = "";
+      S.authMode = "signin";
+      S.authMsg = "Password updated. Every previous session has been signed out — sign in with your new password.";
+      history.replaceState(null, "", "#/auth");
+      S.route = "auth";
+      renderView();
+    }, function (e) {
+      S.authErr = e.status === 410 ? "This reset link was already used or has expired. Request a fresh one from the sign-in page." : (e.message || "Reset failed.");
+      renderView();
+    });
+  } else if (kind === "verify-code") {
+    S.verifyBusy = true;
+    accountApi("/account/verify/confirm", "POST", { code: val("auth-code").toUpperCase() }).then(function (d) {
+      S.verifyBusy = false;
+      S.verifyMsg = "Email verified.";
+      S.verifyErr = "";
+      if (d && d.account) S.session.account = d.account;
+      loadSession().then(function () { renderView(); });
+    }, function (e) {
+      S.verifyBusy = false;
+      S.verifyErr = e.message || "Verification failed.";
+      renderView();
+    });
+  } else if (kind === "password-change") {
+    var issue3 = pwIssue(val("pw-new"));
+    if (issue3) { S.pwErr = "New password: " + issue3; renderView(); return; }
+    S.pwBusy = true;
+    accountApi("/account/password/change", "POST", { currentPassword: val("pw-current"), newPassword: val("pw-new") }).then(function (d) {
+      S.pwBusy = false;
+      S.pwErr = "";
+      S.pwMsg = "Password changed. " + (d && typeof d.otherSessionsRevoked === "number" ? d.otherSessionsRevoked : 0) + " other session(s) signed out.";
+      loadAccountExtras();
+      renderView();
+    }, function (e) {
+      S.pwBusy = false;
+      S.pwErr = e.message || "Could not change the password.";
+      renderView();
+    });
+  } else if (kind === "delete-account") {
+    var confirmText = val("del-confirm");
+    if (confirmText !== "DELETE") { S.authErr = "Type DELETE exactly to confirm."; renderView(); return; }
+    accountApi("/account/delete", "POST", { password: val("del-password"), confirmation: confirmText }).then(function () {
+      S.session = { signedIn: false, accountsAvailable: true };
+      loadSession();
+      S.roblox = null;
+      S.sessions = null; S.deleteArmed = false; S.authErr = "";
+      toast("Account deleted.");
+      go("overview");
+      renderHeaderState();
+    }, function (e) {
+      S.authErr = e.status === 403 ? "Wrong current password." : (e.message || "Deletion failed.");
+      renderView();
+    });
+  }
+});
+
+function afterAuthChange(d) {
+  if (d && d.account) {
+    S.session = { signedIn: true, accountsAvailable: true, account: d.account, emailDelivery: true };
+  } else {
+    loadSession();
+  }
+  S.authMode = "signin"; S.authErr = ""; S.authMsg = "";
+  S.roblox = null;         // Roblox state belongs to this identity now — re-read fresh
+  S.robloxLoading = true;
+  loadRoblox(true);
+  renderHeaderState();
+}
 
 document.addEventListener("input", function (ev) {
   var el = ev.target;
@@ -1816,22 +2325,37 @@ document.addEventListener("keydown", function (ev) {
 window.addEventListener("hashchange", function () {
   var next = routeFromHash();
   if (next !== S.route) { S.route = next; S.openTool = null; }
+  if (S.route === "reset") S.resetToken = hashParam("token");
   renderView();
   enterRoute();
 });
 
 /* boot */
+function hashParam(name) {
+  var h = location.hash || "";
+  var q = h.indexOf("?");
+  if (q === -1) return "";
+  try {
+    return new URLSearchParams(h.slice(q + 1)).get(name) || "";
+  } catch (e) { return ""; }
+}
+
 function enterRoute() {
   if (S.route === "roblox" && !S.roblox && !S.robloxErr) loadRoblox();
   if (S.route === "video") loadLazy("video");
   if (S.route === "research") loadLazy("expanded");
+  if (S.route === "account" && signedIn()) { if (!S.sessions && !S.sessionsErr) loadAccountExtras(); if (!S.roblox && !S.robloxErr) loadRoblox(); }
+  if (S.route === "reset") S.resetToken = hashParam("token");
 }
 
 function boot() {
   S.route = routeFromHash();
+  if (S.route === "reset") S.resetToken = hashParam("token");
+  applyStoredTheme();
   renderShell();
   renderView();
   loadCore(false);
+  loadSession();
   loadRoblox(false);
   enterRoute();
 }

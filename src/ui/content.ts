@@ -25,13 +25,16 @@ export const SECTIONS = [
   { id: "capabilities", label: "Capabilities", icon: "layers", blurb: "Capability categories and tool explorer", nav: "primary" },
   { id: "status", label: "Status", icon: "activity", blurb: "Live deployment and capability health", nav: "primary" },
   { id: "tools", label: "Tools", icon: "tools", blurb: "Every MCP tool with live availability", nav: "hidden" },
-  { id: "browser", label: "Browser", icon: "globe", blurb: "Persistent sessions, screenshots, human handoff", nav: "secondary" },
-  { id: "video", label: "Video", icon: "play", blurb: "Resolve, extract, transcribe, analyze with evidence", nav: "secondary" },
-  { id: "research", label: "Research", icon: "search", blurb: "Web, feeds, archive, PDFs, Git, sources", nav: "secondary" },
-  { id: "routing", label: "Routing", icon: "branch", blurb: "Jev / Laya typed decision providers", nav: "secondary" },
-  { id: "roblox", label: "Roblox", icon: "game", blurb: "Optional OAuth — not a DEMO login", nav: "secondary" },
-  { id: "skills", label: "Skills", icon: "puzzle", blurb: "Built-ins and the live skills.sh surface", nav: "secondary" },
-  { id: "about", label: "About", icon: "info", blurb: "Open source, architecture, security, privacy", nav: "secondary" },
+  { id: "browser", label: "Browser", icon: "globe", blurb: "Persistent sessions, screenshots, human handoff", nav: "primary" },
+  { id: "video", label: "Video", icon: "play", blurb: "Resolve, extract, transcribe, analyze with evidence", nav: "primary" },
+  { id: "research", label: "Research", icon: "search", blurb: "Web, feeds, archive, PDFs, Git, sources", nav: "primary" },
+  { id: "routing", label: "Routing", icon: "branch", blurb: "Jev / Laya typed decision providers", nav: "primary" },
+  { id: "roblox", label: "Roblox", icon: "game", blurb: "OAuth connection — one per DEMO identity", nav: "primary" },
+  { id: "skills", label: "Skills", icon: "puzzle", blurb: "Built-ins and the live skills.sh surface", nav: "primary" },
+  { id: "about", label: "About", icon: "info", blurb: "Open source, architecture, security, privacy", nav: "primary" },
+  { id: "account", label: "Account", icon: "user", blurb: "DEMO session, verification, sessions, Roblox link", nav: "hidden" },
+  { id: "auth", label: "Sign in", icon: "key", blurb: "DEMO account sign in and registration", nav: "hidden" },
+  { id: "reset", label: "Reset password", icon: "key", blurb: "Set a new password from an emailed link", nav: "hidden" },
 ] as const;
 
 export const CAPABILITY_CATEGORIES = [

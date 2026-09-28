@@ -5,6 +5,8 @@ import { resolveDecisionRoutingMode } from "./src/decisions/provider.js";
 import { demoUi } from "./ui";
 import { handleRobloxOAuthRoute, isRobloxOAuthPath } from "./src/roblox/routes.js";
 import { handleMcpOAuthRoute, isMcpOAuthPath } from "./src/auth/oauth-routes.js";
+import { handleAccountRoute, isAccountPath } from "./src/account/routes.js";
+import { accountStoreAvailable } from "./src/account/store.js";
 import { MCP_OAUTH_SCOPES, mcpOAuthReady, resolveMcpOAuthConfig } from "./src/auth/oauth-config.js";
 import { SessionManager } from "./src/session/manager.js";
 import { VideoArtifactStore, artifactBaseUrl, parseRangeHeader } from "./src/video/store.js";
@@ -17,6 +19,7 @@ import { oversizedBody, securityHeaders } from "./src/core/headers.js";
 export { BrowserSession } from "./src/session/durable-object.js";
 export { RobloxAuth } from "./src/roblox/do.js";
 export { McpAuth } from "./src/auth/oauth-store.js";
+export { DemoAccounts } from "./src/account/store.js";
 
 type Env = {
   DEMO_PLATFORM_ORIGIN?: string;
@@ -169,15 +172,32 @@ function layaSurface(env: Env) {
 
 function mcpOAuthSurface(env: Env) {
   const config = resolveMcpOAuthConfig(env);
+  const accounts = accountStoreAvailable(env as unknown as Record<string, unknown>);
   return {
     configured: mcpOAuthReady(env),
-    identityProvider: "Cloudflare Access; signed user subject verified by the Worker",
+    identityProvider: accounts
+      ? "DEMO account session (Cloudflare Access also honoured when configured); principal is a server-derived subject hash"
+      : "Cloudflare Access; signed user subject verified by the Worker",
+    identityOptions: { demoAccounts: accounts, cloudflareAccess: Boolean(config?.accessConfigured) },
     publicToolsUnauthenticated: true,
     protectedScopes: [...MCP_OAUTH_SCOPES],
     accessTokenTtlSeconds: config?.accessTokenTtlSeconds ?? null,
     refreshTokensIssued: false,
     authorizationCodePkce: "S256",
     clientRegistration: "ChatGPT CIMD allowlist; dynamic client registration disabled",
+  };
+}
+
+function accountSurface(env: Env) {
+  const available = accountStoreAvailable(env as unknown as Record<string, unknown>);
+  const emailConfigured = Boolean(String((env as unknown as { EMAIL_PROVIDER?: string }).EMAIL_PROVIDER ?? "").trim() && String((env as unknown as { EMAIL_FROM?: string }).EMAIL_FROM ?? "").trim() && String((env as unknown as { RESEND_API_KEY?: string }).RESEND_API_KEY ?? "").trim());
+  return {
+    available,
+    storage: available ? "durable-object" : "unavailable",
+    passwordHashing: "pbkdf2-hmac-sha256",
+    sessions: available ? "opaque token, stored as hash, httpOnly cookie, server-side revocation" : "unavailable",
+    emailDelivery: emailConfigured,
+    registrationOpen: available,
   };
 }
 
@@ -243,6 +263,7 @@ function telemetry(env: Env) {
       skillsSh: true,
       composio: false,
       mcpOAuth: mcpOAuthSurface(env),
+      accounts: accountSurface(env),
       robloxOAuth: robloxSurface(env),
       jevDecisionEngine: jevSurface(env),
       layaDecisionProvider: layaSurface(env),
@@ -271,7 +292,8 @@ function telemetry(env: Env) {
       { name: "Browser", type: "Cloudflare Browser Run", connected: capabilities.browserAvailable },
       { name: "Browser sessions", type: "Durable Object", connected: capabilities.sessionStorage === "durable-object" },
       { name: "Screenshot storage", type: "Cloudflare R2", connected: capabilities.screenshots },
-      { name: "DEMO OAuth", type: "OAuth 2.1 + PKCE (Cloudflare Access identity, per-tool grants)", connected: mcpOAuthSurface(env).configured },
+      { name: "DEMO OAuth", type: "OAuth 2.1 + PKCE (DEMO account / Cloudflare Access identity, per-tool grants)", connected: mcpOAuthSurface(env).configured },
+      { name: "DEMO accounts", type: "Durable Object (DemoAccounts, PBKDF2 + revocable sessions)", connected: accountSurface(env).available },
       { name: "Roblox OAuth", type: "Roblox Open Cloud (official OAuth 2.0)", connected: robloxSurface(env).configured },
       { name: "Roblox session store", type: "Durable Object (RobloxAuth)", connected: robloxSurface(env).storage === "durable-object" },
       { name: "TypeSafe Jev", type: "Structured decision engine (HTTP API)", connected: jevSurface(env).available },
@@ -419,6 +441,11 @@ export default {
     // state. The actual start requires a matching Cloudflare Access identity.
     if (isRobloxOAuthPath(url.pathname)) {
       return (await handleRobloxOAuthRoute(request, env as unknown as Record<string, any>, ctx)) ?? new Response("Not Found", { status: 404 });
+    }
+    // DEMO account JSON API. Same-origin-only mutations with their own CSRF
+    // and origin policy; dispatched before the generic origin allowlist.
+    if (isAccountPath(url.pathname)) {
+      return (await handleAccountRoute(request, env as unknown as Record<string, unknown>, ctx)) ?? new Response("Not Found", { status: 404 });
     }
 
     if (origin && !allowedOrigin(origin, env)) return new Response("Forbidden origin", { status: 403, headers: { "Vary": "Origin" } });

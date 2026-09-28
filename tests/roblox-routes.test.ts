@@ -125,7 +125,7 @@ describe("identity-bound Roblox OAuth routes", () => {
     expect(response?.headers.get("content-security-policy")).toContain("form-action 'self'");
     const html = await response!.text();
     expect(html).toContain("One-time link code");
-    expect(html).toContain("same Cloudflare Access identity");
+    expect(html).toContain("same DEMO identity");
     expect(html).not.toMatch(/<script|type="password"|roblox[_-]?session/i);
   });
 

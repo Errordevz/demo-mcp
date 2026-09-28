@@ -70,8 +70,45 @@ export const UI_CSS = String.raw`
   --header-h: 64px;
   --content-px: 24px;
 }
+/* Explicit light theme (theme toggle) and OS-preference light theme when the
+   user has not chosen one (data-theme=light|dark set by the boot script). */
+:root[data-theme="light"] {
+  --bg: #fcfcfd;
+  --bg-deep: #f2f3f5;
+  --surface: #ffffff;
+  --surface-2: #f6f7f9;
+  --surface-3: #eef0f3;
+  --surface-4: #e4e7ec;
+  --border: #e6e8eb;
+  --border-2: #d8dce2;
+  --border-3: #c2c8d1;
+  --text: #12151c;
+  --dim: #5a6577;
+  --faint: #8a95a7;
+  --faint-2: #aab4c2;
+  --accent: #2f6feb;
+  --accent-strong: #2f6feb;
+  --accent-ink: #ffffff;
+  --accent-ring: rgba(47,111,235,.42);
+  --accent-soft: rgba(47,111,235,.1);
+  --ok: #16794e;
+  --ok-soft: rgba(22,121,78,.1);
+  --warn: #8a5a00;
+  --warn-soft: rgba(138,90,0,.1);
+  --err: #c01c28;
+  --err-soft: rgba(192,28,40,.09);
+  --off: #8a95a7;
+  --shadow-xs: 0 1px 2px rgba(16,24,40,.06);
+  --shadow-sm: 0 1px 3px rgba(16,24,40,.08), 0 1px 2px rgba(16,24,40,.06);
+  --shadow-md: 0 8px 24px -8px rgba(16,24,40,.12), 0 4px 8px rgba(16,24,40,.06);
+  --shadow-lg: 0 20px 60px -16px rgba(16,24,40,.16), 0 8px 24px rgba(16,24,40,.08);
+  color-scheme: light;
+}
+:root[data-theme="dark"] { color-scheme: dark }
+/* OS-preference light theme when no explicit choice was made. Keep in sync with
+   :root[data-theme="light"] above. */
 @media (prefers-color-scheme: light) {
-  :root {
+  :root:not([data-theme]) {
     --bg: #fcfcfd;
     --bg-deep: #f2f3f5;
     --surface: #ffffff;
@@ -595,7 +632,8 @@ button.trow:hover { background: var(--surface-2) }
   animation: overlayIn var(--t-med);
 }
 @keyframes overlayIn { from { opacity: 0 } to { opacity: 1 } }
-@media (prefers-color-scheme: light) { .overlay { background: rgba(20,24,32,.32) } }
+@media (prefers-color-scheme: light) { :root:not([data-theme]) .overlay { background: rgba(20,24,32,.32) } }
+:root[data-theme="light"] .overlay { background: rgba(20,24,32,.32) }
 .overlay[hidden] { display: none }
 .modal {
   width: min(560px, 100%); background: var(--surface); border: 1px solid var(--border-2);
@@ -923,4 +961,121 @@ hr.soft { border: 0; border-top: 1px solid var(--border); margin: 16px 0 }
 /* improved code copy */
 .codeblock { position: relative }
 .codeblock:hover { border-color: var(--border-2) }
+/* ── 2.1 additions: theme toggle, auth pages, account dashboard, connect hub ── */
+
+/* theme toggle */
+.theme-btn { position: relative }
+.theme-btn .th-ico { display: none }
+.theme-btn[data-theme-state="light"] .th-sun,
+.theme-btn[data-theme-state="dark"] .th-moon,
+.theme-btn[data-theme-state="auto"] .th-auto { display: block }
+
+/* auth pages */
+.auth-wrap { max-width: 460px; margin: 24px auto 0 }
+.auth-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-xl); box-shadow: var(--shadow-sm); overflow: hidden }
+.auth-tabs { display: grid; grid-template-columns: repeat(2, 1fr); border-bottom: 1px solid var(--border) }
+.auth-tabs button { padding: 14px; font-weight: var(--fw-semibold); font-size: var(--fs-14); color: var(--faint); border-bottom: 2px solid transparent; transition: color var(--t-fast), border-color var(--t-fast) }
+.auth-tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent) }
+.auth-tabs button:hover { color: var(--text) }
+.auth-body { padding: 24px 24px 26px }
+.auth-body h1 { margin: 0 0 6px; font-size: var(--fs-20); letter-spacing: -.02em; font-weight: var(--fw-bold) }
+.auth-body .auth-sub { margin: 0 0 18px; color: var(--dim); font-size: var(--fs-13); line-height: 1.55 }
+.form-field { display: grid; gap: 7px; margin-bottom: 14px }
+.form-field label { font-size: var(--fs-13); font-weight: var(--fw-medium); color: var(--dim) }
+.form-field input {
+  width: 100%; min-height: 44px; padding: 10px 13px;
+  background: var(--bg-deep); border: 1px solid var(--border-2); border-radius: var(--r-md);
+  color: var(--text); font: var(--fw-regular) var(--fs-14)/1.4 var(--sans);
+  transition: border-color var(--t-fast), box-shadow var(--t-fast);
+}
+.form-field input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft) }
+.form-field input[aria-invalid="true"] { border-color: var(--err) }
+.form-hint { font-size: var(--fs-12); color: var(--faint); line-height: 1.5 }
+.form-error {
+  margin: 0 0 14px; padding: 11px 13px; border: 1px solid color-mix(in srgb, var(--err) 38%, transparent);
+  border-radius: var(--r-md); background: var(--err-soft); color: var(--err);
+  font-size: var(--fs-13); line-height: 1.5;
+}
+.form-success {
+  margin: 0 0 14px; padding: 11px 13px; border: 1px solid color-mix(in srgb, var(--ok) 38%, transparent);
+  border-radius: var(--r-md); background: var(--ok-soft); color: var(--ok);
+  font-size: var(--fs-13); line-height: 1.5;
+}
+.form-actions { display: flex; gap: 10px; align-items: center; margin-top: 18px }
+.form-actions .btn--primary { flex: 1; min-height: 44px; justify-content: center }
+.auth-alt { margin-top: 16px; text-align: center; font-size: var(--fs-13); color: var(--faint) }
+.auth-alt button { color: var(--accent-strong); font-weight: var(--fw-medium) }
+.auth-alt button:hover { text-decoration: underline }
+.password-rules { margin: 8px 0 0; padding-left: 18px; color: var(--faint); font-size: var(--fs-12); line-height: 1.7 }
+.spin { display: inline-block; width: 14px; height: 14px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin .7s linear infinite; vertical-align: -2px }
+@keyframes spin { to { transform: rotate(360deg) } }
+
+/* account dashboard */
+.acct-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap }
+.acct-avatar {
+  width: 48px; height: 48px; border-radius: 14px; display: grid; place-items: center; flex: none;
+  background: var(--accent-soft); color: var(--accent-strong); font-weight: var(--fw-bold); font-size: var(--fs-20);
+}
+.acct-id h2 { margin: 0; font-size: var(--fs-18); letter-spacing: -.02em }
+.acct-id p { margin: 2px 0 0; color: var(--faint); font-size: var(--fs-12); font-family: var(--mono) }
+.sess-row { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-top: 1px solid var(--border) }
+.sess-row:first-child { border-top: 0; padding-top: 0 }
+.sess-row .sess-info { min-width: 0; flex: 1 }
+.sess-row .sess-label { font-size: var(--fs-13); font-weight: var(--fw-medium); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.sess-row .sess-meta { font-size: var(--fs-12); color: var(--faint); margin-top: 2px }
+.danger-zone { border-color: color-mix(in srgb, var(--err) 34%, var(--border)) }
+.danger-zone .panel-hd h3 { color: var(--err) }
+.verify-banner {
+  display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px; margin-bottom: 16px;
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent); border-radius: var(--r-md);
+  background: var(--warn-soft); color: var(--warn); font-size: var(--fs-13); line-height: 1.5;
+}
+.verify-banner svg { flex: none; margin-top: 1px; width: 15px; height: 15px }
+.verify-banner a, .verify-banner button { color: inherit; font-weight: var(--fw-semibold); text-decoration: underline }
+
+/* connect hub: platform card grid */
+.connect-modal { width: min(720px, 100%) }
+.plat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px }
+.plat-card {
+  display: flex; flex-direction: column; gap: 10px; align-items: flex-start; text-align: left;
+  padding: 16px; border: 1px solid var(--border); border-radius: var(--r-lg);
+  background: var(--surface); cursor: pointer; min-height: 148px;
+  transition: border-color var(--t-fast), box-shadow var(--t-fast), transform var(--t-fast), background var(--t-fast);
+}
+.plat-card:hover, .plat-card:focus-visible {
+  border-color: var(--border-3); background: var(--surface-2); box-shadow: var(--shadow-sm);
+  transform: translateY(-1px); outline: none; text-decoration: none;
+}
+.plat-card:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft) }
+.plat-logo {
+  width: 40px; height: 40px; border-radius: 11px; display: grid; place-items: center; flex: none;
+  border: 1px solid var(--border-2); background: var(--bg-deep); color: var(--text);
+}
+.plat-logo svg { width: 24px; height: 24px }
+.plat-name { font-weight: var(--fw-semibold); font-size: var(--fs-14); display: flex; align-items: center; gap: 8px; flex-wrap: wrap }
+.plat-desc { font-size: var(--fs-12); color: var(--faint); line-height: 1.5; flex: 1 }
+.plat-cta { font-size: var(--fs-12); font-weight: var(--fw-semibold); color: var(--accent-strong); display: inline-flex; align-items: center; gap: 5px }
+.plat-cta svg { width: 13px; height: 13px }
+.plat-detail-head { display: flex; align-items: center; gap: 12px; margin-bottom: 14px }
+.plat-detail-head .plat-logo { width: 44px; height: 44px; border-radius: 12px }
+.conn-state {
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px;
+  border-radius: var(--r-full); font-size: 11px; font-weight: 650; letter-spacing: .01em;
+  border: 1px solid var(--border-2); background: var(--surface-2); color: var(--faint);
+}
+.conn-state svg { width: 12px; height: 12px }
+.conn-state--setup { color: var(--warn); background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 34%, transparent) }
+.conn-state--manual { color: var(--dim) }
+
+/* keep .prov list (fallback/legacy clients) spacing consistent with the grid */
+.prov-list { gap: 8px; margin-top: 12px }
+
+@media (max-width: 560px) {
+  .auth-wrap { margin-top: 8px }
+  .plat-grid { grid-template-columns: 1fr 1fr }
+  .plat-card { min-height: 132px; padding: 13px }
+}
+@media (max-width: 400px) {
+  .plat-grid { grid-template-columns: 1fr }
+}
 `;
