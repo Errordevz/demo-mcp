@@ -36,6 +36,13 @@
       {
         "name": "MCP_AUTH",
         "class_name": "McpAuth"
+      },
+      // DEMO user accounts: password hashes, revocable session hashes,
+      // verification/reset token hashes, rate-limit counters. Session-cookie
+      // identity for the MCP OAuth consent screen and the website Account page.
+      {
+        "name": "DEMO_ACCOUNTS",
+        "class_name": "DemoAccounts"
       }
     ]
   },
@@ -51,6 +58,10 @@
     {
       "tag": "v3",
       "new_sqlite_classes": ["McpAuth"]
+    },
+    {
+      "tag": "v4",
+      "new_sqlite_classes": ["DemoAccounts"]
     }
   ],
   // Workers AI binding. Enables server-side speech-to-text (video_transcribe)
@@ -80,6 +91,12 @@
     "MCP_AUTH_ACCESS_AUD": "<your-cloudflare-access-application-aud-tag>",
     "MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS": "900",
     "MCP_AUTH_RATE_LIMIT_PER_MINUTE": "30",
+    // ── DEMO account system (non-secret policy only) ────────────────────────
+    // Sessions are opaque and revocable server-side; passwords are PBKDF2.
+    // Email delivery is optional: EMAIL_PROVIDER=resend, EMAIL_FROM, plus the
+    // secret RESEND_API_KEY (`wrangler secret put RESEND_API_KEY`).
+    "ACCOUNT_SESSION_TTL_SECONDS": "2592000",
+    "ACCOUNT_RATE_LIMIT_PER_MINUTE": "20",
     "BROWSER_PROVIDER": "cloudflare",
     "BROWSER_KEEPALIVE_MS": "300000",
     "SSRF_DNS_CHECK": "true",

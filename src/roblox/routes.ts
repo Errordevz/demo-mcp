@@ -29,7 +29,8 @@ import { AccountVault, createVault, type VaultHandle } from "./store.js";
 import { safeLog } from "../core/redact.js";
 import type { AccountRecord, RobloxAuthEnv, RobloxOAuthConfig, AccountStatusPayload } from "./types.js";
 import { RobloxAccountClient } from "./client.js";
-import { verifyCloudflareAccessIdentity, type VerifiedAccessIdentity } from "../auth/access-identity.js";
+import type { VerifiedAccessIdentity } from "../auth/access-identity.js";
+import { resolveRequestIdentity, validRequestIdentity } from "../auth/request-identity.js";
 import { resolveMcpAuthStore, type McpAuthStoreApi } from "../auth/oauth-store.js";
 import { robloxAccountKeyForSubjectHash } from "../auth/tool-auth.js";
 
@@ -91,7 +92,7 @@ async function route(request: Request, env: Record<string, any>, ctx: ExecutionC
       requireIdentity(identity);
       if (!config.enabled) throw robloxAuthError("not_configured", config.disabledReason ?? "Roblox OAuth is not configured.", { status: 503 });
       requireRobloxStorage(vaultHandle);
-      return secureResponse(linkFormPage(), [], FORM_CSP);
+      return secureResponse(linkFormPage(identity), [], FORM_CSP);
     }
     case OAUTH_PATHS.start:
       if (request.method === "GET") return secureResponse(new Response(null, { status: 303, headers: { Location: OAUTH_PATHS.link } }), []);
@@ -128,21 +129,34 @@ function requireRobloxStorage(handle: VaultHandle): void {
   }
 }
 
-async function currentIdentity(request: Request, env: RobloxAuthEnv, deps: RobloxRouteDeps): Promise<VerifiedAccessIdentity | null> {
-  return deps.identity ? deps.identity(request, env) : verifyCloudflareAccessIdentity(request, env);
+type RobloxPrincipal = { subjectHash: string; kind?: "account" | "access" };
+
+async function currentIdentity(request: Request, env: RobloxAuthEnv, deps: RobloxRouteDeps): Promise<RobloxPrincipal | null> {
+  if (deps.identity) {
+    const legacy = await deps.identity(request, env);
+    return legacy && /^[a-f0-9]{64}$/.test(legacy.subjectHash) ? { subjectHash: legacy.subjectHash, kind: "access" } : null;
+  }
+  const identity = await resolveRequestIdentity(request, env as unknown as Record<string, unknown>);
+  return validRequestIdentity(identity) ? { subjectHash: identity.subjectHash, kind: identity.kind } : null;
 }
 
-function requireIdentity(identity: VerifiedAccessIdentity | null): asserts identity is VerifiedAccessIdentity {
+function requireIdentity(identity: RobloxPrincipal | null): asserts identity is RobloxPrincipal {
   if (!identity || !/^[a-f0-9]{64}$/.test(identity.subjectHash)) {
-    throw robloxAuthError("unauthenticated", "A verified human Cloudflare Access identity is required for this Roblox route.", {
-      hint: "Sign in to the configured Cloudflare Access application using the same identity used by ChatGPT.",
+    throw robloxAuthError("unauthenticated", "A signed-in DEMO identity is required for this Roblox route.", {
+      hint: "Sign in to your DEMO account on the DEMO website (Account section) — or to the configured Cloudflare Access application when the deployment uses one — using the same identity you use for ChatGPT, then try again.",
       status: 401,
     });
   }
 }
 
-function linkFormPage(): Response {
-  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Link Roblox to DEMO</title><style>${PAGE_STYLE}.field{display:grid;gap:8px;margin:20px 0}.field label{font-size:13px;color:#aab2c0}.field input{width:100%;min-height:48px;padding:12px;border:1px solid #343d4a;border-radius:11px;background:#090c11;color:#f4f6fa;font:600 16px ui-monospace,monospace;letter-spacing:.04em}.button{border:0;cursor:pointer}</style></head><body><main class="card"><div class="dot" style="background:#9bd0ff"></div><h1>Link Roblox to DEMO</h1><p>Paste the short-lived code returned by <code>roblox_account_link_start</code> in ChatGPT. It is single-use and expires in five minutes.</p><p>This browser must be signed in to the <strong>same Cloudflare Access identity</strong> used for ChatGPT. You will then continue to Roblox’s official sign-in and consent page. DEMO never asks for your Roblox password or cookie.</p><form method="post" action="${OAUTH_PATHS.start}"><div class="field"><label for="link_code">One-time link code</label><input id="link_code" name="link_code" type="text" inputmode="text" autocomplete="one-time-code" autocapitalize="none" spellcheck="false" minlength="32" maxlength="128" pattern="[A-Za-z0-9_-]{32,128}" required></div><button class="button" type="submit">Continue to Roblox consent</button></form><p class="foot">ChatGPT → DEMO OAuth and DEMO → Roblox OAuth are separate approvals. Roblox tokens stay encrypted on the Worker.</p></main></body></html>`;
+function linkFormPage(identity: RobloxPrincipal): Response {
+  const direct = identity.kind === "account";
+  const lead = direct
+    ? `<p>You are signed in with a <strong>DEMO account</strong>. Continue straight to Roblox’s official sign-in and consent page to link the Roblox account to this DEMO account. DEMO never asks for your Roblox password or cookie.</p>
+<form method="post" action="${OAUTH_PATHS.start}"><button class="button" type="submit">Connect Roblox account</button></form>
+<details class="code-alt"><summary>Have a one-time code from ChatGPT instead?</summary><form method="post" action="${OAUTH_PATHS.start}"><div class="field"><label for="link_code">One-time link code</label><input id="link_code" name="link_code" type="text" inputmode="text" autocomplete="one-time-code" autocapitalize="none" spellcheck="false" minlength="32" maxlength="128" pattern="[A-Za-z0-9_-]{32,128}"></div><button class="button" type="submit">Use code and continue to Roblox consent</button></form></details>`
+    : `<p>Paste the short-lived code returned by <code>roblox_account_link_start</code> in ChatGPT. It is single-use and expires in five minutes.</p><p>This browser must be signed in to the <strong>same DEMO identity</strong> used for ChatGPT — your DEMO account session, or Cloudflare Access when the deployment uses it. You will then continue to Roblox’s official sign-in and consent page. DEMO never asks for your Roblox password or cookie.</p><form method="post" action="${OAUTH_PATHS.start}"><div class="field"><label for="link_code">One-time link code</label><input id="link_code" name="link_code" type="text" inputmode="text" autocomplete="one-time-code" autocapitalize="none" spellcheck="false" minlength="32" maxlength="128" pattern="[A-Za-z0-9_-]{32,128}" required></div><button class="button" type="submit">Continue to Roblox consent</button></form>`;
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Link Roblox to DEMO</title><style>${PAGE_STYLE}.field{display:grid;gap:8px;margin:20px 0}.field label{font-size:13px;color:#aab2c0}.field input{width:100%;min-height:48px;padding:12px;border:1px solid #343d4a;border-radius:11px;background:#090c11;color:#f4f6fa;font:600 16px ui-monospace,monospace;letter-spacing:.04em}.button{border:0;cursor:pointer}.code-alt{margin-top:18px;font-size:13px;color:#aab2c0}.code-alt summary{cursor:pointer;font-weight:600}</style></head><body><main class="card"><div class="dot" style="background:#9bd0ff"></div><h1>Link Roblox to DEMO</h1>${lead}<p class="foot">DEMO OAuth (your MCP client) and Roblox OAuth are separate approvals. Roblox tokens stay encrypted on the Worker.</p></main></body></html>`;
   return new Response(html, { status: 200, headers: { "Content-Type": "text/html; charset=UTF-8", "Content-Security-Policy": FORM_CSP } });
 }
 
@@ -173,11 +187,24 @@ async function startFlow(
 
   const identity = await currentIdentity(request, env, deps);
   requireIdentity(identity);
-  const rawLinkCode = await readSubmittedLinkCode(request);
-  const linkCode = await authStore.consumeRobloxLinkCode(await sha256Hex(rawLinkCode), deps.now?.() ?? Date.now());
-  if (!linkCode || linkCode.principalHash !== identity.subjectHash) {
-    throw robloxAuthError("unauthenticated", "This Roblox link code is invalid, expired, already used, or belongs to a different signed-in identity.", {
-      hint: "Generate a fresh code in ChatGPT and use the same Cloudflare Access identity in this browser.",
+  // Two start modes, both browser-bound and identity-bound:
+  //  1. Website direct connect — a signed-in DEMO account session submits the
+  //     same-site form with no code; the session itself is the proof.
+  //  2. ChatGPT handoff — a one-time link code minted by roblox_account_link_start,
+  //     consumed atomically and bound to the same principal.
+  const rawLinkCode = await readSubmittedLinkCode(request, identity.kind === "account");
+  if (rawLinkCode) {
+    if (!authStore) throw robloxAuthError("storage_unavailable", "The MCP_AUTH Durable Object is not configured.", { status: 503 });
+    const linkCode = await authStore.consumeRobloxLinkCode(await sha256Hex(rawLinkCode), deps.now?.() ?? Date.now());
+    if (!linkCode || linkCode.principalHash !== identity.subjectHash) {
+      throw robloxAuthError("unauthenticated", "This Roblox link code is invalid, expired, already used, or belongs to a different signed-in identity.", {
+        hint: "Generate a fresh code in ChatGPT and use the same DEMO account (or Cloudflare Access identity) in this browser.",
+        status: 401,
+      });
+    }
+  } else if (identity.kind !== "account") {
+    throw robloxAuthError("unauthenticated", "A one-time link code is required when signing in with Cloudflare Access.", {
+      hint: "Call roblox_account_link_start in ChatGPT, then submit the code here. DEMO account sessions can connect directly.",
       status: 401,
     });
   }
@@ -206,7 +233,7 @@ async function startFlow(
   return secureResponse(new Response(null, { status: 302, headers: { Location: authorizeUrl } }), [cookie]);
 }
 
-async function readSubmittedLinkCode(request: Request): Promise<string> {
+async function readSubmittedLinkCode(request: Request, optional = false): Promise<string | null> {
   const type = (request.headers.get("Content-Type") ?? "").split(";", 1)[0]?.trim().toLowerCase();
   const declared = Number(request.headers.get("Content-Length") ?? 0);
   if (type !== "application/x-www-form-urlencoded" || declared > 4_096) {
@@ -218,6 +245,7 @@ async function readSubmittedLinkCode(request: Request): Promise<string> {
   const form = new URLSearchParams(body);
   const values = form.getAll("link_code");
   const value = values.length === 1 ? values[0]?.trim() ?? "" : "";
+  if (!value && optional) return null;
   if (!/^[A-Za-z0-9_-]{32,128}$/.test(value)) throw robloxAuthError("invalid_input", "Enter the valid one-time code from roblox_account_link_start.");
   return value;
 }
@@ -428,7 +456,7 @@ async function logout(
   handle: VaultHandle,
   vault: AccountVault,
   client: RobloxAccountClient,
-  identity: VerifiedAccessIdentity,
+  identity: RobloxPrincipal,
 ): Promise<Response> {
   if (request.method !== "POST") return new Response("Method not allowed", { status: 405, headers: { Allow: "POST" } });
   if (!sameSiteRequestAllowed(request)) {
@@ -467,7 +495,7 @@ async function status(
   config: RobloxOAuthConfig,
   handle: VaultHandle,
   vault: AccountVault,
-  identity: VerifiedAccessIdentity,
+  identity: RobloxPrincipal,
 ): Promise<Response> {
   if (request.method !== "GET") return new Response("Method not allowed", { status: 405, headers: { Allow: "GET" } });
   requireRobloxStorage(handle);
@@ -485,6 +513,8 @@ async function status(
       clientIdConfigured: Boolean(config.clientId),
       clientSecretConfigured: config.hasClientSecret,
       redirectUri: config.redirectUri,
+      // Surfaced (never silently honoured) when a stale ROBLOX_REDIRECT_URI override was ignored.
+      redirectUriOverride: config.staleRedirectOverride,
       requestedScopes: config.scopes,
       storage: config.storageMode,
       tokenEncryption: config.encryption,

@@ -107,6 +107,7 @@ function page(serverUrl: string, endpoint: string): string {
 <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0a0b0e">
 <meta name="description" content="DEMO — execution infrastructure for AI agents. Public MCP tools need no login; protected Roblox and decision tools use per-tool OAuth.">
 <title>DEMO — Execution infrastructure for AI agents</title>
+<script>(function(){try{var v=localStorage.getItem("demo_theme_v1")||"auto";if(v==="light"||v==="dark")document.documentElement.setAttribute("data-theme",v);}catch(e){}})();</script>
 <style>${UI_CSS}</style>
 </head>
 <body>

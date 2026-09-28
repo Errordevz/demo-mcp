@@ -24,6 +24,8 @@ export interface McpOAuthConfig {
   linkCodeTtlSeconds: number;
   accessTokenTtlSeconds: number;
   rateLimitPerMinute: number;
+  /** True when a Cloudflare Access team domain + audience are configured (one identity option). */
+  accessConfigured: boolean;
 }
 
 export interface McpOAuthConfigEnv {
@@ -32,6 +34,8 @@ export interface McpOAuthConfigEnv {
   MCP_AUTH_ACCESS_AUD?: string;
   MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS?: string | number;
   MCP_AUTH_RATE_LIMIT_PER_MINUTE?: string | number;
+  /** Presence-only check for the account store (the other identity option). */
+  DEMO_ACCOUNTS?: unknown;
 }
 
 function numberFrom(value: string | number | undefined, fallback: number, min: number, max: number): number {
@@ -59,7 +63,7 @@ export function resolveMcpOAuthConfig(env: McpOAuthConfigEnv): McpOAuthConfig | 
   const origin = parsed.origin;
   const accessDomain = (env.MCP_AUTH_ACCESS_TEAM_DOMAIN ?? "").trim().toLowerCase();
   const audience = (env.MCP_AUTH_ACCESS_AUD ?? "").trim();
-  if (!validAccessDomain(accessDomain) || !audience || audience.length > 512 || /[\s\u0000-\u001f]/.test(audience)) return null;
+  const accessConfigured = validAccessDomain(accessDomain) && Boolean(audience) && audience.length <= 512 && !/[\s\u0000-\u001f]/.test(audience);
 
   return {
     origin,
@@ -75,6 +79,7 @@ export function resolveMcpOAuthConfig(env: McpOAuthConfigEnv): McpOAuthConfig | 
     linkCodeTtlSeconds: 300,
     accessTokenTtlSeconds: numberFrom(env.MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS, 900, 300, 900),
     rateLimitPerMinute: numberFrom(env.MCP_AUTH_RATE_LIMIT_PER_MINUTE, 30, 1, 300),
+    accessConfigured,
   };
 }
 
@@ -83,7 +88,12 @@ export function validAccessDomain(value: string): boolean {
 }
 
 export function mcpOAuthReady(env: McpOAuthConfigEnv & { MCP_AUTH?: unknown }): boolean {
-  return resolveMcpOAuthConfig(env) !== null && Boolean(env.MCP_AUTH && typeof (env.MCP_AUTH as { idFromName?: unknown }).idFromName === "function" && typeof (env.MCP_AUTH as { get?: unknown }).get === "function");
+  const config = resolveMcpOAuthConfig(env);
+  if (!config) return false;
+  const hasStore = Boolean(env.MCP_AUTH && typeof (env.MCP_AUTH as { idFromName?: unknown }).idFromName === "function" && typeof (env.MCP_AUTH as { get?: unknown }).get === "function");
+  const accounts = env.DEMO_ACCOUNTS as { idFromName?: unknown; get?: unknown } | undefined;
+  const hasAccounts = Boolean(accounts && typeof accounts.idFromName === "function" && typeof accounts.get === "function");
+  return hasStore && (config.accessConfigured || hasAccounts);
 }
 
 export function resourceMetadata(config: McpOAuthConfig) {

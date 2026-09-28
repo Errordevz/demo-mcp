@@ -319,6 +319,43 @@ describe("configuration and host validation", () => {
     const config = resolveRobloxConfig(baseEnv({ ROBLOX_ACCOUNT_KEY: "caller-selected-slot" }), `${WORKER_ORIGIN}/oauth/roblox/start`);
     expect(config).not.toHaveProperty("accountKey");
   });
+
+  it("derives the redirect URI from the pinned MCP_PUBLIC_ORIGIN and ignores a stale override, with a diagnostic", () => {
+    // Regression: a stale dashboard ROBLOX_REDIRECT_URI used to hard-block the
+    // whole flow ("must use the pinned MCP_PUBLIC_ORIGIN") even though the URI
+    // derived from the pinned origin is authoritative and poisoning-proof.
+    const config = resolveRobloxConfig(
+      baseEnv({ MCP_PUBLIC_ORIGIN: WORKER_ORIGIN, ROBLOX_REDIRECT_URI: "https://old-domain.example/oauth/roblox/callback" }),
+      `${WORKER_ORIGIN}/oauth/roblox/start`,
+    );
+    expect(config.redirectUri).toBe(`${WORKER_ORIGIN}/oauth/roblox/callback`);
+    expect(config.staleRedirectOverride).toBe("ignored-stale-redirect-override");
+    const clean = resolveRobloxConfig(baseEnv({ MCP_PUBLIC_ORIGIN: WORKER_ORIGIN }), `${WORKER_ORIGIN}/oauth/roblox/start`);
+    expect(clean.redirectUri).toBe(`${WORKER_ORIGIN}/oauth/roblox/callback`);
+    expect(clean.staleRedirectOverride).toBeNull();
+  });
+
+  it("still honours a same-origin override with a custom path, and still rejects foreign requests", () => {
+    const customPath = resolveRobloxConfig(
+      baseEnv({ MCP_PUBLIC_ORIGIN: WORKER_ORIGIN, ROBLOX_REDIRECT_URI: `${WORKER_ORIGIN}/custom/callback` }),
+      `${WORKER_ORIGIN}/oauth/roblox/start`,
+    );
+    expect(customPath.redirectUri).toBe(`${WORKER_ORIGIN}/custom/callback`);
+    expect(customPath.staleRedirectOverride).toBeNull();
+    expect(() =>
+      resolveRobloxConfig(baseEnv({ MCP_PUBLIC_ORIGIN: WORKER_ORIGIN }), "https://attacker.example/oauth/roblox/start"),
+    ).toThrow(/pinned MCP_PUBLIC_ORIGIN/);
+  });
+
+  it(" keeps strict pinned-validation when no canonical origin is configured", () => {
+    // Without MCP_PUBLIC_ORIGIN the request origin is the only source of truth, so
+    // an override that disagrees with it stays an error rather than being ignored.
+    const derived = resolveRobloxConfig(baseEnv(), `${WORKER_ORIGIN}/oauth/roblox/start`);
+    expect(derived.redirectUri).toBe(`${WORKER_ORIGIN}/oauth/roblox/callback`);
+    expect(() =>
+      resolveRobloxConfig(baseEnv({ ROBLOX_REDIRECT_URI: "https://elsewhere.example/oauth/roblox/callback" }), `${WORKER_ORIGIN}/oauth/roblox/start`),
+    ).not.toThrow();
+  });
 });
 
 describe("token exchange", () => {

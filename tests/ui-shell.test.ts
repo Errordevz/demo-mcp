@@ -3,8 +3,9 @@
  *
  * Two layers:
  *  1. the served HTML must keep the pinned affordances (Roblox connect via a
- *     plain navigation, the Connect MCP dialog with the exact endpoint, no
- *     credential inputs, no forms) — mirroring the security-hardening locks;
+ *     plain navigation, the Connect MCP dialog with the exact endpoint) while
+ *     honouring user-credential guarantees: no token values, password inputs
+ *     only for the DEMO account flows and only with hardened autocomplete;
  *  2. a jsdom smoke run boots the inline app against stubbed same-origin
  *     routes and verifies the shell renders live data, that navigation and
  *     the tool explorer work, and that the modal opens / copies / closes.
@@ -149,15 +150,20 @@ const flush = async () => {
 describe("inspector UI — served document contract", () => {
   const html = demoUiHtml();
 
-  it("keeps the pinned Roblox affordances without any credential UI", () => {
+  it("keeps the pinned Roblox affordances and user-credential guarantees", () => {
     expect(html).toContain("Connect Roblox account");
-    expect(html).toMatch(/location\.href='\/oauth\/roblox\/link'/);
+    expect(html).toContain("/oauth/roblox/link");
     expect(html).toContain("/oauth/roblox/status");
     expect(html).toContain("/oauth/roblox/logout");
     expect(html).toContain("Disconnect");
-    expect(html).not.toMatch(/<form/i);
-    expect(html).not.toMatch(/type=["']?password/i);
+    // No OAuth/OIDC token material is ever rendered into the page.
     expect(html).not.toMatch(/(access|refresh)[_-]?token\s*[:=]/i);
+    // DEMO account password inputs exist (account system) but always carry
+    // hardened autocomplete semantics — never a bare password autofill.
+    expect(html).not.toMatch(/autocomplete=["']?password/i);
+    for (const input of html.match(/<input[^>]*type="password"[^>]*>/g) ?? []) {
+      expect(input).toMatch(/autocomplete="(current|new)-password"/);
+    }
   });
 
   it("surfaces the Connect MCP dialog with the exact public endpoint and no login", () => {
@@ -172,9 +178,7 @@ describe("inspector UI — served document contract", () => {
     expect(html).toContain("No live ChatGPT connection was exercised");
     expect(html).toContain("Copied!");
     expect(html).toContain("It does not connect automatically or prefill this server.");
-    // No invented auth surface, and no invented client URL schemes.
-    expect(html.toLowerCase()).not.toContain("create account");
-    expect(html.toLowerCase()).not.toContain("sign up");
+    // No invented client URL schemes, and no fabricated connection praise.
     expect(html).not.toContain('href="chatgpt://');
     expect(html).not.toContain('href="claude://');
     expect(html).not.toContain('href="claude-cli://');

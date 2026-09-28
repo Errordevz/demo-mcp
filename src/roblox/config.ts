@@ -179,6 +179,7 @@ export function resolveRobloxConfig(env: RobloxAuthEnv, requestUrl: string, opti
   const allowlist = (env.ROBLOX_ALLOWED_HOSTS ?? "").split(",").map((value) => value.trim()).filter(Boolean);
 
   let redirectUri = pinned || derivedRedirectUri;
+  let staleRedirectOverride: string | null = null;
   let parsed: URL;
   try {
     parsed = new URL(redirectUri);
@@ -192,7 +193,14 @@ export function resolveRobloxConfig(env: RobloxAuthEnv, requestUrl: string, opti
     });
   }
   if (canonicalOrigin && parsed.origin !== canonicalOrigin) {
-    throw robloxAuthError("host_not_allowed", "ROBLOX_REDIRECT_URI must use the pinned MCP_PUBLIC_ORIGIN.", { status: 503 });
+    // A canonical origin is pinned, so the redirect URI derived from it is
+    // authoritative and just as poisoning-proof: it never depends on the request
+    // Host. A stale ROBLOX_REDIRECT_URI left over in the dashboard therefore must
+    // not hard-block the flow (the live regression this fixes); it is ignored and
+    // surfaced as a diagnostic instead of being honoured or silently accepted.
+    staleRedirectOverride = "ignored-stale-redirect-override";
+    redirectUri = derivedRedirectUri;
+    parsed = new URL(redirectUri);
   }
   if (canonicalOrigin && requestOrigin !== canonicalOrigin) {
     throw robloxAuthError("host_not_allowed", "This request did not arrive on the pinned MCP_PUBLIC_ORIGIN.", { status: 403 });
@@ -236,6 +244,7 @@ export function resolveRobloxConfig(env: RobloxAuthEnv, requestUrl: string, opti
     scopes,
     unrecognizedScopes: unrecognized,
     redirectUri,
+    staleRedirectOverride,
     stateTtlSeconds: numberFrom(env.OAUTH_STATE_TTL_SECONDS, 600, 60, 900),
     rateLimitPerMinute: numberFrom(env.ROBLOX_RATE_LIMIT_PER_MINUTE, 20, 1, 300),
     openCloudRatePerMinute: numberFrom(env.ROBLOX_OPEN_CLOUD_RATE_PER_MINUTE, 10, 1, 20),
