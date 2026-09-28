@@ -80,7 +80,7 @@ export function createJevCommand(): CommandHandler {
             jev_analysis: routeResult,
             source: "jev",
             demo_context: {
-              version: String(env.DEMO_VERSION ?? "0.9.0"),
+              version: String(env.DEMO_VERSION ?? "1.0.0"),
               note: "Demo forwarded the minimum relevant context to JEV. No secrets, credentials, or infrastructure details were included.",
             },
           };
@@ -100,7 +100,7 @@ export function createJevCommand(): CommandHandler {
             },
             source: "jev",
             demo_context: {
-              version: String(env.DEMO_VERSION ?? "0.9.0"),
+              version: String(env.DEMO_VERSION ?? "1.0.0"),
               note: "Demo forwarded the minimum relevant context to JEV. No secrets, credentials, or infrastructure details were included.",
             },
           };

@@ -47,7 +47,7 @@ certified solely from the repository.
 | `tests/mcp-tools.test.ts`, `tests/roblox-account.test.ts`, `tests/video-ingest.test.ts` | Replace obsolete expectations that normal MCP requests return 401. Keep OAuth and authenticated account behavior covered. |
 | `wrangler.jsonc`, `.env.example`, `README.md` | Clarify public transport versus private-tool credentials. Wrangler changes are comments only. |
 | `scripts/audit-mcp-deployment.mjs` | Read-only CI audit of deployed code markers and binding names; never prints secret values or downloaded code. Not executed against production in this session. |
-| `scripts/verify-mcp.mjs` | No-auth HTTP smoke check: initialize, initialized notification, discovery, ping, health, tools and OAuth status. |
+| `scripts/verify-mcp.mjs` | No-auth HTTP smoke check: initialize, initialized notification, discovery, ping, health, tools and OAuth status. **Corrected 2026-09-28:** the OAuth status route is private, so the check now asserts that it *refuses* an anonymous caller instead of expecting HTTP 200 — see the correction at the end of this document. |
 | `.github/workflows/live-deploy.yml` | Add predeployment audit and mandatory no-auth smoke check; use `--keep-vars` to preserve dashboard-only variables. |
 | This document | Audit evidence, verification results and deployment blocker. |
 
@@ -84,7 +84,7 @@ Against a local Cloudflare Workers runtime (`wrangler dev --local`) with
 | `tools/call` → `demo_ping` | HTTP 200; `ok: true`; 66 tools |
 | `/health` | HTTP 200; `ok: true` |
 | `/tools` | HTTP 200; same tool list as MCP |
-| `/oauth/roblox/status` | HTTP 200; route still present |
+| `/oauth/roblox/status` | HTTP 200; route still present — **not reproducible and not a valid expectation**: the merged route requires a verified Access identity and answers an anonymous caller with HTTP 401 (see the correction below) |
 
 No normal MCP smoke-check response was Unauthorized. A real Roblox login with
 production credentials was not attempted. Existing offline OAuth tests cover
@@ -120,3 +120,66 @@ URL/version and successful smoke-check step before declaring production fixed.
 The repository documents `https://demo-mcp.www-notamirrblx.workers.dev/mcp`, but
 that address was not reachable in this sandbox; use the URL returned by the
 successful deployment for final live verification.
+
+## Correction — 2026-09-28: the smoke check must not expect HTTP 200 from `/oauth/roblox/status`
+
+The table above recorded `GET /oauth/roblox/status` answering an anonymous
+request with HTTP 200, and `scripts/verify-mcp.mjs` was written to expect that.
+In the merged repository this is wrong, and it is what broke the post-deploy
+smoke test.
+
+Re-observed against the real Worker in-process (`platform-entry.ts` `fetch`,
+empty env, `Accept: application/json`, no `Authorization` header, no cookie, no
+`CF-Access-Jwt-Assertion`):
+
+| Request | Result |
+| --- | --- |
+| `GET /oauth/roblox/status` | **HTTP 401**, `{"error":"unauthenticated","message":"A verified human Cloudflare Access identity is required for this Roblox route.",…}` |
+| `GET /health` | HTTP 200, `ok: true` |
+| `GET /tools` | HTTP 200, same tool list as MCP `tools/list` |
+
+Why 401 is the correct and intended answer:
+
+- `src/roblox/routes.ts` calls `requireIdentity(...)` on the status route *before*
+  anything else, and `verifyCloudflareAccessIdentity` (`src/auth/access-identity.ts`)
+  returns `null` without a valid signed assertion.
+- The assertion must be RS256, signed by the configured team's JWKS, with a
+  matching issuer and audience, unexpired, and `type: "app"`. **Service tokens are
+  rejected deliberately**, so no machine credential can stand in for a human.
+- The route additionally calls `requireRobloxStorage(...)`: without the
+  `ROBLOX_AUTH` Durable Object and `ROBLOX_TOKEN_KEY` it fails closed with 503.
+  Even a verified identity gets no status from an unencrypted deployment.
+
+What changed:
+
+- `scripts/verify-mcp.mjs` no longer lists `/oauth/roblox/status` among the
+  endpoints expected to return HTTP 200. The no-login checks are unchanged:
+  `initialize`, `notifications/initialized`, `tools/list`, `demo_ping`,
+  `/health`, `/tools`.
+- It now asserts the *refusal*: 401 (or 403/503, or a 3xx to the Access login
+  page, observed with `redirect: "manual"` and never followed). A 2xx answer to
+  an anonymous caller fails the deploy with `SECURITY REGRESSION`, because that
+  would mean the private route leaked.
+- Unexpected responses are reported through `scripts/safe-diagnostics.mjs`:
+  at most 8 KiB read from the stream and 600 characters printed, with
+  `Authorization`, `CF-Access-Jwt-Assertion`, cookies, bearer tokens, JWTs,
+  `ROBLOX_*` secrets, provider keys, PEM keys, e-mail addresses and signed-URL
+  parameters replaced by markers, response headers taken from a fixed allowlist,
+  `Set-Cookie` reported as present only, and redirect targets printed without
+  their query string (OAuth `state`/`code_challenge` live there).
+- An optional authenticated probe exists behind `SMOKE_CF_ACCESS_JWT` for an
+  operator who supplies a real, unexpired human assertion. It is off by default,
+  is not wired into `.github/workflows/live-deploy.yml`, prints only a
+  `«N chars, sha256:…»` fingerprint, and changes nothing about how the endpoint
+  authorizes a caller.
+- Regression coverage: `tests/verify-mcp.test.ts` runs the real script against a
+  production-shaped mock (401 ⇒ pass, 200 ⇒ fail, redirect ⇒ pass without
+  following, hostile/huge bodies ⇒ bounded and redacted output) and asserts
+  against the real Worker that the anonymous answer is 401. It also guards the
+  source: the 200-expected list must stay exactly `/health` + `/tools`, and the
+  script must read no Roblox or Access secret from the environment.
+
+Invariant going forward: **no unauthenticated deploy check may expect a
+successful private Roblox status response.** If a future deploy fails on this
+route, the fix is in the deployment's Access configuration or storage bindings —
+never in the identity check, and never by re-adding the path to the 200 list.

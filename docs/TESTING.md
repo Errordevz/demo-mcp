@@ -32,6 +32,7 @@ snapshot rendering and the whole MCP/HTTP surface run for real.
 | Laya decision provider | `tests/laya.test.ts` (51 cases) | The second typed-decision provider, entirely against in-process mock servers: configurable `https`-only endpoint (`<base>/v1/systemone` appended), optional bearer (absent header when unauthenticated, never echoed even when a hostile server parrots the key back), schema-invalid answers treated as provider failures (never decisions), 401/422/429/5xx/timeout/connection mapping with one bounded retry and zero infinite loops, zero traffic when disabled/unconfigured, SSRF guard on `LAYA_BASE_URL` incl. private literals, metadata hosts, infrastructure ports, forbidden ports and DNS-rebinding, all three routing modes (`auto` fallover with visible `source`/note, honest explicit `laya`/`jev` with no silent detour), `invalid_input` not retried across providers, the video-intent hook through Laya, `/laya` + `/laya check` + `/laya mode` (safe fields only), the capability surfaces (`laya_capabilities`, `demo://capabilities/laya`, `/capabilities/laya`), `/health` + `/platform/stats` presence-only flags (with the no-secrets invariant), `jev_decide provider: …`, and proof that a broken Laya config cannot break unrelated tools; `jev_decide` integration calls carry the short-lived user-scoped `decision:use` DEMO OAuth grant. Mock for local poking: `scripts/laya-mock-server.mjs`. |
 | Deployment config | `tests/wrangler-config.test.ts` (9 cases) | `wrangler.jsonc` parsed as JSONC and checked against what the code consumes: browser/video, MCP OAuth and provider policy vars present exactly once with the exact string value, no credential-shaped key in `vars` while the omitted secrets stay documented, no `env.*` section that could drift from the deployed config, DO bindings + migrations + R2/browser/AI bindings intact, every declared var actually read by the source, plus behavioural proof that `SSRF_DNS_FAIL_OPEN=true` only widens the resolver-unreachable case (localhost, private literals, metadata endpoints and a public name resolving to a private IP stay blocked). |
 | Build gate | `tests/worker-build.test.ts` | `wrangler deploy --dry-run` succeeds and the plan contains every binding, including `ROBLOX_AUTH` and its migration. |
+| Deploy smoke check | `tests/verify-mcp.test.ts` (25 cases) | The post-deploy script `scripts/verify-mcp.mjs` **run for real** as a child process against a production-shaped local mock, plus the real Worker bridged onto a local HTTP server (no mock in between) and in-process: the no-login surface (`initialize`, `notifications/initialized`, `tools/list`, `demo_ping`, `/health`, `/tools`) must answer without any credential; the mock records every request header name and proves the script sends no `Authorization`, `Cookie` or `CF-Access-Jwt-Assertion`; the **private** `/oauth/roblox/status` must *refuse* an anonymous caller (401 from the Worker, or an Access login redirect that is never followed) and the script must fail loudly with `SECURITY REGRESSION` if it ever answers 2xx; failure diagnostics are byte-bounded and redacted (a 4 MiB hostile body is never buffered or echoed, and fake bearer/JWT/cookie/`ROBLOX_*` secret/AWS/GitHub/PEM/e-mail values never reach the log); the opt-in protected probe needs a real *human* assertion, refuses a service token and an expired one up front, and prints only a length + SHA-256 fingerprint; plus source guards that the 200-expected list is exactly `/health` + `/tools`, that the script reads no Roblox/Access secret from the environment, and that the public CI step stays credential-free. |
 | Live (opt-in, 17 cases) | `tests/live.test.ts` (2), `tests/video-live.test.ts` (15) | Real Browser Run: open a page, screenshot to R2, read, snapshot, TikTok short link, plus the video acceptance matrix — `video_ingest` on a stable public MP4 (real frames, MCP image blocks, R2 artifact fetched back and SHA-256 verified) and on a public TikTok URL, `video_inspect_url` on the supplied short link, `inspect_video` on a plain MP4 link (automatic reaction-mode flow, consumable image blocks) and on the supplied short link `https://vt.tiktok.com/ZSqVLjkpU/` (real frames or an explicit failed status with the anti-fabrication honesty note), the 0.7.0 tools live (`video_resolve` byte-verified discovery + access verdict, `video_fetch` streamed artifact fetched back and hash-verified over HTTPS with Range support and `NOT_A_VIDEO` rejection, `video_analyze` image blocks or an explicit "could not", `video_react` evidence package, capability resources), `video_extract_frames` with `resize: { max_width: 320 }` (viewport exactly 320 CSS pixels wide, or the documented resize-failed fallback), and honest structured failures (`blocked_url` on private IPs, stable codes with `frames: []` on missing media). Sandbox egress restrictions are skipped with an explicit note, never asserted as passes or pipeline failures. |
 
 ## Fixtures and helpers
@@ -58,6 +59,12 @@ snapshot rendering and the whole MCP/HTTP surface run for real.
   and inject launch errors, limits and rate-limit failures.
 * `tests/helpers/live.ts` — opt-in live client (Streamable HTTP MCP over
   `fetch`) plus `wrangler dev` bootstrapping.
+* `scripts/safe-diagnostics.mjs` — bounded/redaction-safe response reporting
+  shared by the deploy smoke check (imported directly by
+  `tests/verify-mcp.test.ts`; `scripts/safe-diagnostics.d.mts` types it for
+  `npm run typecheck`). Its patterns mirror `src/core/redact.ts`, which cannot
+  be imported by a plain-Node script because it is TypeScript bundled into the
+  Worker.
 
 ## Running the live tests
 
@@ -129,6 +136,68 @@ failure), and the **platform** blocks the Worker (asserted as an honest
 structured error). Tests otherwise skip (not fail) when a capability the
 environment cannot provide is missing (`capability_unavailable`,
 `rate_limited`). No skip is ever silent: every skip carries its reason.
+
+## Post-deploy smoke check (no login)
+
+```bash
+npm run verify:mcp -- https://demo-mcp.<subdomain>.workers.dev
+# equivalent: node scripts/verify-mcp.mjs <worker-url>
+```
+
+`.github/workflows/live-deploy.yml` runs this right after `wrangler deploy`. It
+sends **no** `Authorization` header, **no** cookie and **no** Cloudflare Access
+assertion, and it never starts account linking, a token refresh or a logout.
+
+| Check | Expected |
+| --- | --- |
+| `POST /mcp` → `initialize` | HTTP 200, `serverInfo.name === "DEMO"`, protocol `2025-03-26` |
+| `POST /mcp` → `notifications/initialized` | HTTP 202 |
+| `POST /mcp` → `tools/list` | HTTP 200, includes `demo_ping`, `roblox_user`, `roblox_account_status`, `roblox_account_unlink`, `jev_decide` |
+| `POST /mcp` → `tools/call demo_ping` | `ok: true`, `name: "DEMO"`, `toolCount` equals the discovered tool count |
+| `GET /health` | HTTP 200, `ok: true` |
+| `GET /tools` | HTTP 200, tool list identical to MCP `tools/list` |
+| `GET /oauth/roblox/status` | **Refused**: HTTP 401 (Worker), a 3xx to the Access login page (never followed), 403, or 503 when Roblox storage is unconfigured |
+
+`/oauth/roblox/status` is **private** and must stay out of the 200-expected list.
+It answers only for a verified human Cloudflare Access identity —
+`CF-Access-Jwt-Assertion`, RS256 against the team JWKS, matching issuer and
+audience, unexpired, and `type: "app"`; service tokens are rejected on purpose —
+and only when encrypted Roblox storage (`ROBLOX_AUTH` + `ROBLOX_TOKEN_KEY`) is
+configured. An anonymous HTTP 200 from that route therefore means the endpoint
+leaked, so the script fails the deploy with `SECURITY REGRESSION` instead of
+celebrating it. `tests/verify-mcp.test.ts` pins both directions: the real Worker
+returns 401 anonymously, the script passes against a production-shaped 401 mock,
+and the script fails against a 200 mock.
+
+**Optional protected probe (off by default, never used by CI).** To also exercise
+the authenticated 200 path, an operator can supply a real, unexpired *human*
+assertion for the configured Access team:
+
+```bash
+SMOKE_CF_ACCESS_JWT='<assertion from your own signed-in browser session>' \
+  npm run verify:mcp -- https://demo-mcp.<subdomain>.workers.dev
+```
+
+The value is sent only as `CF-Access-Jwt-Assertion` to the private route, is
+never printed (the log shows `«N chars, sha256:…»`), and must never be committed
+or added to the public workflow — treat it as a live credential. A service token
+cannot be substituted: the Worker rejects `type !== "app"`, and the script
+rejects it up front with that explanation rather than producing a confusing 401.
+Without the variable the probe prints an explicit `SKIP:` line, so it never
+passes silently. The endpoint is not weakened either way: signature, issuer,
+audience, expiry and token type are still verified by the Worker.
+
+**Diagnostics are bounded and redacted.** When a response is unexpected the
+script prints at most `MAX_DIAGNOSTIC_BYTES` (8 KiB) of the body — read from the
+stream, so a huge or hostile body is never buffered — and at most
+`MAX_DIAGNOSTIC_CHARS` (600) characters of it, with `Authorization`,
+`CF-Access-Jwt-Assertion`, cookies, bearer tokens, JWTs, `ROBLOX_*` secrets,
+provider keys, PEM private keys, e-mail addresses and signed-URL parameters
+replaced by markers (`scripts/safe-diagnostics.mjs`). Response headers are
+reported from a fixed allowlist; `Set-Cookie` is reported as *present* only, and
+a redirect target loses its query string because OAuth `state` and
+`code_challenge` live there. If a credential shape somehow survives redaction,
+the whole preview is withheld rather than partially printed.
 
 ## Verifying Cloudflare compatibility
 

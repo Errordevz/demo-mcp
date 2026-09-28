@@ -36,7 +36,7 @@ import {
 import { CONNECT_PICKER, MCP_SERVER_URL, connectClientPayload } from "./src/ui/mcp-clients.js";
 
 /** UI build stamp — safe to expose; contains no secret values. */
-const VERSION = "0.9.0";
+const VERSION = "1.0.0";
 
 type UiEnv = { MCP_PUBLIC_ORIGIN?: string };
 

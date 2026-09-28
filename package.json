@@ -1,6 +1,6 @@
 {
   "name": "demo-cloudflare-mcp",
-  "version": "0.9.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -12,6 +12,7 @@
     "test:live": "DEMO_MCP_LIVE=1 vitest run tests/live.test.ts tests/video-live.test.ts",
     "test:live:video": "DEMO_MCP_LIVE=1 vitest run tests/video-live.test.ts",
     "build:check": "CI=1 wrangler deploy --dry-run --outdir dist",
+    "verify:mcp": "node scripts/verify-mcp.mjs",
     "ui:catalog": "node scripts/generate-tool-catalog.mjs"
   },
   "dependencies": {

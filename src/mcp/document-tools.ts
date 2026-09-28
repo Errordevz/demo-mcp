@@ -31,7 +31,7 @@ async function fetchPdfBytes(env: DocumentToolContext["env"], url: string, timeo
     timeoutMs: clamp(timeoutMs ?? LIMITS.publicFetchTimeoutMaxMs, 1_000, LIMITS.publicFetchTimeoutMaxMs),
     maxBytes: maxMb * 1024 * 1024,
     acceptContentTypes: ["application/pdf", "application/x-pdf", "text/html", "application/octet-stream"],
-    headers: { accept: "application/pdf;q=0.9,*/*;q=0.1", "user-agent": "DEMO-MCP/0.9.0 (+pdf reader; public read-only)" },
+    headers: { accept: "application/pdf;q=0.9,*/*;q=0.1", "user-agent": "DEMO-MCP/1.0.0 (+pdf reader; public read-only)" },
   });
   // A PDF must carry the header; an HTML body here is a wall/wrong-URL page.
   const head = new TextDecoder("latin1").decode(result.bytes.subarray(0, 1024));

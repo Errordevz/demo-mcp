@@ -133,6 +133,38 @@ Live ChatGPT connector compatibility has not yet been exercised. Do not rely on
 the protected flow until you deploy the configuration and verify the first
 protected-tool challenge in your ChatGPT account.
 
+## Post-deploy smoke check
+
+```bash
+npm run verify:mcp -- https://<your-worker>.workers.dev
+```
+
+The deploy workflow runs `scripts/verify-mcp.mjs` immediately after
+`wrangler deploy`. It carries **no** `Authorization` header, **no** cookie and
+**no** Cloudflare Access assertion, and it never starts linking, a refresh or a
+logout. It verifies the no-login surface — MCP `initialize`,
+`notifications/initialized`, `tools/list`, `demo_ping`, `GET /health` and
+`GET /tools` — and it verifies that the **private** route
+`GET /oauth/roblox/status` *refuses* an anonymous caller (HTTP 401 from the
+Worker, or a 3xx to the Access login page, which is reported but never followed).
+
+That refusal is the point. `/oauth/roblox/status` requires a verified human
+Cloudflare Access identity and encrypted Roblox storage, so an unauthenticated
+deploy check must never expect HTTP 200 there — expecting it made the smoke test
+fail against a correctly secured Worker. If the route ever answers an anonymous
+caller with 2xx, the script fails the deploy with `SECURITY REGRESSION` rather
+than passing: the fix is never to weaken `src/auth/access-identity.ts` or
+`src/roblox/routes.ts`. `tests/verify-mcp.test.ts` pins both directions against
+the real Worker and a production-shaped mock.
+
+An operator may opt in to also exercising the authenticated 200 path with
+`SMOKE_CF_ACCESS_JWT='<a real, unexpired human assertion>'`. It is sent only to
+that one route, printed only as a `«N chars, sha256:…»` fingerprint, never
+committed and never used by CI; a service token is rejected up front because the
+Worker only accepts `type: "app"`. Failure output is byte-bounded (8 KiB read,
+600 chars printed) and redacted by `scripts/safe-diagnostics.mjs`. See
+[`docs/TESTING.md`](docs/TESTING.md) §Post-deploy smoke check.
+
 ## Browser tools (persistent sessions)
 
 | Tool | What it does |
@@ -187,7 +219,7 @@ ChatGPT has created a user-bound DEMO grant:
 GET  /oauth/roblox/link       → Access-authenticated one-time-code form
 POST /oauth/roblox/start      → consumes the code; redirects to Roblox with state + PKCE S256
 GET  /oauth/roblox/callback   → single-use state and server-side code exchange; no login cookie
-GET  /oauth/roblox/status    → the verified Access user's status only (no secrets)
+GET  /oauth/roblox/status    → the verified Access user's status only (no secrets; HTTP 401 for an anonymous caller)
 POST /oauth/roblox/logout    → same-site disconnect; deletes the user's grant and best-effort revokes Roblox
 ```
 
@@ -795,6 +827,14 @@ DEMO_MCP_LIVE=1 LIVE_WORKER_URL=https://demo-mcp.<sub>.workers.dev npm run test:
   (`tests/roblox-oauth.test.ts`, `tests/roblox-routes.test.ts`, `tests/roblox-account.test.ts`).
 * Build gate: `wrangler deploy --dry-run` must succeed and must not pull any
   Node-only code into the Worker bundle.
+* Deploy smoke check (no network): `scripts/verify-mcp.mjs` is executed for real
+  against a production-shaped local mock and against the real Worker in-process
+  — the no-login MCP/HTTP surface must answer with no credential, no
+  `Authorization`/`Cookie`/`CF-Access-Jwt-Assertion` header may be sent, the
+  private `/oauth/roblox/status` must refuse an anonymous caller (and making it
+  public must fail the check), failure diagnostics must stay bounded and
+  redacted, and the opt-in protected probe must refuse service tokens
+  (`tests/verify-mcp.test.ts`).
 * Live: opt-in tests that drive the real Browser Run service; the video suite
   verifies real frames (validated image bytes), R2 upload **and** retrieval
   (SHA-256 checked) and distinguishes sandbox egress restrictions from real
