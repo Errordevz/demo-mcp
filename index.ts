@@ -63,7 +63,7 @@ type Env = SessionManagerEnv & VideoEnv & RobloxAuthEnv & JevEnv & LayaEnv & You
 };
 /** Release version. Reported by `demo_ping`, `/health`, `/tools`, the MCP initialize
  * result and `/platform/stats` — one constant, so those can never disagree. */
-const VERSION = "0.9.0";
+const VERSION = "1.0.0";
 const SKILLS_API = "https://skills.sh/api/v1";
 
 /**

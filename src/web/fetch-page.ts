@@ -55,7 +55,7 @@ export async function fetchPublicPage(url: string, options: FetchPageOptions): P
       guard,
       timeoutMs,
       maxBytes,
-      headers: { accept: options.accept ?? PAGE_ACCEPT, "user-agent": "DEMO-MCP/0.9.0 (+public read-only fetch)" },
+      headers: { accept: options.accept ?? PAGE_ACCEPT, "user-agent": "DEMO-MCP/1.0.0 (+public read-only fetch)" },
       acceptContentTypes:
         options.acceptContentTypes === null
           ? null

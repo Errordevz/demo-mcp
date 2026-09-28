@@ -98,7 +98,7 @@ export function createGuardedGitHttpClient(options: GitHttpOptions): { request(r
         try {
           const headers: Record<string, string> = {
             accept: GIT_PROTOCOL_ACCEPT,
-            "user-agent": "DEMO-MCP/0.9.0 (public git read-only)",
+            "user-agent": "DEMO-MCP/1.0.0 (public git read-only)",
             ...(request.headers ?? {}),
           };
           response = await fetchImpl(currentUrl, {

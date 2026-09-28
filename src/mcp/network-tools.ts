@@ -52,7 +52,7 @@ export function registerNetworkTools(mcp: McpServer, ctx: NetworkToolContext): v
             timeoutMs: args.timeout_ms ?? 15_000,
             maxBytes: LIMITS.openapiMaxBytes,
             acceptContentTypes: null,
-            headers: { accept: "application/json, application/yaml, text/yaml, text/plain, */*;q=0.2", "user-agent": "DEMO-MCP/0.9.0 (+openapi inspector)" },
+            headers: { accept: "application/json, application/yaml, text/yaml, text/plain, */*;q=0.2", "user-agent": "DEMO-MCP/1.0.0 (+openapi inspector)" },
           });
           source = new TextDecoder("utf-8", { fatal: false }).decode(result.bytes);
           fetchedFrom = result.finalUrl;

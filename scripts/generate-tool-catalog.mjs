@@ -227,7 +227,7 @@ export interface DemoToolCatalogEntry {
   inputs?: string[];
 }
 
-export const TOOL_CATALOG_VERSION = ${JSON.stringify(process.env.CATALOG_VERSION || "0.9.0")};
+export const TOOL_CATALOG_VERSION = ${JSON.stringify(process.env.CATALOG_VERSION || "1.0.0")};
 
 export const TOOL_CATALOG: DemoToolCatalogEntry[] = [
 ${body}
