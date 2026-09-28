@@ -7,7 +7,7 @@ import { connectLive, liveEnv, LIVE_SKIP_REASON, skipIfUnavailable, startDevWork
  *
  *   DEMO_MCP_LIVE=1
  *   CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN
- *   DEMO_API_KEY or LIVE_WORKER_URL
+ *   a public LIVE_WORKER_URL or local Wrangler credentials
  *
  * The Worker must be deployed with the `BROWSER` (Browser Run), `SCREENSHOTS`
  * (R2) and `BROWSER_SESSIONS` (Durable Object) bindings. On a Workers Free plan

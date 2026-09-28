@@ -44,11 +44,11 @@ function groupFor(name) {
 /**
  * Availability key per group/tool: which field of /health+/platform/stats
  * gates this capability. "always" means the tool works without optional
- * providers. "bearer" means the tool needs the DEMO private-tool credential.
+ * providers. "oauth" means the tool is protected by DEMO per-tool OAuth.
  */
 function availabilityFor(name) {
-  if (name.startsWith("roblox_account_")) return "bearer";
-  if (name === "jev_decide") return "bearer";
+  if (name.startsWith("roblox_account_")) return "oauth";
+  if (name === "jev_decide") return "oauth";
   if (name.startsWith("browser_")) return "browser";
   if (name === "screenshot_diff") return "browser";
   if (name.startsWith("youtube_")) return "youtube";
@@ -220,8 +220,8 @@ export interface DemoToolCatalogEntry {
   title: string;
   group: string;
   /** Which live capability gates this tool: browser | youtube | jev | laya |
-   * transcription | vision | frames | artifacts | snapshots | bearer | always.
-   * "bearer" = private tool requiring the DEMO_API_KEY bearer credential. */
+   * transcription | vision | frames | artifacts | snapshots | oauth | always.
+   * "oauth" = protected tool requiring a user-bound DEMO OAuth grant. */
   availability: string;
   description?: string;
   inputs?: string[];

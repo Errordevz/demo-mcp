@@ -32,15 +32,18 @@ export interface RobloxAuthEnv {
   /** Space- or comma-separated scope list. Defaults to the minimum: `openid profile`. */
   ROBLOX_OAUTH_SCOPES?: string;
   OAUTH_STATE_TTL_SECONDS?: string | number;
-  ROBLOX_SESSION_TTL_SECONDS?: string | number;
   ROBLOX_RATE_LIMIT_PER_MINUTE?: string | number;
   ROBLOX_OPEN_CLOUD_RATE_PER_MINUTE?: string | number;
   ROBLOX_TOKEN_SKEW_SECONDS?: string | number;
-  ROBLOX_ACCOUNT_KEY?: string;
-  /** Durable Object namespace (`RobloxAuth`). Required for durable, encrypted sessions. */
+  /** Durable Object namespace (`RobloxAuth`). Required for durable, encrypted Roblox grants and OAuth state. */
   ROBLOX_AUTH?: unknown;
-  /** Reused from the rest of DEMO: bearer protection for /mcp, and the account tools. */
-  DEMO_API_KEY?: string;
+  /** DEMO -> Roblox identity-link codes and ChatGPT OAuth grants. */
+  MCP_AUTH?: unknown;
+  MCP_PUBLIC_ORIGIN?: string;
+  MCP_AUTH_ACCESS_TEAM_DOMAIN?: string;
+  MCP_AUTH_ACCESS_AUD?: string;
+  MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS?: string | number;
+  MCP_AUTH_RATE_LIMIT_PER_MINUTE?: string | number;
 }
 
 /** Resolved, validated configuration for one request. */
@@ -55,11 +58,9 @@ export interface RobloxOAuthConfig {
   unrecognizedScopes: string[];
   redirectUri: string;
   stateTtlSeconds: number;
-  sessionTtlSeconds: number;
   rateLimitPerMinute: number;
   openCloudRatePerMinute: number;
   tokenSkewSeconds: number;
-  accountKey: string;
   storageMode: "durable-object" | "memory";
   encryption: "aes-gcm-256" | "none";
   encryptionReason: string | null;
@@ -73,6 +74,8 @@ export interface PendingAuthorization {
   /** SHA-256 of the browser binding cookie, so a state cannot be redeemed by another browser. */
   bindingHash: string;
   accountKey: string;
+  /** Verified principal hash that requested this Roblox link; always set for new flows. */
+  principalHash?: string;
   redirectUri: string;
   scopes: string[];
   /** Encrypted PKCE code verifier (never persisted in the clear). */
@@ -116,6 +119,8 @@ export interface TokenSecrets {
 /** Safe, non-secret account state. Mirrors what `/oauth/roblox/status` returns. */
 export interface AccountRecord {
   version: 1;
+  /** Server-derived hash of the Cloudflare Access subject this Roblox grant belongs to. */
+  principalHash: string;
   accountKey: string;
   connectedAt: number;
   updatedAt: number;
@@ -142,7 +147,7 @@ export interface AccountRecord {
   token: TokenSecrets | null;
 }
 
-/** Opaque browser session → account slot pointer. */
+/** Legacy browser-session pointer; new Roblox linking is identity-bound and does not issue these. */
 export interface SessionRecord {
   version: 1;
   accountKey: string;
@@ -178,7 +183,6 @@ export interface AccountStatusPayload {
     connectedAt: string;
     updatedAt: string;
     accessTokenExpiresAt: string;
-    sessionExpiresAt: string | null;
     canRefresh: boolean;
     reauthorizationRequired: boolean;
     reauthorizationReason: string | null;
@@ -196,17 +200,15 @@ export interface AccountStatusPayload {
     pkce: "S256";
   };
   endpoints: { start: string; callback: string; logout: string };
-  /** Slot the connected record lives in, so MCP tools and the browser agree. */
-  accountKey?: string;
   /** Seconds until the cached access token needs refreshing. */
   tokenExpiresIn?: number;
-  /** Human-readable state of this browser's session. */
+  /** Human-readable connection state. */
   message?: string;
   security: {
     passwordOrCookieRequested: false;
     tokensExposedToClient: false;
-    stateValidation: "single-use, expiring, browser-bound";
-    cookieFlags: "HttpOnly; Secure; SameSite=Lax";
+    stateValidation: "single-use, expiring, browser-bound" | "single-use, expiring, browser-bound; link code bound to verified Access subject";
+    cookieFlags: string;
   };
 }
 

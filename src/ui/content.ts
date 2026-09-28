@@ -13,7 +13,7 @@ export const PROJECT = {
   name: "DEMO",
   tagline: "Execution infrastructure for AI agents.",
   blurb:
-    "A single public MCP server for browser automation, web intelligence, video understanding, Roblox integrations, skills, and typed decision routing. Paste the endpoint, connect, and build — no account, no login, no tracking.",
+    "A public MCP server for browser automation, web intelligence, video understanding, Roblox integrations, skills, and typed decision routing. Public tools work immediately with no login; protected Roblox and paid-decision tools use per-tool OAuth.",
   repoUrl: "https://github.com/Errordevz/demo-mcp",
   repoLabel: "github.com/Errordevz/demo-mcp",
   docsTreeUrl: "https://github.com/Errordevz/demo-mcp/tree/main/docs",
@@ -67,7 +67,7 @@ export const CAPABILITY_CATEGORIES = [
     title: "Roblox",
     icon: "game",
     route: "roblox",
-    description: "Public profiles and games out of the box; your own account via official OAuth 2.0 + PKCE — never a DEMO login.",
+    description: "Public profiles and games need no login. Account tools use DEMO OAuth per tool, then a separate official Roblox OAuth 2.0 + PKCE consent — never a Roblox password or cookie.",
     highlights: ["Public profiles", "Games", "OAuth account tools"],
     groups: ["Roblox"],
   },
@@ -164,7 +164,7 @@ export const SKILLS_TOOLS = [
 ];
 
 export const API_ROUTES = [
-  { path: "/", note: "This inspector UI — no login, no cookies, no tracking" },
+  { path: "/", note: "Public inspector UI — no app login or tracking" },
   { path: "/mcp", note: "MCP endpoint (Streamable HTTP, stateless, public)" },
   { path: "/health", note: "Liveness + full capability flags" },
   { path: "/tools", note: "Tool inventory — count + names + resources" },
@@ -176,31 +176,38 @@ export const API_ROUTES = [
   { path: "/capabilities/video", note: "Video pipeline capability report" },
   { path: "/screenshots/:id", note: "R2 screenshot / frame (expiring, high-entropy id)" },
   { path: "/video-assets/:ref", note: "Expiring video/audio artifact (Range supported, 410 when expired)" },
-  { path: "/oauth/roblox/*", note: "Roblox OAuth 2.0 + PKCE (start · callback · status · logout)" },
+  { path: "/.well-known/oauth-*", note: "DEMO OAuth metadata for ChatGPT's mixed-auth connection" },
+  { path: "/oauth/{authorize,token,revoke}", note: "DEMO OAuth 2.1 + PKCE, pinned ChatGPT client and short-lived grants" },
+  { path: "/oauth/roblox/*", note: "Separate Roblox OAuth 2.0 + PKCE (one-time link · callback · status · disconnect)" },
 ];
 
 export const PRIVACY_FACTS = [
-  "No account, no sign-in, no onboarding: DEMO's public capabilities work immediately, no login required.",
-  "No cookies on JSON routes; this page sets no cookie and runs no analytics, fingerprinting or IP tracking.",
-  "Telemetry endpoints report presence and policy only — API keys, OAuth tokens and secrets never leave the Worker.",
-  "Every outbound fetch (including the Laya endpoint) passes the SSRF guard; private/internal targets are refused.",
-  "Tool results are bounded and redacted: tokens, cookies, passwords, e-mails and phone numbers are stripped.",
-  "CAPTCHAs, login walls and DRM are reported, never bypassed; humans are handed the Live View instead of automated evasion.",
+  "Public MCP tools and routes work immediately without a DEMO account or login.",
+  "Only account-specific Roblox tools and paid jev_decide are protected by per-tool OAuth; a missing token triggers a scoped challenge.",
+  "The DEMO OAuth grant is separate from Roblox OAuth. Roblox linking requires a one-time code and explicit approval on Roblox's official consent page.",
+  "User identity is verified from a signed Cloudflare Access assertion, then reduced to a server-side subject hash; tool arguments cannot choose an account.",
+  "Roblox tokens are encrypted in the RobloxAuth Durable Object and never reach the browser, MCP result, URL, log, or telemetry.",
+  "This page sets no cookie and runs no analytics, fingerprinting or IP tracking. OAuth state cookies are short-lived, HttpOnly and Secure.",
+  "Every outbound fetch passes the SSRF guard; private/internal targets are refused. CAPTCHAs, login walls and DRM are reported, never bypassed.",
 ];
 
 export const ARCHITECTURE_TEXT = `ChatGPT / any MCP client
-        │  (Streamable HTTP MCP — public endpoint)
+        │  Streamable HTTP; public endpoint with per-tool auth metadata
         ▼
 DEMO MCP Worker (Cloudflare Workers)
-        ├── /mcp                  MCP endpoint (stateless, public, no auth)
-        ├── /health · /tools      liveness + inventory (same-origin)
+        ├── /mcp                  public transport; public tools declare noauth
+        ├── tools/list            protected tools declare scoped OAuth 2.1 schemes
+        ├── /.well-known/*        protected-resource + authorization-server metadata
+        ├── /oauth/{authorize,token,revoke} short-lived PKCE grants; codes/tokens stored as hashes
+        ├── Cloudflare Access     verified human subject only at interactive authorize/link surfaces
+        ├── /oauth/roblox/*       separate Roblox OAuth 2.0 + PKCE consent flow
+        ├── MCP_AUTH DO           atomic consent, one-time codes, token hashes, link codes, rate limits
+        ├── RobloxAuth DO         per-subject encrypted Roblox token vault (server-side only)
+        ├── BrowserSession DO     persistent sessions, tabs, handoff state
+        ├── /health · /tools      liveness + inventory (public)
         ├── /platform/stats       safe telemetry (no secrets, no user content)
-        ├── /capabilities/*       expanded · jev · laya · youtube · video
         ├── /screenshots/:id      R2-backed screenshot / frame (expiring)
         ├── /video-assets/:ref    expiring video/audio artifact (Range-aware)
-        ├── /oauth/roblox/*       Roblox OAuth 2.0 + PKCE (optional, external)
-        ├── BrowserSession DO     persistent sessions, tabs, handoff state
-        ├── RobloxAuth DO         encrypted token vault (server-side only)
         ├── Browser Provider      Cloudflare Browser Rendering (Browser Run)
         ├── UrlGuard              SSRF protection on every outbound fetch
         └── DecisionRouter        auto: Laya → Jev → deterministic rules`;
@@ -215,6 +222,6 @@ export const AVAILABILITY_HINTS: Record<string, string> = {
   frames: "Needs the Browser Rendering binding to decode frames.",
   artifacts: "Needs R2 storage for expiring artifacts.",
   snapshots: "Needs R2 storage for web snapshots / monitors.",
-  bearer: "Private tool: requires the DEMO API bearer credential (configured server-side as a secret).",
+  oauth: "Protected tool: requires a user-bound DEMO OAuth token; ChatGPT can authorize it with Mixed Authentication.",
   always: "No optional provider needed — works out of the box.",
 };

@@ -25,6 +25,8 @@ import { createMcpCommand } from "../src/commands/mcp-command.js";
 import { registerCommand, routeCommand } from "../src/commands/router.js";
 import worker, { DEMO_TOOL_NAMES, TOOL_COUNT } from "../index.js";
 import platform from "../platform-entry.js";
+import { InMemoryMcpAuthStore } from "../src/auth/oauth-store.js";
+import { sha256Hex } from "../src/roblox/crypto.js";
 
 const CTX = { waitUntil: (promise: Promise<unknown>) => void promise.catch(() => undefined), passThroughOnException: () => undefined } as unknown as ExecutionContext;
 const LAYA_KEY = "laya_secret_test_key_00112233445566778899aabbccddeeff";
@@ -679,6 +681,30 @@ describe("/laya command", () => {
 
 /* ------------------------------------------------------ MCP + HTTP surfaces */
 
+const MCP_TOKEN = "test-mcp-access-token-for-laya-integration-1234567890";
+const MCP_SUBJECT = "b".repeat(64);
+
+async function mcpTestEnv(overrides: Record<string, unknown> = {}) {
+  const store = new InMemoryMcpAuthStore();
+  const now = Date.now();
+  await store.putAccessToken(await sha256Hex(MCP_TOKEN), {
+    version: 1,
+    clientIdHash: "d".repeat(64),
+    principalHash: MCP_SUBJECT,
+    scopes: ["decision:use"],
+    audience: "https://demo.test",
+    issuedAt: now,
+    expiresAt: now + 60 * 60_000,
+  });
+  return {
+    ...overrides,
+    MCP_PUBLIC_ORIGIN: "https://demo.test",
+    MCP_AUTH_ACCESS_TEAM_DOMAIN: "demo.cloudflareaccess.com",
+    MCP_AUTH_ACCESS_AUD: "test-access-audience",
+    MCP_AUTH: { idFromName: (name: string) => name, get: () => store },
+  };
+}
+
 async function rpc(method: string, params: Record<string, unknown>, envValue: unknown, headers: Record<string, string> = {}) {
   const response = await worker.fetch(
     new Request("https://demo.test/mcp", {
@@ -695,8 +721,9 @@ async function rpc(method: string, params: Record<string, unknown>, envValue: un
   return JSON.parse(dataLines[dataLines.length - 1].slice(5).trim());
 }
 
-async function callTool(name: string, args: Record<string, unknown>, envValue: unknown, headers: Record<string, string> = { authorization: "Bearer mcp-key" }) {
-  const response = await rpc("tools/call", { name, arguments: args }, envValue, headers);
+async function callTool(name: string, args: Record<string, unknown>, envValue: unknown, headers: Record<string, string> = { authorization: `Bearer ${MCP_TOKEN}` }) {
+  const input = envValue && typeof envValue === "object" ? envValue as Record<string, unknown> : {};
+  const response = await rpc("tools/call", { name, arguments: args }, await mcpTestEnv(input), headers);
   expect(response.error).toBeUndefined();
   const text = (response.result?.content ?? []).map((entry: { text?: string }) => entry.text ?? "").join("\n");
   let parsed: any = null;
@@ -710,7 +737,7 @@ async function callTool(name: string, args: Record<string, unknown>, envValue: u
 
 describe("Laya MCP surface", () => {
   it("registers laya_capabilities alongside — never replacing — the Jev tools", async () => {
-    const listed = await rpc("tools/list", {}, {});
+    const listed = await rpc("tools/list", {}, await mcpTestEnv());
     const names: string[] = listed.result.tools.map((tool: { name: string }) => tool.name);
     expect(names).toContain("laya_capabilities");
     expect(names).toContain("jev_decide");
@@ -722,7 +749,7 @@ describe("Laya MCP surface", () => {
   });
 
   it("publishes a presence-only capability report (tool, resource and route)", async () => {
-    const result = await callTool("laya_capabilities", {}, env({ DEMO_API_KEY: "mcp-key" }));
+    const result = await callTool("laya_capabilities", {}, env({}));
     expect(result.isError).toBe(false);
     expect(result.parsed).toMatchObject({
       schema: "demo.laya-capabilities/1",
@@ -742,11 +769,11 @@ describe("Laya MCP surface", () => {
     expect(result.text).not.toContain("LAYA_API_KEY");
     expect(result.text).not.toContain("[redacted]");
 
-    const route = await worker.fetch(new Request("https://demo.test/capabilities/laya"), env({ DEMO_API_KEY: "mcp-key" }) as never, CTX);
+    const route = await worker.fetch(new Request("https://demo.test/capabilities/laya"), env({}) as never, CTX);
     expect(route.status).toBe(200);
     expect(((await route.json()) as { schema: string }).schema).toBe("demo.laya-capabilities/1");
 
-    const resource = await rpc("resources/read", { uri: LAYA_CAPABILITIES_URI }, env({ DEMO_API_KEY: "mcp-key" }));
+    const resource = await rpc("resources/read", { uri: LAYA_CAPABILITIES_URI }, env({}));
     expect(resource.error).toBeUndefined();
     expect(JSON.parse(resource.result.contents[0].text).provider).toBe("laya");
 
@@ -761,7 +788,7 @@ describe("Laya MCP surface", () => {
       laya: (body) => jsonResponse({ model: "laya-1.2.3", answers: { primary: choiceAnswer("utility", distribution(Object.keys(body.questions.primary.criteria), "utility", 0.9), 0.9) }, usage: { input_tokens: 9, output_tokens: 2 } }),
       jev: () => jsonResponse({ detail: "must not be called" }, 500),
     });
-    const result = await callTool("jev_decide", { decision: "tool_route", request: "what should I do with the string I pasted earlier?", provider: "laya" }, env({ DEMO_API_KEY: "mcp-key" }));
+    const result = await callTool("jev_decide", { decision: "tool_route", request: "what should I do with the string I pasted earlier?", provider: "laya" }, env({}));
     expect(result.isError).toBe(false);
     expect(result.parsed).toMatchObject({ source: "laya", decision: "utility", requestedProvider: "laya", effectiveRoutingMode: "laya", authority: "advisory" });
     expect(stubs.layaCalls).toHaveLength(1);
@@ -774,7 +801,7 @@ describe("Laya MCP surface", () => {
       laya: () => jsonResponse({ detail: "must not be called" }, 500),
       jev: (body) => jsonResponse({ model: "jev-1.13.0", answers: { primary: choiceAnswer("utility", distribution(Object.keys(body.questions.primary.criteria), "utility", 0.92), 0.92) }, usage: {} }),
     });
-    const result = await callTool("jev_decide", { decision: "tool_route", request: "what should I do with the string I pasted earlier?", provider: "jev" }, env({ DEMO_API_KEY: "mcp-key", TYPESAFE_API_KEY: JEV_KEY }));
+    const result = await callTool("jev_decide", { decision: "tool_route", request: "what should I do with the string I pasted earlier?", provider: "jev" }, env({ TYPESAFE_API_KEY: JEV_KEY }));
     expect(result.isError).toBe(false);
     expect(result.parsed).toMatchObject({ source: "jev", decision: "utility", requestedProvider: "jev", effectiveRoutingMode: "jev" });
     expect(stubs.layaCalls).toHaveLength(0);
@@ -783,7 +810,7 @@ describe("Laya MCP surface", () => {
   });
 
   it("demo_ping and /health expose Laya presence flags and the routing mode — and no credential material", async () => {
-    const ping = await callTool("demo_ping", {}, env({ DEMO_API_KEY: "mcp-key" }));
+    const ping = await callTool("demo_ping", {}, env({}));
     expect(ping.parsed).toMatchObject({ layaDecisionEngine: true, layaConfigured: true, layaApiKeyConfigured: true, layaModel: LAYA_DEFAULT_MODEL, decisionRoutingMode: "auto" });
     expect(ping.text).not.toContain(LAYA_KEY);
 
@@ -816,7 +843,7 @@ describe("Laya MCP surface", () => {
     expect(body.capabilities.typedDecisions).toBe(true);
     expect(body.endpoints.layaCapabilities).toBe("/capabilities/laya");
     const dumped = JSON.stringify(body);
-    expect(dumped).not.toMatch(/api[_-]?key|authorization|bearer/i);
+    expect(dumped).not.toMatch(/"authorization"\s*:\s*"|Bearer\s+[A-Za-z0-9]/i);
     expect(dumped).not.toContain(LAYA_KEY);
     expect(dumped).not.toContain(JEV_KEY);
     expect(dumped).not.toContain("/v1/systemone");
@@ -840,7 +867,7 @@ describe("Laya MCP surface", () => {
 
   it("a broken Laya configuration must not break unrelated DEMO tools", async () => {
     // Laya endpoint blocked by the SSRF guard; everything else must keep working.
-    const broken = env({ LAYA_BASE_URL: "https://127.0.0.1:8443", DEMO_API_KEY: "mcp-key" });
+    const broken = env({ LAYA_BASE_URL: "https://127.0.0.1:8443" });
     const ping = await callTool("demo_ping", {}, broken);
     expect(ping.parsed.ok).toBe(true);
     const formatted = await callTool("json_format", { json: '{"a":1}' }, broken);

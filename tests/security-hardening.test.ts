@@ -1,9 +1,8 @@
 /**
  * Security & privacy hardening regression suite (0.8.4 overhaul).
  *
- * Covers the additive guards added without changing the architecture:
- *  - constant-time-ish private-tool credential comparison,
- *  - per-hop validated redirects + bounded body read for `http_fetch`,
+ * Covers the security guards around public routes, protected OAuth tools,
+ * per-hop validated redirects + bounded body reads for `http_fetch`,
  *  - the MCP request-body cap (413 before any handler runs),
  *  - static security headers on JSON and UI responses,
  *  - the Durable Object retention sweep for idle browser-session state,
@@ -13,7 +12,6 @@
 import { describe, expect, it, vi } from "vitest";
 import worker, { TOOL_COUNT } from "../index.js";
 import platform from "../platform-entry.js";
-import { bearerCredentialMatches } from "../src/core/credential.js";
 import { guardedFetchText, type UrlGuard } from "../src/core/guarded-fetch.js";
 import { oversizedBody, securityHeaders, uiSecurityHeaders } from "../src/core/headers.js";
 import { BrowserError } from "../src/core/errors.js";
@@ -50,35 +48,6 @@ async function callTool(name: string, args: Record<string, unknown>, env: unknow
   const text = (result.content ?? []).map((entry: { text?: string }) => entry.text ?? "").join("\n");
   return { isError: Boolean(result.isError), text, parsed: (() => { try { return JSON.parse(text); } catch { return null; } })() };
 }
-
-/* ------------------------------------------------------- credential check -- */
-
-describe("private-tool credential comparison", () => {
-  const KEY = "demo-secret-key-0123456789abcdef";
-
-  it("accepts the exact bearer credential (case-insensitive scheme)", async () => {
-    expect(await bearerCredentialMatches(`Bearer ${KEY}`, KEY)).toBe(true);
-    expect(await bearerCredentialMatches(`bearer ${KEY}`, KEY)).toBe(true);
-    expect(await bearerCredentialMatches(`  Bearer   ${KEY}  `, KEY)).toBe(true);
-  });
-
-  it("rejects wrong, prefix, extended and non-bearer credentials", async () => {
-    expect(await bearerCredentialMatches(`Bearer wrong-${KEY}`, KEY)).toBe(false);
-    expect(await bearerCredentialMatches(`Bearer ${KEY.slice(0, KEY.length - 2)}`, KEY)).toBe(false);
-    expect(await bearerCredentialMatches(`Bearer ${KEY}-extra`, KEY)).toBe(false);
-    expect(await bearerCredentialMatches(`Basic ${KEY}`, KEY)).toBe(false);
-    expect(await bearerCredentialMatches(KEY, KEY)).toBe(false);
-    expect(await bearerCredentialMatches(null, KEY)).toBe(false);
-    expect(await bearerCredentialMatches(`Bearer ${KEY}`, "")).toBe(false);
-    expect(await bearerCredentialMatches(`Bearer ${KEY}`, null)).toBe(false);
-  });
-
-  it("keeps the encoded credential out of thrown strings and results", async () => {
-    // The helper returns booleans only — there is no value path that could leak.
-    const outcome = await bearerCredentialMatches("Bearer nope", KEY);
-    expect(typeof outcome).toBe("boolean");
-  });
-});
 
 /* ------------------------------------------------------------ guarded fetch -- */
 
@@ -366,14 +335,4 @@ describe("privacy invariants", () => {
     expect(stats.headers.get("set-cookie")).toBeNull();
   });
 
-  it("private tools still demand the configured credential", async () => {
-    const denied = await callTool("roblox_account_status", {}, { DEMO_API_KEY: "k-test-12345" }, { Authorization: "Bearer wrong-key" });
-    expect(denied.isError).toBe(true);
-    expect(denied.parsed?.error).toBe("unauthorized");
-    expect(denied.text).not.toContain("k-test-12345");
-
-    const unconfigured = await callTool("roblox_account_status", {});
-    expect(unconfigured.isError).toBe(true);
-    expect(["not_configured", "unauthorized"]).toContain(unconfigured.parsed?.error);
-  });
 });

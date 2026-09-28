@@ -155,7 +155,6 @@ export interface VideoEnv {
   SCREENSHOTS?: unknown;
   VIDEO_ARTIFACTS?: unknown;
   SCREENSHOT_BASE_URL?: string;
-  DEMO_API_KEY?: string;
   SSRF_DNS_CHECK?: string;
   SSRF_DNS_FAIL_OPEN?: string;
   VIDEO_MAX_DURATION_SECONDS?: string | number;

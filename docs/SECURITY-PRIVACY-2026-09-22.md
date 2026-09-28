@@ -1,5 +1,7 @@
 # Security & privacy overhaul — 2026-09-22 (0.8.4 beta)
 
+> **Historical snapshot.** Statements below describe an earlier `DEMO_API_KEY` and browser-session design. The current authentication model is documented in [MCP OAuth](MCP-OAUTH.md) and [Roblox setup](ROBLOX.md): public tools remain anonymous; protected account tools use short-lived, per-tool DEMO OAuth grants bound to a verified identity.
+
 A focused hardening pass over the 0.8.3 beta codebase. No architecture changed,
 no capability was removed, no tool schema changed, and the public `/mcp`
 transport (ChatGPT → Demo) still requires no bearer. Each item below is a small,

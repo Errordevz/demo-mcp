@@ -1,30 +1,22 @@
 /**
- * Roblox OAuth protocol + route-level tests.
+ * Roblox OAuth protocol tests.
  *
  * Everything here runs against a stubbed `fetch`, so no Roblox traffic (and no
  * real credentials) is involved: the assertions are about *our* behaviour —
- * CSRF/state handling, PKCE, cookie flags, refusal to leak secrets, and honest
- * errors. The round-trip against Roblox itself cannot be automated (a human has to
- * approve the consent screen), so it is a manual walkthrough: docs/ROBLOX.md §6–§7
- * lists every route and the exact expected answer.
+ * PKCE, state-vault semantics, config validation, token exchange, userinfo, and
+ * secret handling. Identity-bound browser routes and per-user isolation are tested
+ * in tests/roblox-routes.test.ts; no live Roblox credentials are used here.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPkcePair, sha256Hex, verifyPkcePair } from "../src/roblox/crypto.js";
 import { buildAuthorizeUrl, normalizePrompt, readCallbackParams } from "../src/roblox/oauth.js";
-import { createHash } from "node:crypto";
 import { normalizeScopes, resolveRobloxConfig } from "../src/roblox/config.js";
-import { AccountVault, MemoryKv, type VaultHandle } from "../src/roblox/store.js";
+import { AccountVault, MemoryKv } from "../src/roblox/store.js";
 import { TokenCipher, randomOpaqueToken } from "../src/roblox/crypto.js";
-import { handleRobloxOAuthRoute, isRobloxOAuthPath } from "../src/roblox/routes.js";
 import { exchangeAuthorizationCode, fetchUserInfo, revokeAuthorization, sanitizeProviderError } from "../src/roblox/oauth.js";
 
-const CTX = { waitUntil: () => undefined, passThroughOnException: () => undefined } as unknown as ExecutionContext;
 const WORKER_ORIGIN = "https://demo-mcp.test.workers.dev";
-
-function freshVaultHandle(): VaultHandle {
-  return { vault: new AccountVault(new MemoryKv(), null, "memory"), mode: "memory", encryption: "none", reason: null };
-}
 
 function baseEnv(overrides: Record<string, unknown> = {}) {
   return {
@@ -51,7 +43,6 @@ interface StubOptions {
 /** Fake Roblox OAuth server. Records every request it receives. */
 function stubRoblox(options: StubOptions = {}) {
   const calls: Array<{ url: string; method: string; body: Record<string, string> | null; authorization: string | null }> = [];
-  void createHash;
   const handler = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
     const body = init?.body ? Object.fromEntries(new URLSearchParams(String(init.body))) : null;
@@ -90,24 +81,6 @@ function stubRoblox(options: StubOptions = {}) {
   });
   vi.stubGlobal("fetch", handler);
   return { calls, handler };
-}
-
-/** Drive /start and return the pieces needed to complete the flow. */
-async function startFlow(env: Record<string, any>, deps: { vault: VaultHandle }, extraQuery = "") {
-  const request = new Request(`${WORKER_ORIGIN}/oauth/roblox/start?format=json${extraQuery}`, { headers: { Accept: "application/json" } });
-  const response = await handleRobloxOAuthRoute(request, env, CTX, deps);
-  expect(response).not.toBeNull();
-  const payload = (await response!.json()) as { authorizeUrl?: string; redirectUri?: string };
-  const setCookies = response!.headers.getSetCookie();
-  return { response, payload, authorizeUrl: payload.authorizeUrl ?? "", stateCookie: setCookies.find((cookie) => cookie.startsWith("roblox_oauth_state=")) ?? "" };
-}
-
-async function completeFlow(env: Record<string, any>, deps: { vault: VaultHandle }, authorizeUrl: string, stateCookie: string, query = "") {
-  const state = new URL(authorizeUrl).searchParams.get("state") ?? "";
-  const request = new Request(`${WORKER_ORIGIN}/oauth/roblox/callback?code=authcode1234567890&state=${state}${query}`, {
-    headers: { Accept: "application/json", Cookie: stateCookie.split(";")[0] },
-  });
-  return (await handleRobloxOAuthRoute(request, env, CTX, deps))!;
 }
 
 describe("PKCE and authorization URL", () => {
@@ -332,17 +305,19 @@ describe("configuration and host validation", () => {
 
   it("clamps policy knobs into safe ranges", () => {
     const config = resolveRobloxConfig(
-      baseEnv({ OAUTH_STATE_TTL_SECONDS: "99999", ROBLOX_RATE_LIMIT_PER_MINUTE: "-5", ROBLOX_OPEN_CLOUD_RATE_PER_MINUTE: "5000", ROBLOX_SESSION_TTL_SECONDS: "abc" }),
+      baseEnv({ OAUTH_STATE_TTL_SECONDS: "99999", ROBLOX_RATE_LIMIT_PER_MINUTE: "-5", ROBLOX_OPEN_CLOUD_RATE_PER_MINUTE: "5000" }),
       `${WORKER_ORIGIN}/oauth/roblox/start`,
     );
     expect(config.stateTtlSeconds).toBe(900);
     expect(config.rateLimitPerMinute).toBe(1);
     expect(config.openCloudRatePerMinute).toBe(20);
-    expect(config.sessionTtlSeconds).toBe(1_209_600);
+    expect(config).not.toHaveProperty("sessionTtlSeconds");
+    expect(config).not.toHaveProperty("accountKey");
   });
 
-  it("validates account slot labels", () => {
-    expect(() => resolveRobloxConfig(baseEnv({ ROBLOX_ACCOUNT_KEY: "../etc/passwd" }), `${WORKER_ORIGIN}/oauth/roblox/start`)).toThrow(/account key/i);
+  it("does not expose a configurable account slot; user identity selects Roblox storage", () => {
+    const config = resolveRobloxConfig(baseEnv({ ROBLOX_ACCOUNT_KEY: "caller-selected-slot" }), `${WORKER_ORIGIN}/oauth/roblox/start`);
+    expect(config).not.toHaveProperty("accountKey");
   });
 });
 
@@ -440,397 +415,5 @@ describe("token exchange", () => {
     const userinfoCall = calls.find((call) => call.url.includes("/oauth/v1/userinfo"));
     expect(userinfoCall?.authorization).toBe("Bearer AT.access-token-value");
     await expect(fetchUserInfo("")).rejects.toMatchObject({ code: "unauthenticated" });
-  });
-});
-
-describe("OAuth routes", () => {
-  let env: Record<string, any>;
-  let deps: { vault: VaultHandle };
-
-  beforeEach(() => {
-    env = baseEnv();
-    deps = { vault: freshVaultHandle() };
-  });
-
-  afterEach(() => vi.unstubAllGlobals());
-
-  it("claims only its four paths, so existing routing is untouched", () => {
-    for (const path of ["/oauth/roblox/start", "/oauth/roblox/callback", "/oauth/roblox/logout", "/oauth/roblox/status"]) expect(isRobloxOAuthPath(path)).toBe(true);
-    for (const path of ["/mcp", "/health", "/oauth/roblox", "/oauth/roblox/unknown"]) expect(isRobloxOAuthPath(path)).toBe(false);
-  });
-
-  it("redirects to Roblox and sets a short-lived HttpOnly state cookie", async () => {
-    const request = new Request(`${WORKER_ORIGIN}/oauth/roblox/start`);
-    const response = (await handleRobloxOAuthRoute(request, env, CTX, deps))!;
-    expect(response.status).toBe(302);
-    const location = new URL(response.headers.get("location")!);
-    expect(location.origin).toBe("https://apis.roblox.com");
-    expect(location.searchParams.get("code_challenge_method")).toBe("S256");
-    const cookie = response.headers.getSetCookie()[0];
-    expect(cookie).toMatch(/^roblox_oauth_state=[A-Za-z0-9_-]{16,};/);
-    expect(cookie).toContain("HttpOnly");
-    expect(cookie).toContain("Secure");
-    expect(cookie).toContain("SameSite=Lax");
-    expect(cookie).toContain("Path=/oauth/roblox");
-    expect(cookie).toContain("Max-Age=600");
-    expect(response.headers.get("Cache-Control")).toBe("no-store");
-    expect(response.headers.get("Referrer-Policy")).toBe("no-referrer");
-  });
-
-  it("completes a full authorization and stores tokens server-side only", async () => {
-    stubRoblox();
-    const started = await startFlow(env, deps);
-    const callback = await completeFlow(env, deps, started.authorizeUrl, started.stateCookie);
-    expect(callback.status).toBe(200);
-    const body = (await callback.json()) as Record<string, any>;
-    expect(body).toMatchObject({ ok: true, connected: true, userId: "1516563360", displayName: "exampleuser", canRefresh: true });
-    expect(body.requestedScopesNotGranted).toEqual([]);
-    // The browser gets a session id and nothing else.
-    const text = JSON.stringify(body);
-    for (const secret of ["AT.access-token-value", "RT.refresh-token-value", "ID.id-token-value", "RBX-CR9-secret-value"]) {
-      expect(text).not.toContain(secret);
-    }
-    const sessionCookie = callback.headers.getSetCookie().find((cookie) => cookie.startsWith("roblox_session="))!;
-    expect(sessionCookie).toContain("HttpOnly");
-    expect(sessionCookie).toContain("SameSite=Lax");
-    expect(sessionCookie).toContain("Path=/oauth/roblox");
-    expect(callback.headers.getSetCookie().some((cookie) => cookie.startsWith("roblox_oauth_state=") && cookie.includes("Max-Age=0"))).toBe(true);
-    // The state cookie is not the account key, and the id is opaque.
-    expect(sessionCookie).not.toContain("1516563360");
-  });
-
-  it("rejects a callback whose state matches nothing pending", async () => {
-    stubRoblox();
-    const request = new Request(`${WORKER_ORIGIN}/oauth/roblox/callback?code=authcode1234567890&state=${randomOpaqueToken(32)}`, {
-      headers: { Accept: "application/json", Cookie: `roblox_oauth_state=${randomOpaqueToken(24)}` },
-    });
-    const response = (await handleRobloxOAuthRoute(request, env, CTX, deps))!;
-    expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({ error: "state_mismatch" });
-  });
-
-  it("rejects a callback with no state, no code, or no state cookie", async () => {
-    stubRoblox();
-    const noState = (await handleRobloxOAuthRoute(new Request(`${WORKER_ORIGIN}/oauth/roblox/callback?code=authcode1234567890`, { headers: { Accept: "application/json" } }), env, CTX, deps))!;
-    expect(await noState.json()).toMatchObject({ error: "state_missing" });
-
-    const started = await startFlow(env, deps);
-    const noCookie = (await handleRobloxOAuthRoute(
-      new Request(`${WORKER_ORIGIN}/oauth/roblox/callback?code=authcode1234567890&state=${new URL(started.authorizeUrl).searchParams.get("state")}`, { headers: { Accept: "application/json" } }),
-      env,
-      CTX,
-      { vault: deps.vault },
-    ))!;
-    expect(noCookie.status).toBe(400);
-    expect(await noCookie.json()).toMatchObject({ error: "state_missing", hint: expect.stringMatching(/Private Browsing/i) });
-  });
-
-  it("reports an expired state instead of exchanging the code", async () => {
-    stubRoblox();
-    const started = await startFlow(env, deps);
-    const state = new URL(started.authorizeUrl).searchParams.get("state")!;
-    const stateHash = await sha256Hex(state);
-    const kv = (deps.vault.vault as any).kv as MemoryKv;
-    const key = AccountVault.pendingKey(stateHash);
-    // Reach through the vault's adapter the same way a clock would: age the record.
-    const stored = (await kv.get<Record<string, unknown>>(key))!;
-    await kv.put(key, { ...stored, expiresAt: Date.now() - 1 });
-    const callback = await completeFlow(env, deps, started.authorizeUrl, started.stateCookie);
-    expect(callback.status).toBe(400);
-    expect(await callback.json()).toMatchObject({ error: "state_expired", hint: expect.stringMatching(/600s/) });
-  });
-
-  it("refuses to redeem the same state twice", async () => {
-    stubRoblox();
-    const started = await startFlow(env, deps);
-    const first = await completeFlow(env, deps, started.authorizeUrl, started.stateCookie);
-    expect(first.status).toBe(200);
-    const second = await completeFlow(env, deps, started.authorizeUrl, started.stateCookie);
-    expect(second.status).toBe(400);
-    expect(await second.json()).toMatchObject({ error: "state_replayed" });
-  });
-
-  it("refuses a valid state presented by a different browser", async () => {
-    stubRoblox();
-    const started = await startFlow(env, deps);
-    const state = new URL(started.authorizeUrl).searchParams.get("state")!;
-    const hijack = (await handleRobloxOAuthRoute(
-      new Request(`${WORKER_ORIGIN}/oauth/roblox/callback?code=authcode1234567890&state=${state}`, {
-        headers: { Accept: "application/json", Cookie: `roblox_oauth_state=${randomOpaqueToken(24)}` },
-      }),
-      env,
-      CTX,
-      deps,
-    ))!;
-    expect(await hijack.json()).toMatchObject({ error: "state_binding_mismatch" });
-  });
-
-  it("passes a Roblox denial through without a token exchange", async () => {
-    const { calls } = stubRoblox();
-    const request = new Request(`${WORKER_ORIGIN}/oauth/roblox/callback?error=access_denied&error_description=User+canceled&state=${randomOpaqueToken(32)}`, { headers: { Accept: "application/json" } });
-    const response = (await handleRobloxOAuthRoute(request, env, CTX, deps))!;
-    expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({ error: "provider_denied", message: expect.stringMatching(/access_denied/) });
-    expect(calls.length).toBe(0);
-  });
-
-  it("escapes Roblox-supplied text in the browser page instead of injecting it", async () => {
-    const request = new Request(`${WORKER_ORIGIN}/oauth/roblox/callback?error=access_denied&error_description=%3Cimg%20src%3Dx%20onerror%3Dalert(1)%3E`, { headers: { Accept: "text/html" } });
-    const response = (await handleRobloxOAuthRoute(request, env, CTX, deps))!;
-    expect(response.headers.get("content-type")).toContain("text/html");
-    expect(response.headers.get("Content-Security-Policy")).toContain("default-src 'none'");
-    const html = await response.text();
-    expect(html).toContain("&lt;img");
-    expect(html).not.toContain("<img");
-    expect(html).not.toContain("<script");
-  });
-
-  it("fails the exchange when Roblox refuses the code, and keeps the session closed", async () => {
-    stubRoblox({ tokenStatus: 400, tokenResponse: { error: "invalid_grant" } });
-    const started = await startFlow(env, deps);
-    const callback = await completeFlow(env, deps, started.authorizeUrl, started.stateCookie);
-    expect(callback.status).toBe(400);
-    const body = (await callback.json()) as Record<string, any>;
-    expect(body.error).toBe("token_exchange_failed");
-    expect(body.message).not.toContain("authcode");
-    const status = (await handleRobloxOAuthRoute(new Request(`${WORKER_ORIGIN}/oauth/roblox/status`, { headers: { Accept: "application/json" } }), env, CTX, deps))!;
-    expect((await status.json()) as Record<string, any>).toMatchObject({ connected: false });
-  });
-
-  it("reports a missing configuration as 503 with the dashboard fix", async () => {
-    const response = (await handleRobloxOAuthRoute(new Request(`${WORKER_ORIGIN}/oauth/roblox/start`, { headers: { Accept: "application/json" } }), baseEnv({ ROBLOX_CLIENT_ID: "", ROBLOX_CLIENT_SECRET: "" }), CTX, deps))!;
-    expect(response.status).toBe(503);
-    expect(await response.json()).toMatchObject({ error: "not_configured", hint: expect.stringMatching(/Cloudflare dashboard/) });
-  });
-
-  it("rate limits each OAuth route per client", async () => {
-    const limited = baseEnv({ ROBLOX_RATE_LIMIT_PER_MINUTE: "3" });
-    const local = { vault: freshVaultHandle() };
-    const statuses: number[] = [];
-    for (let i = 0; i < 5; i++) {
-      const response = (await handleRobloxOAuthRoute(new Request(`${WORKER_ORIGIN}/oauth/roblox/start?format=json`, { headers: { Accept: "application/json" } }), limited, CTX, local))!;
-      statuses.push(response.status);
-    }
-    expect(statuses).toEqual([200, 200, 200, 429, 429]);
-    const last = (await handleRobloxOAuthRoute(new Request(`${WORKER_ORIGIN}/oauth/roblox/start?format=json`, { headers: { Accept: "application/json" } }), limited, CTX, local))!;
-    expect(Number(last.headers.get("Retry-After"))).toBeGreaterThanOrEqual(1);
-  });
-
-  it("returns a status payload with no token-shaped fields when disconnected", async () => {
-    const response = (await handleRobloxOAuthRoute(new Request(`${WORKER_ORIGIN}/oauth/roblox/status`, { headers: { Accept: "application/json" } }), env, CTX, deps))!;
-    expect(response.status).toBe(200);
-    const body = (await response.json()) as Record<string, any>;
-    expect(body.connected).toBe(false);
-    expect(body.configuration).toMatchObject({ enabled: true, clientIdConfigured: true, clientSecretConfigured: true, pkce: "S256", tokenEncryption: "none" });
-    expect(body.configuration.redirectUri).toBe(`${WORKER_ORIGIN}/oauth/roblox/callback`);
-    expect(body.security).toMatchObject({ passwordOrCookieRequested: false, tokensExposedToClient: false });
-    expect(JSON.stringify(body)).not.toMatch(/RBX-CR9|access_token|refresh_token/i);
-  });
-
-  it("does not reveal another browser's session through status", async () => {
-    stubRoblox();
-    const started = await startFlow(env, deps);
-    const callback = await completeFlow(env, deps, started.authorizeUrl, started.stateCookie);
-    const sessionCookie = callback.headers.getSetCookie().find((cookie) => cookie.startsWith("roblox_session="))!.split(";")[0];
-    const withCookie = (await handleRobloxOAuthRoute(new Request(`${WORKER_ORIGIN}/oauth/roblox/status`, { headers: { Accept: "application/json", Cookie: sessionCookie } }), env, CTX, deps))!;
-    expect(((await withCookie.json()) as Record<string, any>).connected).toBe(true);
-    const withoutCookie = (await handleRobloxOAuthRoute(new Request(`${WORKER_ORIGIN}/oauth/roblox/status`, { headers: { Accept: "application/json" } }), env, CTX, deps))!;
-    const body = (await withoutCookie.json()) as Record<string, any>;
-    expect(body.connected).toBe(false);
-    expect(body.account).toBeUndefined();
-  });
-
-  it("logs out with a same-site POST only, revoking and clearing the cookie", async () => {
-    stubRoblox();
-    const started = await startFlow(env, deps);
-    const callback = await completeFlow(env, deps, started.authorizeUrl, started.stateCookie);
-    const sessionCookie = callback.headers.getSetCookie().find((cookie) => cookie.startsWith("roblox_session="))!.split(";")[0];
-
-    const crossSite = (await handleRobloxOAuthRoute(
-      new Request(`${WORKER_ORIGIN}/oauth/roblox/logout`, { method: "POST", headers: { Cookie: sessionCookie, Accept: "application/json", "Sec-Fetch-Site": "cross-site" } }),
-      env,
-      CTX,
-      deps,
-    ))!;
-    expect(crossSite.status).toBe(403);
-    expect(await crossSite.json()).toMatchObject({ error: "origin_mismatch" });
-
-    const wrongMethod = (await handleRobloxOAuthRoute(new Request(`${WORKER_ORIGIN}/oauth/roblox/logout`, { headers: { Cookie: sessionCookie, Accept: "application/json" } }), env, CTX, deps))!;
-    expect(wrongMethod.status).toBe(400);
-
-    const loggedOut = (await handleRobloxOAuthRoute(
-      new Request(`${WORKER_ORIGIN}/oauth/roblox/logout`, { method: "POST", headers: { Cookie: sessionCookie, Accept: "application/json", Origin: WORKER_ORIGIN, "Sec-Fetch-Site": "same-origin" } }),
-      env,
-      CTX,
-      deps,
-    ))!;
-    expect(loggedOut.status).toBe(200);
-    const body = (await loggedOut.json()) as Record<string, any>;
-    expect(body).toMatchObject({ disconnected: true, revokedAtRoblox: true });
-    expect(loggedOut.headers.getSetCookie().every((cookie) => cookie.includes("Max-Age=0"))).toBe(true);
-
-    const after = (await handleRobloxOAuthRoute(new Request(`${WORKER_ORIGIN}/oauth/roblox/status`, { headers: { Accept: "application/json", Cookie: sessionCookie } }), env, CTX, deps))!;
-    expect(((await after.json()) as Record<string, any>).connected).toBe(false);
-  });
-
-  it("renders a readable HTML page for browsers and JSON for API clients", async () => {
-    stubRoblox();
-    const started = await startFlow(env, deps);
-    const state = new URL(started.authorizeUrl).searchParams.get("state")!;
-    const html = (await handleRobloxOAuthRoute(new Request(`${WORKER_ORIGIN}/oauth/roblox/callback?code=authcode1234567890&state=${state}`, { headers: { Accept: "text/html", Cookie: started.stateCookie.split(";")[0] } }), env, CTX, {
-      vault: deps.vault,
-    }))!;
-    expect(html.headers.get("content-type")).toContain("text/html");
-    const page = await html.text();
-    expect(page).toContain("Roblox connected");
-    expect(page).not.toContain("AT.access-token-value");
-    expect(page).not.toContain("authorization code");
-  });
-});
-
-/* ------------------------------------------------------------------ acceptance */
-
-/**
- * The user-facing contract for "Connect Roblox": what the button produces, what the
- * browser sees, and what it must never see. Written as the checklist a reviewer would
- * run by hand in Safari, so a regression in the *visible* flow (not just the protocol)
- * fails the suite.
- */
-describe("Connect Roblox — user-visible acceptance", () => {
-  const SECRET = "RBX-CR9-secret-value"; // baseEnv()'s sentinel client secret
-  const TOKEN_SENTINELS = ["AT.access-token-value", "RT.refresh-token-value", "ID.id-token-value"];
-
-  function harness() {
-    const calls = stubRoblox().calls;
-    return { env: baseEnv(), deps: { vault: freshVaultHandle() }, calls };
-  }
-
-  it("sends the browser to Roblox's official authorize page with a complete, secret-free request", async () => {
-    const { env, deps } = harness();
-    const response = (await handleRobloxOAuthRoute(new Request(`${WORKER_ORIGIN}/oauth/roblox/start`), env, CTX, deps))!;
-    expect(response.status).toBe(302);
-    const url = new URL(response.headers.get("location")!);
-    // The consent page must be Roblox's own, never a DEMO stand-in.
-    expect(`${url.origin}${url.pathname}`).toBe("https://apis.roblox.com/oauth/v1/authorize");
-    expect(url.searchParams.get("client_id")).toBe("840974200211308101");
-    expect(url.searchParams.get("response_type")).toBe("code");
-    expect(url.searchParams.get("redirect_uri")).toBe(`${WORKER_ORIGIN}/oauth/roblox/callback`);
-    expect(url.searchParams.get("scope")).toBe("openid profile");
-    expect(url.searchParams.get("state")).toMatch(/^[A-Za-z0-9_-]{16,}$/);
-    expect(url.searchParams.get("code_challenge_method")).toBe("S256");
-    expect(url.searchParams.get("code_challenge")).toMatch(/^[A-Za-z0-9_-]{43}$/);
-    // No secret, no verifier, nothing reusable in the URL or in a referrer.
-    expect(url.href).not.toContain(SECRET);
-    for (const param of ["client_secret", "code_verifier", "refresh_token", "access_token"]) {
-      expect(url.searchParams.has(param), param).toBe(false);
-    }
-    // The app announces itself as DEMO MCP; the wording of the page is Roblox's to decide.
-    expect(env.ROBLOX_CLIENT_ID).toBeTruthy();
-    expect(response.headers.get("referrer-policy")).toBe("no-referrer");
-  });
-
-  it("preserves the verifier for the callback, exchanges the code server-side, and shows @username with the sub", async () => {
-    const { env, deps, calls } = harness();
-    const started = await startFlow(env, deps, "");
-    const authorize = new URL(started.authorizeUrl);
-    const challenge = authorize.searchParams.get("code_challenge")!;
-    const state = authorize.searchParams.get("state")!;
-
-    const html = (await handleRobloxOAuthRoute(
-      new Request(`${WORKER_ORIGIN}/oauth/roblox/callback?code=authcode1234567890&state=${state}`, {
-        headers: { Accept: "text/html", Cookie: started.stateCookie.split(";")[0] },
-      }),
-      env,
-      CTX,
-      deps,
-    ))!;
-    expect(html.status).toBe(200);
-    const page = await html.text();
-    // Requirement 15: "Roblox connected" + "@Username".
-    expect(page).toContain("Roblox connected");
-    expect(page).toContain("@exampleuser");
-    // Requirement: the stable identifier is Roblox's `sub`, echoed for the user to check.
-    expect(page).toContain("1516563360");
-    expect(page).toMatch(/sub/);
-
-    // The exchange happened server-side against the pinned Roblox origin only.
-    const token = calls.find((call) => new URL(call.url).pathname === "/oauth/v1/token")!;
-    expect(token.method).toBe("POST");
-    expect(new URL(token.url).origin).toBe("https://apis.roblox.com");
-    expect(token.body).toMatchObject({ grant_type: "authorization_code", code: "authcode1234567890", client_id: "840974200211308101" });
-    expect(token.body!.redirect_uri).toBe(`${WORKER_ORIGIN}/oauth/roblox/callback`);
-    expect(token.body!.client_secret).toBe(SECRET); // sent to Roblox, never to the browser
-    // The verifier kept for the callback is exactly the one the challenge committed to.
-    expect(await verifyPkcePair(token.body!.code_verifier, challenge)).toBe(true);
-
-    for (const secret of [...TOKEN_SENTINELS, SECRET]) expect(page).not.toContain(secret);
-    const cookies = html.headers.getSetCookie();
-    const sessionCookie = cookies.find((cookie) => cookie.startsWith("roblox_session="))!;
-    expect(sessionCookie).toContain("HttpOnly");
-    expect(sessionCookie).toContain("Secure");
-    for (const secret of TOKEN_SENTINELS) expect(cookies.join("\n")).not.toContain(secret);
-    // The state cookie is consumed: single-use, so a replay of the callback fails.
-    expect(cookies.some((cookie) => cookie.startsWith("roblox_oauth_state=") && cookie.includes("Max-Age=0"))).toBe(true);
-
-    // Identity for that session comes from the cookie, not from anything the client asserts.
-    const status = (await handleRobloxOAuthRoute(
-      new Request(`${WORKER_ORIGIN}/oauth/roblox/status`, { headers: { Accept: "application/json", Cookie: sessionCookie.split(";")[0] } }),
-      env,
-      CTX,
-      deps,
-    ))!;
-    const body = (await status.json()) as Record<string, any>;
-    expect(body.connected).toBe(true);
-    expect(body.account).toMatchObject({ userId: "1516563360", username: "exampleuser", displayName: "exampleuser" });
-    expect(body.account.grantedScopes).toEqual(["openid", "profile"]);
-    expect(body.security).toMatchObject({ passwordOrCookieRequested: false, tokensExposedToClient: false });
-    expect(JSON.stringify(body)).not.toContain(TOKEN_SENTINELS[0]);
-    expect(Object.keys(body.account)).not.toContain("token");
-  });
-
-  it("rejects a forged state before any token exchange, and treats denial as not connected", async () => {
-    const { env, deps, calls } = harness();
-
-    const forged = (await handleRobloxOAuthRoute(
-      new Request(`${WORKER_ORIGIN}/oauth/roblox/callback?code=authcode1234567890&state=${randomOpaqueToken(32)}`, { headers: { Accept: "application/json" } }),
-      env,
-      CTX,
-      deps,
-    ))!;
-    expect(forged.ok).toBe(false);
-    expect(((await forged.json()) as Record<string, any>).error).toMatch(/state/);
-    expect(calls.filter((call) => new URL(call.url).pathname === "/oauth/v1/token")).toEqual([]);
-
-    const denied = (await handleRobloxOAuthRoute(
-      new Request(`${WORKER_ORIGIN}/oauth/roblox/callback?error=access_denied&error_description=You+declined&state=${randomOpaqueToken(32)}`, { headers: { Accept: "text/html" } }),
-      env,
-      CTX,
-      deps,
-    ))!;
-    expect(denied.status).toBe(400);
-    const page = await denied.text();
-    expect(page).toContain("did not complete");
-    expect(page).not.toContain("Roblox connected");
-    // A denial must not leave a session behind.
-    expect((denied.headers.getSetCookie() ?? []).some((cookie) => cookie.startsWith("roblox_session="))).toBe(false);
-    const anonymous = (await handleRobloxOAuthRoute(new Request(`${WORKER_ORIGIN}/oauth/roblox/status`, { headers: { Accept: "application/json" } }), env, CTX, deps))!;
-    expect(((await anonymous.json()) as Record<string, any>).connected).toBe(false);
-  });
-
-  it("refuses a callback whose redirect URI no longer matches the registered one", async () => {
-    const { env, deps } = harness();
-    const started = await startFlow(env, deps, "");
-    // A different host at callback time (e.g. a preview deployment) must not be honoured.
-    const state = new URL(started.authorizeUrl).searchParams.get("state")!;
-    const moved = (await handleRobloxOAuthRoute(
-      new Request(`https://other-host.test.workers.dev/oauth/roblox/callback?code=authcode1234567890&state=${state}`, {
-        headers: { Accept: "application/json", Cookie: started.stateCookie.split(";")[0] },
-      }),
-      env,
-      CTX,
-      deps,
-    ))!;
-    expect(moved.status).toBeGreaterThanOrEqual(400);
-    expect(((await moved.json()) as Record<string, any>).error).toMatch(/origin_mismatch|host/);
   });
 });

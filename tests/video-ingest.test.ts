@@ -580,15 +580,14 @@ describe("MCP surface: video_ingest and video_inspect_pipeline", () => {
     expect(bad.error?.code ?? bad.result?.isError).toBeTruthy();
   });
 
-  it("runs video_inspect_pipeline without a bearer even when DEMO_API_KEY is configured", async () => {
+  it("runs the public video diagnostic without any MCP bearer", async () => {
     const bucket = createBucket();
     stubFetch(mp4Bytes(10));
     const provider = new FakeProvider();
     provider.available = false;
     setProviderFactory(() => provider);
 
-    // No DEMO_API_KEY configured: the diagnostic is open and returns the
-    // stage report (no key required).
+    // The public diagnostic returns its stage report without any DEMO bearer.
     const open = await rpc("tools/call", { name: "video_inspect_pipeline", arguments: { url: PAGE_URL } }, { SCREENSHOTS: bucket, SSRF_DNS_CHECK: "false" });
     const openText = (open.result?.content ?? []).map((entry: { text?: string }) => entry.text ?? "").join("\n");
     expect(open.result?.isError).toBeFalsy();
@@ -605,7 +604,7 @@ describe("MCP surface: video_ingest and video_inspect_pipeline", () => {
         headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "video_inspect_pipeline", arguments: { url: PAGE_URL } } }),
       }),
-      { SCREENSHOTS: bucket, DEMO_API_KEY: "demo-endpoint-key", SSRF_DNS_CHECK: "false" } as never,
+      { SCREENSHOTS: bucket, SSRF_DNS_CHECK: "false" } as never,
       CTX,
     );
     expect(accepted.status).toBe(200);

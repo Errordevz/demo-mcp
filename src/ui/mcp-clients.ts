@@ -25,7 +25,7 @@ export const CONNECT_RESEARCHED_ON = "2026-09-25";
 
 export const CONNECT_PICKER = {
   title: "Connect DEMO",
-  subtitle: "Choose where you want to connect DEMO.",
+  subtitle: "Choose a client. Public tools stay login-free; protected tools use OAuth when supported.",
 } as const;
 
 export type ConnectMethod = "direct-prefill" | "direct-install" | "official-screen" | "manual";
@@ -48,7 +48,7 @@ export interface McpClientIntegration {
   documentationUrl: string;
   platforms: string[];
   transport: "streamable-http";
-  authentication: "none";
+  authentication: "none" | "mixed";
   verification: ConnectVerification;
   method: ConnectMethod;
   /**
@@ -93,14 +93,14 @@ function pretty(value: unknown): string {
  * `modal` must be `add-custom-connector`. `connectorUrl` is the percent-encoded
  * MCP server URL. The link only prefills the dialog; the user confirms in Claude.
  */
-export function claudeConnectorInstallUrl(surface: "personal" | "organization" = "personal"): string {
+export function claudeConnectorInstallUrl(surface: "personal" | "organization" = "personal", serverUrl = MCP_SERVER_URL): string {
   const path = surface === "organization"
     ? "https://claude.ai/admin-settings/connectors"
     : "https://claude.ai/customize/connectors";
   const params = new URLSearchParams();
   params.set("modal", "add-custom-connector");
   params.set("connectorName", MCP_DISPLAY_NAME);
-  params.set("connectorUrl", MCP_SERVER_URL);
+  params.set("connectorUrl", serverUrl);
   return `${path}?${params.toString()}`;
 }
 
@@ -143,11 +143,11 @@ export function vscodeInstallUrl(insiders = false, serverUrl = MCP_SERVER_URL, n
  * Run in a terminal, not inside a Claude Code session. There is no documented
  * MCP install deeplink. `claude-cli://open` only prefills a prompt and is not used.
  */
-export function claudeCodeAddCommand(scope: "user" | "local" = "user"): string {
+export function claudeCodeAddCommand(scope: "user" | "local" = "user", serverUrl = MCP_SERVER_URL): string {
   if (scope === "user") {
-    return `claude mcp add --transport http ${MCP_SERVER_NAME} --scope user ${MCP_SERVER_URL}`;
+    return `claude mcp add --transport http ${MCP_SERVER_NAME} --scope user ${serverUrl}`;
   }
-  return `claude mcp add --transport http ${MCP_SERVER_NAME} ${MCP_SERVER_URL}`;
+  return `claude mcp add --transport http ${MCP_SERVER_NAME} ${serverUrl}`;
 }
 
 const CURSOR_CONFIG = pretty({
@@ -178,11 +178,12 @@ export const MCP_CLIENTS: readonly McpClientIntegration[] = [
     id: "chatgpt",
     name: "ChatGPT",
     icon: "bubble",
-    summary: "Plugins page. You paste the URL.",
+    summary: "Plugins page · Mixed Authentication (live check pending).",
     badge: "Official page",
     documentationUrl: "https://developers.openai.com/plugins/deploy/connect-chatgpt",
     platforms: ["ChatGPT web"],
     ...sharedTransport,
+    authentication: "mixed",
     verification: "verified",
     method: "official-screen",
     connectionUrl: "https://chatgpt.com/plugins",
@@ -192,25 +193,29 @@ export const MCP_CLIENTS: readonly McpClientIntegration[] = [
     actionLabel: "Continue to ChatGPT",
     confirmTitle: "Connect DEMO to ChatGPT?",
     confirmBody: "You're about to connect DEMO as a remote MCP server in ChatGPT.",
-    callout: "Opens the official Plugins page. It does not connect automatically, and it does not prefill this server.",
+    callout: "Opens the official ChatGPT setup page. It does not connect automatically or prefill this server. Public tools remain anonymous; protected tools are designed for per-tool OAuth when ChatGPT honors the metadata.",
     steps: [
       "Turn on Developer mode. Developer docs: Settings, then Security and login. On Business, Enterprise, and Edu, an admin may need Workspace settings, then Permissions and Roles, or Settings, then Apps, then Advanced settings. Availability depends on your plan.",
       "Continue to ChatGPT Plugins. OpenAI does not document a link that fills in this server or opens a confirmation dialog from a website.",
-      "Select the plus button. Name it DEMO. Paste the endpoint as the MCP server URL, including /mcp. If asked, choose no authentication.",
-      "Create the connection in ChatGPT. It discovers tools and applies its own approval controls. This page is not told whether you approved it.",
+      "Select the plus button. Name it DEMO and paste the endpoint as the MCP server URL, including /mcp. Choose Mixed Authentication for the expected noauth public tools plus OAuth-protected tools setup, if that option is offered.",
+      "This mixed flow has not been live-tested yet. If ChatGPT does not offer Mixed Authentication or does not start DEMO OAuth on a protected call, use only public tools until compatibility is verified.",
+      "With mixed auth working, public tools need no sign-in. A protected tool should start DEMO OAuth; sign in through Cloudflare Access and review the requested scopes.",
+      "Roblox is a separate approval: call roblox_account_link_start, then open its linkUrl, paste the one-time linkCode, and approve only on Roblox's official consent page. This does not happen during DEMO OAuth.",
     ],
     limitations: [
       "No verified prefilled install URL, and no verified website-to-app confirmation dialog.",
+      "No live ChatGPT connection was exercised for this code change; after deployment, verify Mixed Authentication and the first protected-tool challenge in the actual ChatGPT setup.",
       "The documented flow is ChatGPT on the web. A mobile-app install link was not found.",
-      "This does not configure Codex or the ChatGPT desktop app. Those use a separate MCP setup.",
+      "This does not configure Codex or the ChatGPT desktop app. Those use separate MCP setup.",
     ],
-    fallback: "Paste the endpoint on the ChatGPT Plugins page after Developer mode is on.",
+    fallback: "Paste the endpoint on the ChatGPT Plugins page after Developer mode is on and select Mixed Authentication.",
     manualCommand: null,
     manualConfig: null,
     manualConfigTitle: null,
     alternates: [],
     sources: [
       "https://developers.openai.com/plugins/deploy/connect-chatgpt",
+      "https://developers.openai.com/plugins/build/auth",
       "https://developers.openai.com/plugins/quickstart",
       "https://chatgpt.com/plugins",
       "https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt",
@@ -234,16 +239,17 @@ export const MCP_CLIENTS: readonly McpClientIntegration[] = [
     actionLabel: "Continue to Claude",
     confirmTitle: "Connect DEMO to Claude?",
     confirmBody: "You're about to connect DEMO as a remote MCP server in Claude.",
-    callout: "Opens Claude’s own Add custom connector dialog with this server filled in. You still review and confirm there.",
+    callout: "Opens Claude’s own Add custom connector dialog. Public tools are login-free; protected tools need per-tool OAuth, which is only configured for ChatGPT here.",
     steps: [
       "Continue to Claude. The official link opens the dialog with the name DEMO and this URL filled in, and notes that the values came from an external link.",
       "Sign in if Claude asks. Review the name and URL before you continue.",
-      "If Claude asks for authentication, choose no sign-in. DEMO does not require it. Leave transport as detected — this URL is Streamable HTTP, not SSE.",
+      "For public tools, choose no sign-in if asked and leave transport as detected (Streamable HTTP, not SSE). This connection does not configure protected-tool OAuth.",
       "Confirm in Claude only if you trust this server. The link does not add the connector or grant any permission by itself.",
     ],
     limitations: [
       "Free plans can add one custom connector. Team and Enterprise members usually need an Owner.",
       "After you confirm, Anthropic reaches the server from its cloud for claude.ai, Claude Desktop, Cowork, and the mobile apps. This page cannot see that confirmation.",
+      "This connector setup is no-auth for public tools; protected Roblox and jev_decide calls need per-tool OAuth, and Claude compatibility is not verified here.",
       "No separate native-app install scheme was documented. The web dialog is the official path.",
     ],
     fallback: "Open Customize, then Connectors, and paste the endpoint into Add custom connector.",
@@ -281,13 +287,14 @@ export const MCP_CLIENTS: readonly McpClientIntegration[] = [
     actionLabel: "Continue to Cursor",
     confirmTitle: "Connect DEMO to Cursor?",
     confirmBody: "You're about to connect DEMO as a remote MCP server in Cursor.",
-    callout: "Opens Cursor’s install prompt on the desktop app. This page cannot see whether you approved it.",
+    callout: "Opens Cursor’s install prompt. Public tools need no login; this no-auth setup does not enable protected per-tool OAuth.",
     steps: [
       "Continue to Cursor. The official install link asks Cursor to prompt you to install this server. Your browser may ask permission to open the app.",
       "Approve the prompt in Cursor only if you trust this server. DEMO does not install the server itself.",
       "If Cursor does not open, copy the configuration below into ~/.cursor/mcp.json for every project, or .cursor/mcp.json for one project.",
     ],
     limitations: [
+      "This no-auth setup exposes public tools; protected Roblox and jev_decide calls require per-tool OAuth, which is not verified for Cursor here.",
       "Desktop only. There is no verified iPhone or mobile install link.",
       "The link needs Cursor installed, with the cursor:// handler registered.",
     ],
@@ -319,13 +326,14 @@ export const MCP_CLIENTS: readonly McpClientIntegration[] = [
     actionLabel: "Continue to Visual Studio Code",
     confirmTitle: "Connect DEMO to Visual Studio Code?",
     confirmBody: "You're about to connect DEMO as a remote MCP server in Visual Studio Code.",
-    callout: "Opens VS Code’s install flow with this HTTP server. Confirm it there. This page cannot see the result.",
+    callout: "Opens VS Code’s install flow. Public tools need no login; this no-auth setup does not enable protected per-tool OAuth.",
     steps: [
       "Continue to Visual Studio Code. The official vscode:mcp/install link carries this server. Your browser may ask permission to open VS Code.",
       "Confirm the install in VS Code, and trust the server only if you intend to use it. VS Code asks before a newly added server starts.",
       "If VS Code does not open, copy the configuration below into .vscode/mcp.json, or run MCP: Open User Configuration and paste the server entry.",
     ],
     limitations: [
+      "This no-auth setup exposes public tools; protected Roblox and jev_decide calls require per-tool OAuth, which is not verified for VS Code here.",
       "Desktop only. There is no verified mobile install link.",
       "VS Code Insiders uses the separate documented vscode-insiders: scheme.",
     ],
@@ -364,7 +372,7 @@ export const MCP_CLIENTS: readonly McpClientIntegration[] = [
     actionLabel: "Copy install command",
     confirmTitle: "Connect DEMO to Claude Code?",
     confirmBody: "You're about to connect DEMO as a remote MCP server in Claude Code.",
-    callout: "Manual setup. Claude Code documents a terminal command, not an install link.",
+    callout: "Manual no-auth setup for public tools. Protected per-tool OAuth is not verified for Claude Code here.",
     steps: [
       "Copy the command and run it in a terminal, not inside a Claude Code session. It registers a user-scoped HTTP server named demo.",
       "Start Claude Code and run /mcp to see the server. Approve tool calls when Claude Code asks.",
@@ -403,10 +411,10 @@ export const MCP_CLIENTS: readonly McpClientIntegration[] = [
     actionLabel: "Copy endpoint",
     confirmTitle: "Connect DEMO to your MCP-compatible client.",
     confirmBody: "Paste this endpoint into a client that accepts a remote MCP server.",
-    callout: "Manual setup. There is no universal one-click install.",
+    callout: "Manual setup. Public tools need no login; protected tools require an OAuth-capable MCP client and per-tool support.",
     steps: [
       "Paste the endpoint into your client’s remote MCP server settings.",
-      "Use Streamable HTTP. Do not add an authentication header. DEMO has no account.",
+      "Use Streamable HTTP. Public tools require no authentication header. Protected tools require per-tool OAuth support; use ChatGPT Mixed Authentication for the configured protected-tool flow.",
       "Follow that client’s own documentation. This page cannot confirm the connection.",
     ],
     limitations: [
@@ -423,8 +431,46 @@ export const MCP_CLIENTS: readonly McpClientIntegration[] = [
   },
 ];
 
-export function connectClientPayload(): McpClientView[] {
-  return MCP_CLIENTS.map(({ sources: _sources, ...client }) => client);
+function manualConfigFor(clientId: McpClientIntegration["id"], serverUrl: string): string | null {
+  if (clientId === "cursor") return pretty({ mcpServers: { [MCP_SERVER_NAME]: { url: serverUrl } } });
+  if (clientId === "vscode") return pretty({ servers: { [MCP_SERVER_NAME]: { type: "http", url: serverUrl } } });
+  if (clientId === "claude-code") return pretty({ mcpServers: { [MCP_SERVER_NAME]: { type: "http", url: serverUrl } } });
+  return null;
+}
+
+function clientForServer(client: McpClientIntegration, serverUrl: string): McpClientIntegration {
+  switch (client.id) {
+    case "claude":
+      return {
+        ...client,
+        connectionUrl: claudeConnectorInstallUrl("personal", serverUrl),
+        alternates: [{ label: "Organization owner dialog", url: claudeConnectorInstallUrl("organization", serverUrl), kind: "https" }],
+      };
+    case "cursor":
+      return { ...client, connectionUrl: cursorInstallUrl(serverUrl), manualConfig: manualConfigFor(client.id, serverUrl) };
+    case "vscode":
+      return {
+        ...client,
+        connectionUrl: vscodeInstallUrl(false, serverUrl),
+        alternates: [{ label: "VS Code Insiders", url: vscodeInstallUrl(true, serverUrl), kind: "app" }],
+        manualConfig: manualConfigFor(client.id, serverUrl),
+      };
+    case "claude-code":
+      return {
+        ...client,
+        manualCommand: `claude mcp add --transport http ${MCP_SERVER_NAME} --scope user ${serverUrl}`,
+        manualConfig: manualConfigFor(client.id, serverUrl),
+      };
+    default:
+      return client;
+  }
+}
+
+export function connectClientPayload(serverUrl = MCP_SERVER_URL): McpClientView[] {
+  return MCP_CLIENTS.map((source) => {
+    const { sources: _sources, ...client } = clientForServer(source, serverUrl);
+    return client;
+  });
 }
 
 export function mcpClientById(id: string): McpClientIntegration | undefined {

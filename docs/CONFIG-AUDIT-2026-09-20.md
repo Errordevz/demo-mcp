@@ -1,5 +1,7 @@
 # Wrangler configuration audit — 2026-09-20
 
+> **Historical snapshot.** This records an earlier deployment configuration. Use the current [MCP OAuth](MCP-OAUTH.md), [Roblox setup](ROBLOX.md), and [`wrangler.jsonc`](../wrangler.jsonc) as authoritative; obsolete session/account-slot settings are not part of the current design.
+
 Scope: synchronize `wrangler.jsonc` with the intended DEMO MCP runtime
 configuration (21 `vars` values), without duplicating keys, converting
 secrets into plaintext vars, or disturbing bindings/migrations.

@@ -151,7 +151,7 @@ describe("inspector UI — served document contract", () => {
 
   it("keeps the pinned Roblox affordances without any credential UI", () => {
     expect(html).toContain("Connect Roblox account");
-    expect(html).toMatch(/location\.href='\/oauth\/roblox\/start'/);
+    expect(html).toMatch(/location\.href='\/oauth\/roblox\/link'/);
     expect(html).toContain("/oauth/roblox/status");
     expect(html).toContain("/oauth/roblox/logout");
     expect(html).toContain("Disconnect");
@@ -166,10 +166,12 @@ describe("inspector UI — served document contract", () => {
     expect(html).toContain(`https://${MCP_ENDPOINT}`);
     expect(html).toContain("Connect MCP");
     expect(html).toContain("Connect DEMO");
-    expect(html).toContain("Choose where you want to connect DEMO.");
-    expect(html).toContain("No DEMO account required.");
+    expect(html).toContain("Public tools stay login-free; protected tools use OAuth when supported.");
+    expect(html).toContain("Public tools need no login.");
+    expect(html).toContain("Mixed Authentication · per-tool OAuth");
+    expect(html).toContain("No live ChatGPT connection was exercised");
     expect(html).toContain("Copied!");
-    expect(html).toContain("This dialog never confirms a connection.");
+    expect(html).toContain("It does not connect automatically or prefill this server.");
     // No invented auth surface, and no invented client URL schemes.
     expect(html.toLowerCase()).not.toContain("create account");
     expect(html.toLowerCase()).not.toContain("sign up");
@@ -183,7 +185,7 @@ describe("inspector UI — served document contract", () => {
     for (const section of SECTIONS) {
       expect(html, `nav section ${section.id}`).toContain(`"${section.id}"`);
     }
-    expect(html).toContain("No account required");
+    expect(html).toContain("Public tools · no login");
   });
 
   it("serves safe headers on the UI response", async () => {
@@ -197,7 +199,8 @@ describe("inspector UI — served document contract", () => {
   });
 
   it("contains no secret values or env-var assignments", () => {
-    expect(html).not.toMatch(/(ROBLOX_CLIENT_SECRET|ROBLOX_TOKEN_KEY|TYPESAFE_API_KEY|LAYA_API_KEY|YOUTUBE_API_KEY|DEMO_API_KEY)\s*[:=]\s*["'][^"']{8,}/);
+    expect(html).not.toMatch(/(ROBLOX_CLIENT_SECRET|ROBLOX_TOKEN_KEY|TYPESAFE_API_KEY|LAYA_API_KEY|YOUTUBE_API_KEY)\s*[:=]\s*["'][^"']{8,}/);
+    expect(html).not.toContain("DEMO_API_KEY");
   });
 });
 
@@ -210,7 +213,7 @@ describe("inspector UI — rendered against stub routes", () => {
     // Shell + live overview data.
     expect(doc.querySelector(".nav a[aria-current=\"page\"]")?.textContent).toContain("Overview");
     expect(doc.querySelector(".hero h1")?.textContent).toContain("Execution infrastructure for AI agents");
-    expect(doc.getElementById("view")?.textContent).toContain("No account required");
+    expect(doc.getElementById("view")?.textContent).toContain("Public tools · no login");
     expect(doc.getElementById("view")?.textContent).toContain("9.9.9-test");
     expect(doc.querySelector(".foot")?.textContent).toContain(`${TOOL_CATALOG.length} tools`);
 
@@ -220,7 +223,7 @@ describe("inspector UI — rendered against stub routes", () => {
     const overlay = doc.getElementById("connect-overlay") as (HTMLElement & { hidden: boolean }) | null;
     expect(overlay && !overlay.hidden).toBe(true);
     expect(doc.getElementById("connect-title")?.textContent).toBe("Connect DEMO");
-    expect(doc.getElementById("connect-sub")?.textContent).toBe("Choose where you want to connect DEMO.");
+    expect(doc.getElementById("connect-sub")?.textContent).toBe("Choose a client. Public tools stay login-free; protected tools use OAuth when supported.");
     expect(doc.querySelectorAll(".prov").length).toBe(6);
     const providers = [...doc.querySelectorAll(".prov")] as HTMLElement[];
     expect(doc.activeElement).toBe(providers[0]);
@@ -329,7 +332,7 @@ describe("inspector UI — rendered against stub routes", () => {
     await flush();
     const robloxText = doc.getElementById("view")?.textContent ?? "";
     expect(robloxText).toContain("Not configured");
-    expect(robloxText).toContain("not a DEMO login");
+    expect(robloxText).toContain("Separate approvals");
     expect(robloxText).toContain("Add ROBLOX_CLIENT_ID and the ROBLOX_CLIENT_SECRET secret.");
     expect(doc.querySelector("#view form")).toBeNull();
 

@@ -25,6 +25,8 @@ export type ToolContent = TextContent | ImageContent;
 export type ToolResult = {
   content: ToolContent[];
   isError?: boolean;
+  /** MCP/OpenAI tool-level OAuth challenge metadata (serialized unchanged). */
+  _meta?: Record<string, unknown>;
 };
 
 export function textResult(value: unknown): ToolResult {

@@ -23,6 +23,7 @@ export const ROBLOX_REVOKE_ENDPOINT = `${ROBLOX_OAUTH_BASE}/token/revoke`;
 export const ROBLOX_USERINFO_ENDPOINT = `${ROBLOX_OAUTH_BASE}/userinfo`;
 
 export const OAUTH_PATHS = {
+  link: "/oauth/roblox/link",
   start: "/oauth/roblox/start",
   callback: "/oauth/roblox/callback",
   logout: "/oauth/roblox/logout",
@@ -158,7 +159,21 @@ export function resolveRobloxConfig(env: RobloxAuthEnv, requestUrl: string, opti
   const clientId = (env.ROBLOX_CLIENT_ID ?? "").trim();
   const clientSecret = (env.ROBLOX_CLIENT_SECRET ?? "").trim();
   const request = new URL(requestUrl);
-  const origin = request.origin && request.origin !== "null" ? request.origin : `${request.protocol}//${request.host}`;
+  const requestOrigin = request.origin && request.origin !== "null" ? request.origin : `${request.protocol}//${request.host}`;
+  const configuredOrigin = (env.MCP_PUBLIC_ORIGIN ?? "").trim();
+  let canonicalOrigin: string | null = null;
+  if (configuredOrigin) {
+    try {
+      const parsedOrigin = new URL(configuredOrigin);
+      if ((parsedOrigin.protocol === "https:" || ((parsedOrigin.hostname === "localhost" || parsedOrigin.hostname === "127.0.0.1") && parsedOrigin.protocol === "http:")) && !parsedOrigin.username && !parsedOrigin.password && !parsedOrigin.search && !parsedOrigin.hash && (!parsedOrigin.pathname || parsedOrigin.pathname === "/")) {
+        canonicalOrigin = parsedOrigin.origin;
+      }
+    } catch {
+      canonicalOrigin = null;
+    }
+    if (!canonicalOrigin) throw robloxAuthError("not_configured", "MCP_PUBLIC_ORIGIN must be the canonical HTTPS origin for this Worker.", { status: 503 });
+  }
+  const origin = canonicalOrigin ?? requestOrigin;
   const derivedRedirectUri = `${origin}${OAUTH_PATHS.callback}`;
   const pinned = (env.ROBLOX_REDIRECT_URI ?? "").trim();
   const allowlist = (env.ROBLOX_ALLOWED_HOSTS ?? "").split(",").map((value) => value.trim()).filter(Boolean);
@@ -176,6 +191,12 @@ export function resolveRobloxConfig(env: RobloxAuthEnv, requestUrl: string, opti
       hint: "Roblox only accepts plain HTTPS redirect URLs (plus localhost for debugging). Deploy on workers.dev or a custom domain with TLS.",
     });
   }
+  if (canonicalOrigin && parsed.origin !== canonicalOrigin) {
+    throw robloxAuthError("host_not_allowed", "ROBLOX_REDIRECT_URI must use the pinned MCP_PUBLIC_ORIGIN.", { status: 503 });
+  }
+  if (canonicalOrigin && requestOrigin !== canonicalOrigin) {
+    throw robloxAuthError("host_not_allowed", "This request did not arrive on the pinned MCP_PUBLIC_ORIGIN.", { status: 403 });
+  }
   if (!hostAllowed(parsed.hostname, allowlist)) {
     throw robloxAuthError("host_not_allowed", `The redirect host ${parsed.hostname} is not listed in ROBLOX_ALLOWED_HOSTS.`);
   }
@@ -189,7 +210,6 @@ export function resolveRobloxConfig(env: RobloxAuthEnv, requestUrl: string, opti
   }
 
   const { scopes, unrecognized } = normalizeScopes(env.ROBLOX_OAUTH_SCOPES);
-  const accountKey = normalizeAccountKey(env.ROBLOX_ACCOUNT_KEY ?? "default");
   const hasClientSecret = clientSecret.length > 0;
   const enabled = clientId.length > 0 && hasClientSecret;
   // Effective storage keeps /health (robloxFlags) and /oauth/roblox/status (vault) consistent:
@@ -201,8 +221,8 @@ export function resolveRobloxConfig(env: RobloxAuthEnv, requestUrl: string, opti
   const effectiveReason = hasTokenKey
     ? null
     : env.ROBLOX_AUTH
-      ? "ROBLOX_TOKEN_KEY is not configured, so tokens cannot be written to durable storage. Sessions live in isolate memory and must be repeated after the Worker recycles."
-      : "The ROBLOX_AUTH Durable Object binding is not deployed, so sessions live only in this Worker isolate.";
+      ? "ROBLOX_TOKEN_KEY is not configured, so Roblox token storage is unavailable. Protected account operations fail closed."
+      : "The ROBLOX_AUTH Durable Object binding is not deployed, so protected account operations fail closed.";
 
   return {
     enabled,
@@ -217,27 +237,15 @@ export function resolveRobloxConfig(env: RobloxAuthEnv, requestUrl: string, opti
     unrecognizedScopes: unrecognized,
     redirectUri,
     stateTtlSeconds: numberFrom(env.OAUTH_STATE_TTL_SECONDS, 600, 60, 900),
-    sessionTtlSeconds: numberFrom(env.ROBLOX_SESSION_TTL_SECONDS, 1_209_600, 300, 7_776_000),
     rateLimitPerMinute: numberFrom(env.ROBLOX_RATE_LIMIT_PER_MINUTE, 20, 1, 300),
     openCloudRatePerMinute: numberFrom(env.ROBLOX_OPEN_CLOUD_RATE_PER_MINUTE, 10, 1, 20),
     tokenSkewSeconds: numberFrom(env.ROBLOX_TOKEN_SKEW_SECONDS, 60, 0, 300),
-    accountKey,
     storageMode: effectiveStorage,
     // Filled in by the vault factory once the cipher is resolved; keep an effective
     // default here so callers that don't await createVault still see the consistent value.
     encryption: effectiveEncryption,
     encryptionReason: hasTokenKey ? null : effectiveReason,
   };
-}
-
-export function normalizeAccountKey(raw: string | undefined | null): string {
-  const value = (raw ?? "default").trim().toLowerCase();
-  if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(value)) {
-    throw robloxAuthError("invalid_input", "An account key must be 1-32 characters of a-z, 0-9, _ or -.", {
-      hint: "Use `default`, or a short label such as `alt-account`.",
-    });
-  }
-  return value;
 }
 
 /** Roblox documents these limits per OAuth authorization; DEMO stays under them. */

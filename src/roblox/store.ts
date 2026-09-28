@@ -5,7 +5,7 @@
  * It runs unchanged in two places:
  *
  *  - inside/behind the `RobloxAuth` Durable Object (production; strongly
- *    consistent, which matters because /start and /callback land seconds apart
+ *    consistent, which matters because link submission and /callback land seconds apart
  *    and may hit different isolates — Workers KV's eventual consistency is why
  *    this project uses a Durable Object instead), and
  *  - in-process (local `wrangler dev` and unit tests) with a Map adapter.
@@ -31,6 +31,7 @@ export const ROBLOX_AUTH_DO_NAME = "demo-roblox-auth";
 
 export interface PendingStateInput {
   accountKey: string;
+  principalHash?: string;
   redirectUri: string;
   scopes: string[];
   host: string;
@@ -116,6 +117,7 @@ export class AccountVault {
       stateHash,
       bindingHash: input.bindingHash,
       accountKey: input.accountKey,
+      ...(input.principalHash ? { principalHash: input.principalHash } : {}),
       redirectUri: input.redirectUri,
       scopes: input.scopes,
       codeVerifierSealed: seal,
@@ -142,7 +144,7 @@ export class AccountVault {
     if (!binding || !safeEqual(binding, pending.bindingHash)) return { status: "binding_mismatch" };
     if (!this.cipher && pending.codeVerifierSealed) {
       throw robloxAuthError("storage_unavailable", "The OAuth state was sealed with a key this isolate does not have.", {
-        hint: "ROBLOX_TOKEN_KEY changed mid-flow. Retry /oauth/roblox/start.",
+        hint: "ROBLOX_TOKEN_KEY changed mid-flow. Restore the previous key or start a fresh link from ChatGPT using the current key.",
       });
     }
     return { status: "ok", pending };
@@ -161,7 +163,7 @@ export class AccountVault {
     const verifier = await this.cipher.decrypt(pending.codeVerifierSealed);
     if (!verifier) {
       throw robloxAuthError("storage_unavailable", "The sealed PKCE verifier could not be decrypted (ROBLOX_TOKEN_KEY was rotated?).", {
-        hint: "Start /oauth/roblox/start again with the current key.",
+        hint: "Create a fresh link code in ChatGPT and submit it through /oauth/roblox/link with the current key.",
       });
     }
     return verifier;
@@ -455,14 +457,13 @@ async function cipherFor(env: Record<string, any>): Promise<TokenCipher | null> 
 export async function createVault(env: Record<string, any>): Promise<VaultHandle> {
   const cipher = await cipherFor(env);
   const namespace = env.ROBLOX_AUTH;
-  const scope = String(env.ROBLOX_ACCOUNT_KEY ?? "default");
   if (namespace && typeof namespace.idFromName === "function" && cipher) {
     const stub = namespace.get(namespace.idFromName(ROBLOX_AUTH_DO_NAME));
     return { vault: createDurableVault(stub, cipher), mode: "durable-object", encryption: "aes-gcm-256", reason: null };
   }
   if (namespace && typeof namespace.idFromName === "function") {
     return {
-      vault: isolateVault(scope, null),
+      vault: isolateVault("default", null),
       mode: "memory",
       encryption: "none",
       reason:
@@ -470,10 +471,10 @@ export async function createVault(env: Record<string, any>): Promise<VaultHandle
     };
   }
   return {
-    vault: isolateVault(scope, cipher),
+    vault: isolateVault("default", cipher),
     mode: "memory",
     encryption: cipher ? "aes-gcm-256" : "none",
-    reason: "The ROBLOX_AUTH Durable Object binding is not deployed, so sessions live only in this Worker isolate.",
+    reason: "The ROBLOX_AUTH Durable Object binding is unavailable; protected Roblox linking and account operations fail closed.",
   };
 }
 

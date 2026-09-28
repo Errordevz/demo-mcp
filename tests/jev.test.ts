@@ -19,6 +19,8 @@ import { detectVideoIntent } from "../src/video/intent.js";
 import { applyIntentHook } from "../src/video/intent-hook.js";
 import { analysisHintFor, type DetectedIntent } from "../src/video/intent.js";
 import worker, { DEMO_TOOL_NAMES, TOOL_COUNT } from "../index.js";
+import { InMemoryMcpAuthStore } from "../src/auth/oauth-store.js";
+import { sha256Hex } from "../src/roblox/crypto.js";
 
 const CTX = { waitUntil: (promise: Promise<unknown>) => void promise.catch(() => undefined), passThroughOnException: () => undefined } as unknown as ExecutionContext;
 const CREDENTIAL = "tsk_live_9f2b7c1d8e4a5566f0ab34cd78ef0123";
@@ -505,6 +507,30 @@ describe("inspect_video focus hook", () => {
 
 /* --------------------------------------------------------- MCP tool surface */
 
+const MCP_TOKEN = "test-mcp-access-token-for-jev-integration-1234567890";
+const MCP_SUBJECT = "a".repeat(64);
+
+async function mcpEnv(overrides: Record<string, unknown> = {}) {
+  const store = new InMemoryMcpAuthStore();
+  const now = Date.now();
+  await store.putAccessToken(await sha256Hex(MCP_TOKEN), {
+    version: 1,
+    clientIdHash: "c".repeat(64),
+    principalHash: MCP_SUBJECT,
+    scopes: ["decision:use"],
+    audience: "https://demo.test",
+    issuedAt: now,
+    expiresAt: now + 60 * 60_000,
+  });
+  return {
+    MCP_PUBLIC_ORIGIN: "https://demo.test",
+    MCP_AUTH_ACCESS_TEAM_DOMAIN: "demo.cloudflareaccess.com",
+    MCP_AUTH_ACCESS_AUD: "test-access-audience",
+    MCP_AUTH: { idFromName: (name: string) => name, get: () => store },
+    ...overrides,
+  };
+}
+
 async function rpc(method: string, params: Record<string, unknown>, env: unknown, headers: Record<string, string> = {}) {
   const response = await worker.fetch(
     new Request("https://demo.test/mcp", {
@@ -522,7 +548,8 @@ async function rpc(method: string, params: Record<string, unknown>, env: unknown
 }
 
 async function callTool(name: string, args: Record<string, unknown>, env: unknown) {
-  const response = await rpc("tools/call", { name, arguments: args }, env, { authorization: "Bearer mcp-key" });
+  const input = env && typeof env === "object" ? env as Record<string, unknown> : {};
+  const response = await rpc("tools/call", { name, arguments: args }, await mcpEnv(input), { authorization: `Bearer ${MCP_TOKEN}` });
   expect(response.error).toBeUndefined();
   const text = (response.result?.content ?? []).map((entry: { text?: string }) => entry.text ?? "").join("\n");
   let parsed: any = null;
@@ -538,7 +565,7 @@ describe("Jev MCP tools", () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it("are registered on the same surface as everything else", async () => {
-    const listed = await rpc("tools/list", {}, {});
+    const listed = await rpc("tools/list", {}, await mcpEnv());
     const names: string[] = listed.result.tools.map((tool: { name: string }) => tool.name);
     expect(names).toContain("jev_decide");
     expect(names).toContain("jev_capabilities");
@@ -548,33 +575,29 @@ describe("Jev MCP tools", () => {
     const decide = listed.result.tools.find((tool: { name: string }) => tool.name === "jev_decide");
     expect(decide.inputSchema.properties.decision.enum).toEqual(["tool_route", "video_intent_focus", "result_review"]);
     expect(decide.description).toMatch(/cannot call tools or authorize anything/);
+    expect(decide.securitySchemes).toEqual([{ type: "oauth2", scopes: ["decision:use"] }]);
+    expect(listed.result.tools.find((tool: { name: string }) => tool.name === "jev_capabilities").securitySchemes).toEqual([{ type: "noauth" }]);
   });
 
-  it("refuse to spend a paid call through an unauthenticated endpoint", async () => {
+  it("refuses to spend a paid call without the per-tool decision:use OAuth grant", async () => {
     const stub = stubTypesafe(() => jsonResponse({ answers: {} }));
-    const response = await worker.fetch(
-      new Request("https://demo.test/mcp", {
-        method: "POST",
-        headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
-        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "jev_decide", arguments: { decision: "tool_route", request: "look at this" } } }),
-      }),
-      { TYPESAFE_API_KEY: CREDENTIAL } as never,
-      CTX,
-    );
-    const text = await response.text();
-    expect(text).toMatch(/not_configured/);
-    expect(text).toMatch(/DEMO_API_KEY/);
+    const response = await rpc("tools/call", { name: "jev_decide", arguments: { decision: "tool_route", request: "look at this" } }, await mcpEnv({ TYPESAFE_API_KEY: CREDENTIAL }));
+    expect(response.error).toBeUndefined();
+    expect(response.result.isError).toBe(true);
+    expect(JSON.parse(response.result.content[0].text).error).toBe("invalid_token");
+    expect(response.result._meta["mcp/www_authenticate"][0]).toContain('resource_metadata="https://demo.test/.well-known/oauth-protected-resource"');
     expect(stub.calls.length).toBe(0);
 
-    // The read-only report stays available, because it costs nothing.
-    const report = await rpc("tools/call", { name: "jev_capabilities", arguments: {} }, { DEMO_API_KEY: "mcp-key" }, { authorization: "Bearer mcp-key" });
+    // The public read-only report stays available without a bearer token.
+    const report = await rpc("tools/call", { name: "jev_capabilities", arguments: {} }, {});
     expect(report.error).toBeUndefined();
+    expect(report.result.isError).not.toBe(true);
   });
 
   it("return a validated decision with its policy, and no credential anywhere in the payload", async () => {
     const spy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     stubTypesafe(() => jsonResponse({ model: "jev-1.13.0", answers: { primary: choiceAnswer("utility", { utility: 0.85, needs_user_clarification: 0.15 }, 0.88) }, usage: { input_tokens: 90, output_tokens: 3 } }));
-    const result = await callTool("jev_decide", { decision: "tool_route", request: "what should I do with the string I pasted above?" }, { DEMO_API_KEY: "mcp-key", TYPESAFE_API_KEY: CREDENTIAL });
+    const result = await callTool("jev_decide", { decision: "tool_route", request: "what should I do with the string I pasted above?" }, { TYPESAFE_API_KEY: CREDENTIAL });
     expect(result.isError).toBe(false);
     expect(result.parsed).toMatchObject({
       template: "tool_route",
@@ -593,23 +616,23 @@ describe("Jev MCP tools", () => {
   });
 
   it("report the deterministic fallback instead of failing when TypeSafe is not configured", async () => {
-    const result = await callTool("jev_decide", { decision: "tool_route", request: "the thing we discussed" }, { DEMO_API_KEY: "mcp-key" });
+    const result = await callTool("jev_decide", { decision: "tool_route", request: "the thing we discussed" }, {});
     expect(result.parsed).toMatchObject({ policy: "unavailable_fallback", decision: "needs_user_clarification", source: "rules" });
     expect(result.parsed.note).toMatch(/TYPESAFE_API_KEY/);
   });
 
   it("validate the arguments before anything is sent", async () => {
     const stub = stubTypesafe(() => jsonResponse({ answers: {} }));
-    const missing = await callTool("jev_decide", { decision: "result_review" }, { DEMO_API_KEY: "mcp-key", TYPESAFE_API_KEY: CREDENTIAL });
+    const missing = await callTool("jev_decide", { decision: "result_review" }, { TYPESAFE_API_KEY: CREDENTIAL });
     expect(missing.isError).toBe(true);
     expect(missing.text).toMatch(/result is required/);
-    const tooLong = await callTool("jev_decide", { decision: "tool_route", request: "x".repeat(4_001) }, { DEMO_API_KEY: "mcp-key", TYPESAFE_API_KEY: CREDENTIAL });
+    const tooLong = await callTool("jev_decide", { decision: "tool_route", request: "x".repeat(4_001) }, { TYPESAFE_API_KEY: CREDENTIAL });
     expect(tooLong.isError).toBe(true);
     expect(stub.calls.length).toBe(0);
   });
 
   it("publish a capability report that is presence-only and states the limits", async () => {
-    const result = await callTool("jev_capabilities", {}, { DEMO_API_KEY: "mcp-key", TYPESAFE_API_KEY: CREDENTIAL });
+    const result = await callTool("jev_capabilities", {}, { TYPESAFE_API_KEY: CREDENTIAL });
     expect(result.parsed).toMatchObject({
       schema: "demo.jev-capabilities/1",
       provider: "typesafe",
@@ -637,7 +660,7 @@ describe("Jev MCP tools", () => {
   });
 
   it("exposes the report on the HTTP surfaces too", async () => {
-    const jev = await worker.fetch(new Request("https://demo.test/capabilities/jev"), { DEMO_API_KEY: "mcp-key" } as never, CTX);
+    const jev = await worker.fetch(new Request("https://demo.test/capabilities/jev"), {} as never, CTX);
     expect(jev.status).toBe(200);
     const body = (await jev.json()) as Record<string, unknown>;
     expect(body.schema).toBe("demo.jev-capabilities/1");

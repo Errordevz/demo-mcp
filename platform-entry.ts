@@ -4,6 +4,8 @@ import { resolveLayaConfig } from "./src/laya/config.js";
 import { resolveDecisionRoutingMode } from "./src/decisions/provider.js";
 import { demoUi } from "./ui";
 import { handleRobloxOAuthRoute, isRobloxOAuthPath } from "./src/roblox/routes.js";
+import { handleMcpOAuthRoute, isMcpOAuthPath } from "./src/auth/oauth-routes.js";
+import { MCP_OAUTH_SCOPES, mcpOAuthReady, resolveMcpOAuthConfig } from "./src/auth/oauth-config.js";
 import { SessionManager } from "./src/session/manager.js";
 import { VideoArtifactStore, artifactBaseUrl, parseRangeHeader } from "./src/video/store.js";
 import { LIMITS } from "./src/core/limits.js";
@@ -14,10 +16,16 @@ import { oversizedBody, securityHeaders } from "./src/core/headers.js";
 // and the encrypted token envelope for a linked Roblox account.
 export { BrowserSession } from "./src/session/durable-object.js";
 export { RobloxAuth } from "./src/roblox/do.js";
+export { McpAuth } from "./src/auth/oauth-store.js";
 
 type Env = {
   DEMO_PLATFORM_ORIGIN?: string;
-  DEMO_API_KEY?: string;
+  MCP_PUBLIC_ORIGIN?: string;
+  MCP_AUTH_ACCESS_TEAM_DOMAIN?: string;
+  MCP_AUTH_ACCESS_AUD?: string;
+  MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS?: string | number;
+  MCP_AUTH_RATE_LIMIT_PER_MINUTE?: string | number;
+  MCP_AUTH?: unknown;
   BROWSER?: unknown;
   SCREENSHOTS?: R2Bucket;
   VIDEO_ARTIFACTS?: R2Bucket;
@@ -73,6 +81,7 @@ type Env = {
 const VERSION = "0.9.0";
 const DEFAULT_PLATFORM_ORIGIN = "https://demo-platform.pages.dev";
 const LOCAL_ORIGINS = new Set(["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:3000", "http://127.0.0.1:5173"]);
+const CHATGPT_ORIGINS = new Set(["https://chatgpt.com"]);
 const startedAt = Date.now();
 let requestCount = 0;
 
@@ -85,7 +94,7 @@ function configuredOrigins(env: Env) {
 
 function allowedOrigin(origin: string | null, env: Env): string | null {
   if (!origin) return null;
-  if (configuredOrigins(env).includes(origin) || LOCAL_ORIGINS.has(origin)) return origin;
+  if (configuredOrigins(env).includes(origin) || LOCAL_ORIGINS.has(origin) || CHATGPT_ORIGINS.has(origin)) return origin;
   return null;
 }
 
@@ -158,22 +167,35 @@ function layaSurface(env: Env) {
   };
 }
 
+function mcpOAuthSurface(env: Env) {
+  const config = resolveMcpOAuthConfig(env);
+  return {
+    configured: mcpOAuthReady(env),
+    identityProvider: "Cloudflare Access; signed user subject verified by the Worker",
+    publicToolsUnauthenticated: true,
+    protectedScopes: [...MCP_OAUTH_SCOPES],
+    accessTokenTtlSeconds: config?.accessTokenTtlSeconds ?? null,
+    refreshTokensIssued: false,
+    authorizationCodePkce: "S256",
+    clientRegistration: "ChatGPT CIMD allowlist; dynamic client registration disabled",
+  };
+}
+
 function robloxSurface(env: Env) {
   const clientId = String(env.ROBLOX_CLIENT_ID ?? "").trim();
   const secret = String(env.ROBLOX_CLIENT_SECRET ?? "").trim();
   const tokenKey = String(env.ROBLOX_TOKEN_KEY ?? "").trim();
-  const hasValidTokenKey = tokenKey.length > 0;
-  // Effective storage keeps /health, /platform/stats and /oauth/roblox/status consistent:
-  // the Durable Object is only effective when encryption is available, otherwise the
-  // vault degrades to isolate memory and reports "memory"/"none".
-  const effectiveStorage = env.ROBLOX_AUTH && hasValidTokenKey ? "durable-object" : "memory";
-  const effectiveEncryption = hasValidTokenKey ? "aes-gcm-256" : "none";
+  const hasRobloxBinding = Boolean(env.ROBLOX_AUTH && typeof (env.ROBLOX_AUTH as { idFromName?: unknown }).idFromName === "function" && typeof (env.ROBLOX_AUTH as { get?: unknown }).get === "function");
+  const secureStorageReady = hasRobloxBinding && tokenKey.length > 0;
   return {
-    configured: Boolean(clientId && secret),
-    reason: !clientId ? "ROBLOX_CLIENT_ID is not set" : !secret ? "ROBLOX_CLIENT_SECRET is not set" : null,
-    storage: effectiveStorage,
-    tokenEncryption: effectiveEncryption,
-    flows: ["GET /oauth/roblox/start", "GET /oauth/roblox/callback", "POST /oauth/roblox/logout", "GET /oauth/roblox/status"],
+    configured: Boolean(clientId && secret && secureStorageReady && env.MCP_PUBLIC_ORIGIN),
+    credentialsConfigured: Boolean(clientId && secret),
+    secureStorageReady,
+    reason: !clientId ? "ROBLOX_CLIENT_ID is not set" : !secret ? "ROBLOX_CLIENT_SECRET is not set" : !hasRobloxBinding ? "ROBLOX_AUTH Durable Object is not bound" : !tokenKey ? "ROBLOX_TOKEN_KEY is not set" : !env.MCP_PUBLIC_ORIGIN ? "MCP_PUBLIC_ORIGIN is not pinned" : null,
+    storage: secureStorageReady ? "durable-object" : "unavailable",
+    tokenEncryption: secureStorageReady ? "aes-gcm-256" : "unavailable",
+    identityBinding: "verified Cloudflare Access subject hash",
+    flows: ["GET /oauth/roblox/link", "POST /oauth/roblox/start", "GET /oauth/roblox/callback", "POST /oauth/roblox/logout", "GET /oauth/roblox/status"],
     passwordOrCookieFlow: false,
     tokensExposedToClients: false,
   };
@@ -220,6 +242,7 @@ function telemetry(env: Env) {
       skills: true,
       skillsSh: true,
       composio: false,
+      mcpOAuth: mcpOAuthSurface(env),
       robloxOAuth: robloxSurface(env),
       jevDecisionEngine: jevSurface(env),
       layaDecisionProvider: layaSurface(env),
@@ -248,6 +271,7 @@ function telemetry(env: Env) {
       { name: "Browser", type: "Cloudflare Browser Run", connected: capabilities.browserAvailable },
       { name: "Browser sessions", type: "Durable Object", connected: capabilities.sessionStorage === "durable-object" },
       { name: "Screenshot storage", type: "Cloudflare R2", connected: capabilities.screenshots },
+      { name: "DEMO OAuth", type: "OAuth 2.1 + PKCE (Cloudflare Access identity, per-tool grants)", connected: mcpOAuthSurface(env).configured },
       { name: "Roblox OAuth", type: "Roblox Open Cloud (official OAuth 2.0)", connected: robloxSurface(env).configured },
       { name: "Roblox session store", type: "Durable Object (RobloxAuth)", connected: robloxSurface(env).storage === "durable-object" },
       { name: "TypeSafe Jev", type: "Structured decision engine (HTTP API)", connected: jevSurface(env).available },
@@ -265,7 +289,8 @@ function telemetry(env: Env) {
       tools: "/tools",
       telemetry: "/platform/stats",
       screenshots: "/screenshots/:id",
-      robloxOAuth: "/oauth/roblox/{start,callback,logout,status}",
+      mcpOAuth: "/.well-known/oauth-protected-resource, /.well-known/oauth-authorization-server, /oauth/{authorize,token,revoke}",
+      robloxOAuth: "/oauth/roblox/{link,start,callback,logout,status}",
       jevCapabilities: "/capabilities/jev",
       layaCapabilities: "/capabilities/laya",
       youtubeCapabilities: "/capabilities/youtube",
@@ -385,10 +410,13 @@ export default {
     const url = new URL(request.url);
     const origin = request.headers.get("Origin");
 
-    // Roblox OAuth owns its own origin/state/CSRF rules (a browser navigating back
-    // from roblox.com sends no Origin, and the state-changing routes are guarded by
-    // the state cookie + Sec-Fetch-Site instead of the platform CORS allowlist), so
-    // it is dispatched before the allowlist check and never forwarded to /mcp.
+    // OAuth metadata and protocol routes own their CORS/CSRF policies. They are
+    // dispatched before the generic origin allowlist and never reach /mcp.
+    if (isMcpOAuthPath(url.pathname)) {
+      return (await handleMcpOAuthRoute(request, env as unknown as Record<string, unknown>)) ?? new Response("Not Found", { status: 404 });
+    }
+    // Roblox redirects are top-level navigations with their own browser-bound
+    // state. The actual start requires a matching Cloudflare Access identity.
     if (isRobloxOAuthPath(url.pathname)) {
       return (await handleRobloxOAuthRoute(request, env as unknown as Record<string, any>, ctx)) ?? new Response("Not Found", { status: 404 });
     }
@@ -396,7 +424,7 @@ export default {
     if (origin && !allowedOrigin(origin, env)) return new Response("Forbidden origin", { status: 403, headers: { "Vary": "Origin" } });
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders(origin, env) });
 
-    if (url.pathname === "/") return demoUi();
+    if (url.pathname === "/") return demoUi(request.url, env);
 
     if (url.pathname === "/platform/stats") {
       // Safe public telemetry: deliberately excludes credentials, tokens and user content.

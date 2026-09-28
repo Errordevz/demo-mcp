@@ -249,9 +249,8 @@ the client received (inline image blocks vs. HTTPS references vs. nothing).
 ### `video_inspect_pipeline`
 
 Input: `url`, optional `include_download` and
-`include_frames`. No separate key is required (the standard `/mcp` endpoint
-auth still applies if `DEMO_API_KEY` is configured). Runs the real stages in
-order and returns one report entry
+`include_frames`. It is a public tool and requires no login or bearer token.
+Runs the real stages in order and returns one report entry
 per stage with `status` (`ok` | `failed` | `skipped`), bounded `detail` and a
 redacted `error`:
 
@@ -271,13 +270,11 @@ redacted `error`:
 but everything else works) or `failed` (URL rejected). `first_failure` names
 the stage to inspect.
 
-**No per-tool key.** `video_inspect_pipeline` is open to any caller that can
-reach `/mcp`; it does not require a separate token. The standard `/mcp`
-endpoint auth still applies unchanged — when `DEMO_API_KEY` is configured, the
-whole endpoint (including this tool) requires the bearer, and unauthenticated
-requests get HTTP 401 before any tool runs. The report never contains
-credentials, cookies or page bodies — only validated public URLs, counts,
-sizes, durations and redacted error text.
+**Public tool.** `video_inspect_pipeline` is open to any caller that can
+reach `/mcp`, without a DEMO login or bearer token. It does not change the
+separate OAuth requirements for protected Roblox account or decision tools.
+The report never contains credentials, cookies or page bodies — only validated
+public URLs, counts, sizes, durations and redacted error text.
 
 ### `video_resolve` (DEMO 0.7.0)
 
@@ -580,7 +577,7 @@ services required for actual decoded frames/artifacts.
 | `VIDEO_ARTIFACT_TTL_SECONDS` | Optional (`3600`) | Artifact lifetime; the route refuses expired references. |
 | `VIDEO_RATE_LIMIT_PER_MINUTE` | Optional (`12`) | Per-session pipeline rate limit. |
 | `SSRF_DNS_CHECK` / `SSRF_DNS_FAIL_OPEN` | Optional (`true`/`true`) | DNS-over-HTTPS verification of every host and redirect hop. |
-| `DEMO_API_KEY` | Optional (secret) | `Authorization: Bearer` protection for `/mcp`. |
+| `MCP_AUTH` | Required for OAuth-protected tools | Durable Object for per-user DEMO OAuth grants. Public video tools remain anonymous. See [`MCP-OAUTH.md`](MCP-OAUTH.md). |
 
 There is **no** external ffmpeg/decoder provider and no hidden hard requirement:
 frame decoding always happens in Cloudflare Browser Rendering, and every optional
@@ -596,7 +593,6 @@ npx wrangler deploy                                  # main: platform-entry.ts
 # optional providers (secrets, never in wrangler.jsonc):
 npx wrangler secret put TRANSCRIPTION_ENDPOINT
 npx wrangler secret put TRANSCRIPTION_API_KEY
-npx wrangler secret put DEMO_API_KEY
 ```
 
 Verify after deploying:
