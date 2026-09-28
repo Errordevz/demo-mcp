@@ -1007,6 +1007,36 @@ hr.soft { border: 0; border-top: 1px solid var(--border); margin: 16px 0 }
 .auth-alt button { color: var(--accent-strong); font-weight: var(--fw-medium) }
 .auth-alt button:hover { text-decoration: underline }
 .password-rules { margin: 8px 0 0; padding-left: 18px; color: var(--faint); font-size: var(--fs-12); line-height: 1.7 }
+
+/* Password visibility toggle: the input keeps its native type semantics for
+   autofill/password managers, and the button only flips it. */
+.pw-wrap { position: relative; display: block }
+.pw-wrap input { padding-right: 84px }
+.pw-toggle {
+  position: absolute; top: 50%; right: 6px; transform: translateY(-50%);
+  min-height: 32px; padding: 0 10px; border-radius: 8px; border: 1px solid transparent;
+  background: transparent; color: var(--dim); font: 600 var(--fs-12)/1 inherit; cursor: pointer;
+}
+.pw-toggle:hover { color: var(--text); background: var(--surface-2, rgba(127,127,127,.12)) }
+.pw-toggle:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft) }
+.pw-meter { display: grid; gap: 5px; margin: 2px 0 0 }
+.pw-meter-bar { display: flex; gap: 4px }
+.pw-meter-bar span { height: 4px; flex: 1; border-radius: 3px; background: var(--border) }
+.pw-meter-bar span[data-on="1"] { background: var(--ok, #2ea043) }
+.pw-meter-bar span[data-on="warn"] { background: var(--warn, #d29922) }
+.pw-meter-text { font-size: var(--fs-12); color: var(--faint) }
+
+/* Email verification link landing (/#/verify?token=…) */
+.verify-state { display: grid; gap: 12px; text-align: center; padding: 6px 0 }
+.verify-state__icon {
+  width: 56px; height: 56px; margin: 2px auto 0; border-radius: 50%;
+  display: grid; place-items: center; background: var(--accent-soft); color: var(--accent);
+}
+.verify-state--ok .verify-state__icon { background: rgba(46,160,67,.15); color: var(--ok, #2ea043) }
+.verify-state--err .verify-state__icon { background: rgba(248,81,73,.15); color: var(--err) }
+.verify-state h2 { margin: 0; font-size: var(--fs-20) }
+.verify-state p { margin: 0; color: var(--dim); font-size: var(--fs-14); line-height: 1.65 }
+.verify-state .btn { justify-self: center }
 .spin { display: inline-block; width: 14px; height: 14px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin .7s linear infinite; vertical-align: -2px }
 @keyframes spin { to { transform: rotate(360deg) } }
 

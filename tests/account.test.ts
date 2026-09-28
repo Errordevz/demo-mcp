@@ -31,7 +31,7 @@ interface SentMail {
   text: string;
 }
 
-function harness(options: { now?: number } = {}) {
+function harness(options: { now?: number | (() => number) } = {}) {
   const store = new InMemoryAccountStore();
   const mail: SentMail[] = [];
   const env = {
@@ -49,7 +49,13 @@ function harness(options: { now?: number } = {}) {
     }
     throw new Error(`unexpected fetch in account test: ${url}`);
   });
-  const deps = { store, fetch: fetchStub as unknown as typeof fetch, now: () => options.now ?? NOW };
+  // A function-valued clock lets a test cross a cooldown or a TTL boundary
+  // without re-creating the store.
+  const deps = {
+    store,
+    fetch: fetchStub as unknown as typeof fetch,
+    now: () => (typeof options.now === "function" ? options.now() : options.now ?? NOW),
+  };
   const ctx = { waitUntil: () => undefined, passThroughOnException: () => undefined } as unknown as ExecutionContext;
   async function call(path: string, init?: RequestInit) {
     const response = await handleAccountRoute(new Request(`${ORIGIN}${path}`, init), env, ctx, deps);
@@ -122,10 +128,10 @@ describe("account store", () => {
 
   it("consumes verification codes and reset tokens exactly once", async () => {
     const store = new InMemoryAccountStore();
-    await store.putVerificationCode("usr_testuser1", { hash: "h", expiresAt: NOW + 60_000, attempts: 0, sentAt: NOW });
+    await store.putVerificationCode("usr_testuser1", { hash: "h", linkHash: "l", expiresAt: NOW + 60_000, attempts: 0, sentAt: NOW });
     expect(await store.consumeVerificationCode("usr_testuser1", "wrong", NOW)).toBe("mismatch");
     expect(await store.consumeVerificationCode("usr_testuser1", "h", NOW + 61_000)).toBe("expired");
-    await store.putVerificationCode("usr_testuser1", { hash: "h", expiresAt: NOW + 60_000, attempts: 0, sentAt: NOW });
+    await store.putVerificationCode("usr_testuser1", { hash: "h", linkHash: "l", expiresAt: NOW + 60_000, attempts: 0, sentAt: NOW });
     expect(await store.consumeVerificationCode("usr_testuser1", "h", NOW)).toBe("ok");
     expect(await store.consumeVerificationCode("usr_testuser1", "h", NOW)).toBe("none");
     await store.putResetToken("rt", { userId: "usr_testuser1", expiresAt: NOW + 60_000 });
@@ -326,6 +332,281 @@ describe("account API", () => {
       { store: undefined },
     );
     expect(response!.status).toBe(503);
+  });
+});
+
+describe("registration contract (root-cause regression)", () => {
+  it("reports authenticated:true only when the account was really created and a session issued", async () => {
+    const h = harness();
+    const { response, body, cookie } = await registerUser(h);
+    expect(response.status).toBe(201);
+    // The website gates on this exact field; its absence is what made every
+    // successful registration look like a failure.
+    expect(body.authenticated).toBe(true);
+    expect(body.registered).toBe(true);
+    expect(body.account?.email).toBe("user@demo.test");
+    expect(body.account?.displayName).toBeNull();
+    expect(cookie).toBeTruthy();
+    // The cookie that came back must actually identify the new account.
+    const probe = await h.callJson("/account/session", { headers: { Cookie: cookie! } });
+    expect(probe.body.signedIn).toBe(true);
+    expect(probe.body.account?.email).toBe("user@demo.test");
+  });
+
+  it("never claims authentication for a duplicate email, and stays enumeration-resistant", async () => {
+    const h = harness();
+    await registerUser(h);
+    const dup = await h.post("/account/register", { email: "USER@demo.test", password: GOOD_PASSWORD });
+    expect(dup.response.status).toBe(200);
+    expect(dup.body.registered).toBe(true);
+    expect(dup.body.authenticated).toBe(false);
+    expect(dup.body.account).toBeUndefined();
+    expect(h.cookieOf(dup.response)).toBeNull();
+    // Same wording as a fresh signup, so the answer leaks nothing.
+    expect(String(dup.body.message)).toContain("If this email can be registered");
+  });
+
+  it("validates the confirmation field and the display name", async () => {
+    const h = harness();
+    const mismatch = await h.post("/account/register", {
+      email: "c@demo.test", password: GOOD_PASSWORD, passwordConfirm: "something-else-7",
+    });
+    expect(mismatch.response.status).toBe(400);
+    expect(mismatch.body.error).toBe("password_mismatch");
+
+    const badName = await h.post("/account/register", {
+      email: "c@demo.test", password: GOOD_PASSWORD, displayName: "no",
+    });
+    expect(badName.response.status).toBe(400);
+    expect(badName.body.error).toBe("invalid_display_name");
+
+    const ok = await h.post("/account/register", {
+      email: "c@demo.test", password: GOOD_PASSWORD, passwordConfirm: GOOD_PASSWORD, displayName: "Builder One",
+    });
+    expect(ok.response.status).toBe(201);
+    expect(ok.body.account?.displayName).toBe("Builder One");
+  });
+
+  it("detects a duplicate display name while keeping email answers generic", async () => {
+    const h = harness();
+    await h.post("/account/register", { email: "first@demo.test", password: GOOD_PASSWORD, displayName: "UniqueHandle" });
+    const dup = await h.post("/account/register", { email: "second@demo.test", password: GOOD_PASSWORD, displayName: "uniquehandle" });
+    expect(dup.response.status).toBe(409);
+    expect(dup.body.error).toBe("display_name_taken");
+    // A different email with a free handle still works.
+    const ok = await h.post("/account/register", { email: "second@demo.test", password: GOOD_PASSWORD, displayName: "AnotherHandle" });
+    expect(ok.response.status).toBe(201);
+  });
+
+  it("sends both a one-click link and a code, and reports delivery honestly", async () => {
+    const h = harness();
+    const { body } = await registerUser(h);
+    expect(body.verification?.sent).toBe(true);
+    expect(body.verification?.linkIncluded).toBe(true);
+    expect(body.emailDelivery?.configured).toBe(true);
+    const mail = h.mail[0]!;
+    expect(mail.text).toMatch(/ {2}[A-Z2-9]{8}/);
+    expect(mail.text).toContain(`${ORIGIN}/#/verify?token=`);
+  });
+
+  it("says why no email was sent instead of promising one", async () => {
+    const h = harness();
+    const { response, body } = await h.post("/account/register", { email: "noemail@demo.test", password: GOOD_PASSWORD });
+    expect(response.status).toBe(201);
+    expect(body.authenticated).toBe(true);
+    expect(h.cookieOf(response)).toBeTruthy();
+    // Same request shape, with email switched off entirely.
+    const bare = harness();
+    const env = { MCP_PUBLIC_ORIGIN: ORIGIN } as Record<string, unknown>;
+    const ctx = { waitUntil: () => undefined, passThroughOnException: () => undefined } as unknown as ExecutionContext;
+    const offlineResponse = await handleAccountRoute(
+      new Request(`${ORIGIN}/account/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "offline@demo.test", password: GOOD_PASSWORD }),
+      }),
+      env, ctx, bare.deps,
+    );
+    const offlineBody = (await offlineResponse!.json()) as Record<string, any>;
+    expect(offlineResponse!.status).toBe(201);
+    expect(offlineBody.authenticated).toBe(true);
+    expect(offlineBody.emailDelivery?.configured).toBe(false);
+    expect(offlineBody.verification?.sent).toBe(false);
+    expect(String(offlineBody.verification?.reason)).toContain("EMAIL_PROVIDER");
+    expect(bare.mail.length).toBe(0);
+  });
+});
+
+describe("email verification link", () => {
+  it("verifies through the emailed link without any session", async () => {
+    const h = harness();
+    const { cookie } = await registerUser(h);
+    const token = h.mail[0]!.text.match(/#\/verify\?token=([A-Za-z0-9_-]{32,128})/)![1]!;
+    // No Cookie header at all: the link must work from another device.
+    const confirmed = await h.post("/account/verify/confirm", { token });
+    expect(confirmed.response.status).toBe(200);
+    expect(confirmed.body.verified).toBe(true);
+    expect(confirmed.body.viaLink).toBe(true);
+    const probe = await h.callJson("/account/session", { headers: { Cookie: cookie! } });
+    expect(probe.body.account?.emailVerified).toBe(true);
+  });
+
+  it("rejects a reused link, an unknown token, and a superseded one", async () => {
+    const h = harness();
+    const { cookie } = await registerUser(h);
+    const token = h.mail[0]!.text.match(/#\/verify\?token=([A-Za-z0-9_-]{32,128})/)![1]!;
+    expect((await h.post("/account/verify/confirm", { token })).response.status).toBe(200);
+    const reused = await h.post("/account/verify/confirm", { token });
+    expect(reused.response.status).toBe(410);
+
+    const unknown = await h.post("/account/verify/confirm", { token: "a".repeat(43) });
+    expect(unknown.response.status).toBe(410);
+
+    // A second registration for a fresh address, then a *new* verification email:
+    // the first link must stop working because the newest record replaces it.
+    let clock = NOW;
+    const second = harness({ now: () => clock });
+    const reg = await registerUser(second, "second@demo.test");
+    const firstToken = second.mail[0]!.text.match(/#\/verify\?token=([A-Za-z0-9_-]{32,128})/)![1]!;
+    clock = NOW + 61_000; // past the 60-second resend cooldown
+    const resent = await second.post("/account/verify/request", {}, { Cookie: reg.cookie! });
+    expect(resent.response.status).toBe(200);
+    const superseded = await second.post("/account/verify/confirm", { token: firstToken });
+    expect(superseded.response.status).toBe(410);
+    const fresh = second.mail[second.mail.length - 1]!.text.match(/#\/verify\?token=([A-Za-z0-9_-]{32,128})/)![1]!;
+    expect((await second.post("/account/verify/confirm", { token: fresh })).response.status).toBe(200);
+  });
+
+  it("keeps the code path session-bound and reports the resend cooldown", async () => {
+    const h = harness();
+    const { cookie } = await registerUser(h);
+    // The code path requires a session even when the value is correct.
+    const anonymous = await h.post("/account/verify/confirm", { code: h.mail[0]!.text.match(/ {2}([A-Z2-9]{8})/)![1]! });
+    expect(anonymous.response.status).toBe(401);
+    const tooSoon = await h.post("/account/verify/request", {}, { Cookie: cookie! });
+    expect(tooSoon.response.status).toBe(429);
+    expect(tooSoon.body.retryAfterSeconds).toBeGreaterThan(0);
+    const code = h.mail[0]!.text.match(/ {2}([A-Z2-9]{8})/)![1]!;
+    expect((await h.post("/account/verify/confirm", { code }, { Cookie: cookie! })).response.status).toBe(200);
+  });
+});
+
+describe("profile management", () => {
+  it("changes and clears the display name, enforcing uniqueness", async () => {
+    const h = harness();
+    const { cookie } = await registerUser(h);
+    const changed = await h.post("/account/profile", { displayName: "Renamed User" }, { Cookie: cookie! });
+    expect(changed.response.status).toBe(200);
+    expect(changed.body.account?.displayName).toBe("Renamed User");
+    expect((await h.store.getUserByDisplayName("renamed user"))?.email).toBe("user@demo.test");
+
+    const other = await h.post("/account/register", { email: "other@demo.test", password: GOOD_PASSWORD });
+    const otherCookie = h.cookieOf(other.response)!;
+    const taken = await h.post("/account/profile", { displayName: "RENAMED USER" }, { Cookie: otherCookie });
+    expect(taken.response.status).toBe(409);
+
+    const cleared = await h.post("/account/profile", { displayName: "" }, { Cookie: cookie! });
+    expect(cleared.response.status).toBe(200);
+    expect(cleared.body.account?.displayName).toBeNull();
+    expect(await h.store.getUserByDisplayName("renamed user")).toBeNull();
+  });
+
+  it("requires a session and rejects an unusable handle", async () => {
+    const h = harness();
+    const anonymous = await h.post("/account/profile", { displayName: "Whoever" });
+    expect(anonymous.response.status).toBe(401);
+    const { cookie } = await registerUser(h);
+    const bad = await h.post("/account/profile", { displayName: "x" }, { Cookie: cookie! });
+    expect(bad.response.status).toBe(400);
+  });
+
+  it("lets a removed handle be claimed by another account", async () => {
+    const h = harness();
+    const first = await h.post("/account/register", { email: "a@demo.test", password: GOOD_PASSWORD, displayName: "Contested" });
+    expect(first.response.status).toBe(201);
+    const cookieA = h.cookieOf(first.response)!;
+    await h.post("/account/delete", { password: GOOD_PASSWORD, confirmation: "DELETE" }, { Cookie: cookieA });
+    const second = await h.post("/account/register", { email: "b@demo.test", password: GOOD_PASSWORD, displayName: "Contested" });
+    expect(second.response.status).toBe(201);
+  });
+});
+
+describe("account isolation", () => {
+  it("never exposes or mutates another account's sessions", async () => {
+    const h = harness();
+    const a = await h.post("/account/register", { email: "a@demo.test", password: GOOD_PASSWORD });
+    const cookieA = h.cookieOf(a.response)!;
+    const b = await h.post("/account/register", { email: "b@demo.test", password: GOOD_PASSWORD });
+    const cookieB = h.cookieOf(b.response)!;
+
+    const listA = await h.callJson("/account/sessions", { headers: { Cookie: cookieA } });
+    const listB = await h.callJson("/account/sessions", { headers: { Cookie: cookieB } });
+    const idsA = (listA.body.sessions ?? []).map((s: { id: string }) => s.id);
+    const idsB = (listB.body.sessions ?? []).map((s: { id: string }) => s.id);
+    expect(idsA.length).toBeGreaterThan(0);
+    expect(idsB.length).toBeGreaterThan(0);
+    // B's list is B's own; A's session id must not appear in it.
+    expect(idsB.some((id: string) => idsA.includes(id))).toBe(false);
+
+    // B cannot revoke a session id that belongs to A, and A keeps working.
+    const stolen = await h.post("/account/sessions/revoke", { id: idsA[0] }, { Cookie: cookieB });
+    expect([403, 404]).toContain(stolen.response.status);
+    expect((await h.callJson("/account/session", { headers: { Cookie: cookieA } })).body.signedIn).toBe(true);
+
+    // Nor can an anonymous caller reach the session surface at all.
+    expect((await h.post("/account/sessions/revoke", { id: idsA[0] })).response.status).toBe(401);
+    expect((await h.callJson("/account/sessions")).response.status).toBe(401);
+
+    // B changing the display name never touches A's profile.
+    await h.post("/account/profile", { displayName: "Bee" }, { Cookie: cookieB });
+    const probeA = await h.callJson("/account/session", { headers: { Cookie: cookieA } });
+    expect(probeA.body.account?.displayName).toBeNull();
+    expect(probeA.body.account?.email).toBe("a@demo.test");
+  });
+
+  it("answers a known and an unknown address identically on forgot", async () => {
+    const h = harness();
+    await h.post("/account/register", { email: "known@demo.test", password: GOOD_PASSWORD });
+    const known = await h.post("/account/password/forgot", { email: "known@demo.test" });
+    const unknown = await h.post("/account/password/forgot", { email: "unknown@demo.test" });
+    expect(known.response.status).toBe(unknown.response.status);
+    expect(known.body.message).toBe(unknown.body.message);
+    expect(known.body.error).toBeUndefined();
+    expect(unknown.body.error).toBeUndefined();
+  });
+});
+
+describe("security notifications", () => {
+  it("emails a password-change notice on reset and on change", async () => {
+    const h = harness();
+    const { cookie } = await registerUser(h);
+    await h.post("/account/password/forgot", { email: "user@demo.test" });
+    const resetMail = h.mail.find((m) => m.subject.includes("Reset"))!;
+    const token = resetMail.text.match(/token=([A-Za-z0-9_-]{32,128})/)![1]!;
+    await h.post("/account/password/reset", { token, password: "brand-new-pass-3" });
+    expect(h.mail.some((m) => m.subject.includes("password was changed"))).toBe(true);
+
+    const login = await h.post("/account/login", { email: "user@demo.test", password: "brand-new-pass-3" });
+    const cookie2 = h.cookieOf(login.response)!;
+    const before = h.mail.length;
+    const changed = await h.post("/account/password/change", {
+      currentPassword: "brand-new-pass-3", newPassword: "third-strong-pass-8", newPasswordConfirm: "third-strong-pass-8",
+    }, { Cookie: cookie2 });
+    expect(changed.response.status).toBe(200);
+    // The notice is dispatched through ctx.waitUntil, so let the microtask queue drain.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(h.mail.length).toBeGreaterThan(before);
+    expect(cookie).toBeTruthy();
+  });
+
+  it("rejects a mismatched password confirmation on change", async () => {
+    const h = harness();
+    const { cookie } = await registerUser(h);
+    const mismatch = await h.post("/account/password/change", {
+      currentPassword: GOOD_PASSWORD, newPassword: "first-choice-pass-1", newPasswordConfirm: "second-choice-2",
+    }, { Cookie: cookie! });
+    expect(mismatch.response.status).toBe(400);
+    expect(mismatch.body.error).toBe("password_mismatch");
   });
 });
 

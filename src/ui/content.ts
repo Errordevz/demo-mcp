@@ -35,6 +35,7 @@ export const SECTIONS = [
   { id: "account", label: "Account", icon: "user", blurb: "DEMO session, verification, sessions, Roblox link", nav: "hidden" },
   { id: "auth", label: "Sign in", icon: "key", blurb: "DEMO account sign in and registration", nav: "hidden" },
   { id: "reset", label: "Reset password", icon: "key", blurb: "Set a new password from an emailed link", nav: "hidden" },
+  { id: "verify", label: "Verify email", icon: "checkc", blurb: "Confirm an address from a one-click link", nav: "hidden" },
 ] as const;
 
 export const CAPABILITY_CATEGORIES = [
