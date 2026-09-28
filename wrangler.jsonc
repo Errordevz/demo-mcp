@@ -24,12 +24,18 @@
         "class_name": "BrowserSession"
       },
       // Roblox OAuth state + encrypted token envelope. A Durable Object rather
-      // than KV because /oauth/roblox/start and /oauth/roblox/callback are seconds
+      // than KV because Roblox link submission and the callback may land seconds
       // apart on different isolates (KV is eventually consistent) and because
       // Roblox refresh tokens are single-use, so a lost race is unrecoverable.
       {
         "name": "ROBLOX_AUTH",
         "class_name": "RobloxAuth"
+      },
+      // Stores ChatGPT OAuth grants and short-lived Roblox link codes. Values are
+      // token/code hashes; atomic consumption prevents replay across isolates.
+      {
+        "name": "MCP_AUTH",
+        "class_name": "McpAuth"
       }
     ]
   },
@@ -41,6 +47,10 @@
     {
       "tag": "v2",
       "new_sqlite_classes": ["RobloxAuth"]
+    },
+    {
+      "tag": "v3",
+      "new_sqlite_classes": ["McpAuth"]
     }
   ],
   // Workers AI binding. Enables server-side speech-to-text (video_transcribe)
@@ -53,18 +63,23 @@
     // ── Secrets are deliberately NOT declared here ─────────────────────────────
     // Set them in the dashboard (Workers → Settings → Variables and secrets →
     // Encrypt) or with `wrangler secret put <NAME>`, per environment:
-    //   DEMO_API_KEY          — existing private-tool bearer for roblox_account_*
-    //                           and jev_decide only. /mcp transport is always public.
-    //                           Keep this secret: anonymous callers must not read
-    //                           linked accounts or invoke the paid decision tool.
     //   ROBLOX_CLIENT_SECRET  — Roblox OAuth app secret (ROBLOX_CLIENT_ID may be a var)
-    //   ROBLOX_TOKEN_KEY      — 32+ random bytes; encrypts tokens at rest
+    //   ROBLOX_TOKEN_KEY      — 32+ random bytes; encrypts Roblox tokens at rest
+    // MCP OAuth uses the MCP_AUTH Durable Object and verified Cloudflare Access
+    // identity to issue per-user, short-lived grants.
     //   TYPESAFE_API_KEY      — TypeSafe/Jev decision API key
     //   LAYA_API_KEY          — optional Laya decision-server credential (only when
     //                           the configured Laya server requires a bearer)
     //   YOUTUBE_API_KEY       — YouTube Data API v3 key for public YouTube operations
     //   TRANSCRIPTION_API_KEY — optional external speech-to-text provider
     "DEMO_PLATFORM_ORIGIN": "https://demo-platform.pages.dev",
+    // Canonical HTTPS origin is used for OAuth issuer/resource metadata and links.
+    // Change it to the deployed custom domain if one is in use; never derive it from Host.
+    "MCP_PUBLIC_ORIGIN": "https://demo-mcp.amidevz.workers.dev",
+    "MCP_AUTH_ACCESS_TEAM_DOMAIN": "<your-team>.cloudflareaccess.com",
+    "MCP_AUTH_ACCESS_AUD": "<your-cloudflare-access-application-aud-tag>",
+    "MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS": "900",
+    "MCP_AUTH_RATE_LIMIT_PER_MINUTE": "30",
     "BROWSER_PROVIDER": "cloudflare",
     "BROWSER_KEEPALIVE_MS": "300000",
     "SSRF_DNS_CHECK": "true",
@@ -77,12 +92,11 @@
     "VIDEO_ARTIFACT_TTL_SECONDS": "3600",
     "VIDEO_RATE_LIMIT_PER_MINUTE": "12",
     // ── Roblox OAuth 2.0 (account linking) ─────────────────────────────────
-    // Non-secret policy only. ROBLOX_CLIENT_ID / ROBLOX_CLIENT_SECRET /
-    // ROBLOX_TOKEN_KEY must be set as secrets (see docs/ROBLOX.md) and are
-    // intentionally absent here — a committed client secret is a leaked one.
+    // Non-secret policy only. Set ROBLOX_CLIENT_ID as a var and store
+    // ROBLOX_CLIENT_SECRET / ROBLOX_TOKEN_KEY as encrypted Worker secrets
+    // (see docs/ROBLOX.md); never commit secret values.
     "ROBLOX_OAUTH_SCOPES": "openid profile",
     "OAUTH_STATE_TTL_SECONDS": "600",
-    "ROBLOX_SESSION_TTL_SECONDS": "1209600",
     "ROBLOX_RATE_LIMIT_PER_MINUTE": "20",
     "ROBLOX_OPEN_CLOUD_RATE_PER_MINUTE": "10",
     // Set this to the Worker's own hostname to reject poisoned Host headers:
@@ -91,8 +105,8 @@
     // ── Jev Decision Engine (TypeSafe) ───────────────────────────────────────
     // Policy only. TYPESAFE_API_KEY must be a *secret*
     // (`wrangler secret put TYPESAFE_API_KEY`) and is intentionally absent here:
-    // a committed credential is a leaked one, and a decision engine behind an
-    // open /mcp endpoint would otherwise be a way for strangers to spend money.
+    // a committed credential is a leaked one. jev_decide additionally requires
+    // the user's short-lived decision:use DEMO OAuth scope before any paid call.
     // With no credential configured the engine is off and every workflow falls
     // back to DEMO's own deterministic rules.
     "TYPESAFE_ENABLED": "true",

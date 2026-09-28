@@ -24,8 +24,11 @@ DEMO MCP Worker  ─────────────────────
         ├── /screenshots/:id     R2-backed screenshot/frame    │
         ├── /frames/:id          alias for /screenshots/:id    │
         ├── /video-assets/:ref  expiring R2 video/audio artifact│
-        ├── /oauth/roblox/*   Roblox OAuth 2.0 + PKCE (state, callback, status, logout)
-        │        └── RobloxAuth Durable Object (encrypted tokens, single-use state)│
+        ├── /.well-known/*    public OAuth metadata (resource + authorization server)
+        ├── /oauth/{authorize,token,revoke}  ChatGPT → DEMO OAuth 2.1 + PKCE
+        │        └── MCP_AUTH Durable Object (hashed codes/tokens, consent, revocation)
+        ├── /oauth/roblox/*   separate DEMO → Roblox OAuth 2.0 + PKCE
+        │        └── RobloxAuth Durable Object (encrypted grants, single-use state)
         ├── /capabilities/jev  Jev decision-engine report (presence + policy only)
         ├── /capabilities/laya Laya decision-provider report (presence + policy only)
         ├── /                    inspector UI (demoUi asset)   │
@@ -80,9 +83,11 @@ design tokens in `src/ui/styles.ts` (no UI framework, no external requests).
 
 Design invariants (enforced by `tests/ui-shell.test.ts`):
 
-* **No login.** DEMO is no-account by design; the UI contains no sign-up, no
-  account system and no credential inputs. The only authorization flow is the
-  *optional* external Roblox OAuth, reachable from the Roblox section.
+* **Public tools need no login.** DEMO has no mandatory signup or account system;
+  initialization, discovery, resources, the inspector, and public tools stay open.
+  The Connect MCP dialog contains no credentials. Only account-specific Roblox
+  tools and paid `jev_decide` trigger per-tool DEMO OAuth; Roblox consent is a
+  separate optional approval in the Roblox section.
 * **No mocking.** Every status, count and flag is read live from same-origin
   routes (`/health`, `/platform/stats`, `/capabilities/*`, `/oauth/roblox/*`).
   Unreachable data renders an honest error state instead of fake values.
@@ -115,11 +120,18 @@ Then point ChatGPT (or any MCP client) at:
 https://<your-worker>.workers.dev/mcp
 ```
 
-`/mcp` is public: initialization, discovery and ordinary tools (including
-`demo_ping`) require no Authorization header, even if `DEMO_API_KEY` is set.
-The existing credential is checked only by private `roblox_account_*` and
-`jev_decide` tool calls; those still require `Authorization: Bearer <DEMO_API_KEY>`.
-Roblox browser OAuth is separate and unchanged.
+`/mcp` stays public: initialization, discovery, resources and public tools
+(including `demo_ping`, `roblox_user`, and `roblox_game`) work without login or an
+Authorization header. Account-specific `roblox_account_*` tools and paid
+`jev_decide` are protected individually with short-lived DEMO OAuth 2.1/PKCE
+scopes. ChatGPT should use **Mixed Authentication**: public tools are `noauth`,
+protected tools are `oauth2`. A protected grant identifies a user; it does not
+connect Roblox. Roblox requires a separate official consent flow. See
+[`docs/MCP-OAUTH.md`](docs/MCP-OAUTH.md) and [`docs/ROBLOX.md`](docs/ROBLOX.md).
+
+Live ChatGPT connector compatibility has not yet been exercised. Do not rely on
+the protected flow until you deploy the configuration and verify the first
+protected-tool challenge in your ChatGPT account.
 
 ## Browser tools (persistent sessions)
 
@@ -158,47 +170,46 @@ OAuth 2.0 + Open Cloud APIs. The whole setup and the whole sign-in flow happen i
 browser — nothing to install, and it works from an iPhone (see
 [`docs/ROBLOX.md`](docs/ROBLOX.md)).
 
-| Tool | What it does |
-| --- | --- |
-| `roblox_account_status` | Connection state, granted scopes, token expiry, where tokens are kept. Never a credential. |
-| `roblox_account_profile` | Identity from `GET /oauth/v1/userinfo`; `extended: true` adds Open Cloud `GET /cloud/v2/users/{id}` when the scope allows. |
-| `roblox_account_inventory` | Owned items via `GET /cloud/v2/users/{id}/inventory-items`, or an explicit ownership verdict for the `assetIds` you pass. |
-| `roblox_account_avatar_thumbnail` | Your own avatar image through the documented Open Cloud long-running operation. |
-| `roblox_account_capabilities` | Per-action matrix: what Roblox's OAuth/Open Cloud APIs allow here, and the reason when they do not (`not_supported` — no scraping fallback, ever). |
-| `roblox_account_unlink` | `POST /oauth/v1/token/revoke` and delete the stored tokens. |
+| Tool | DEMO OAuth scope | What it does |
+| --- | --- | --- |
+| `roblox_account_status` | `roblox:read` | Connection state for the authenticated DEMO user, granted Roblox scopes, expiry and safe storage status. Never a credential. |
+| `roblox_account_link_start` | `roblox:link` | Creates a five-minute, single-use code for the separate Roblox consent flow. |
+| `roblox_account_profile` | `roblox:read` | Identity from `GET /oauth/v1/userinfo`; `extended: true` adds Open Cloud `GET /cloud/v2/users/{id}` when the Roblox scope allows. |
+| `roblox_account_inventory` | `roblox:read` | Owned items via `GET /cloud/v2/users/{id}/inventory-items`, or an explicit ownership verdict for `assertAssetIds`. |
+| `roblox_account_avatar_thumbnail` | `roblox:read` | Your own avatar image through the documented Open Cloud long-running operation. |
+| `roblox_account_capabilities` | `roblox:read` | Per-action matrix: what Roblox's OAuth/Open Cloud APIs allow here, and the reason when they do not (`not_supported` — no scraping fallback, ever). |
+| `roblox_account_unlink` | `roblox:disconnect` | Best-effort `POST /oauth/v1/token/revoke` and delete only this user's encrypted grant. |
 
-HTTP surface (browser-friendly, JSON when asked for JSON):
+The Roblox browser routes are a separate OAuth 2.0 client, started only after
+ChatGPT has created a user-bound DEMO grant:
 
 ```text
-GET  /oauth/roblox/start      → 302 to apis.roblox.com with state + PKCE S256 challenge
-GET  /oauth/roblox/callback    → single-use state, code exchange, session cookie, HTML page
-GET  /oauth/roblox/status     → connected / configured / where tokens live (no secrets)
-POST /oauth/roblox/logout     → revoke at Roblox, clear the session
+GET  /oauth/roblox/link       → Access-authenticated one-time-code form
+POST /oauth/roblox/start      → consumes the code; redirects to Roblox with state + PKCE S256
+GET  /oauth/roblox/callback   → single-use state and server-side code exchange; no login cookie
+GET  /oauth/roblox/status    → the verified Access user's status only (no secrets)
+POST /oauth/roblox/logout    → same-site disconnect; deletes the user's grant and best-effort revokes Roblox
 ```
 
-Security properties, all asserted by `tests/roblox-oauth.test.ts` and
-`tests/roblox-account.test.ts`:
+**Connect Roblox:** first add DEMO to ChatGPT with Mixed Authentication and authorize
+`roblox:link`; call `roblox_account_link_start`, open its `linkUrl` in a browser signed
+in to the same Cloudflare Access identity, paste the returned one-time `linkCode`, then
+approve requested scopes on Roblox's official consent screen. **Disconnect Roblox:**
+call `roblox_account_unlink` (scope `roblox:disconnect`) or use the signed-in DEMO UI's
+Disconnect control. Removing the ChatGPT connector is separate and does not unlink
+Roblox. See [`docs/ROBLOX.md`](docs/ROBLOX.md) for setup and troubleshooting.
 
-* Authorization-code + **PKCE `S256`**, random `state` stored only as a SHA-256 hash,
-  single-use with a replay tombstone, expiring, and bound to the browser by an
-  `HttpOnly; SameSite=Lax` cookie scoped to `Path=/oauth/roblox`.
-* Endpoints are pinned in code, so a misconfigured variable can never leak the client
-  secret elsewhere; the secret is only ever in a POST body and never in a URL.
-* Tokens are AES-256-GCM encrypted at rest in the `ROBLOX_AUTH` Durable Object (HKDF
-  from `ROBLOX_TOKEN_KEY`). Without a key DEMO keeps the session in isolate memory and
-  says so, rather than writing plaintext to durable storage.
-* Refresh happens before expiry under a single-flight lease, and the **rotated**
-  single-use refresh token is persisted atomically; a refused refresh marks the account
-  `reauthorization_required` instead of retrying with a burned token.
-* `401` → one forced refresh + one retry; `429`/`5xx` → one bounded retry honouring
-  `Retry-After`; Open Cloud calls are self-limited below Roblox's published per-client
-  limits. Scope is verified **before** any request goes out.
-* Every tool/user id comes from the stored `sub`; no tool accepts a target `user_id`, so
-  a linked token can never be pointed at somebody else's account.
-* No `.ROBLOSECURITY`, no password form, no unofficial endpoint: unsupported actions
-  return an explicit `not_supported` result.
-* The account tools require a matching `DEMO_API_KEY` bearer on each call — an
-  anonymous caller must not read or unlink someone's linked account.
+The protected Roblox tools derive their storage key from the server-verified
+Cloudflare Access subject behind the DEMO token. They never accept a user ID,
+slot, or account selector. Roblox access/refresh/ID tokens are encrypted with
+AES-256-GCM in the `ROBLOX_AUTH` Durable Object using `ROBLOX_TOKEN_KEY`; without
+both the Durable Object and key, protected linking and account operations fail
+closed. Refresh-token rotation is persisted atomically. The Roblox client checks
+scopes before upstream calls, bounds retries, and never exposes token material.
+
+Both approvals are required: ChatGPT → DEMO OAuth grants tool permissions;
+DEMO → Roblox OAuth grants Roblox access. They are independent. No Roblox
+password, `.ROBLOSECURITY` cookie, or unofficial endpoint is accepted.
 
 ## Public video understanding
 
@@ -602,7 +613,7 @@ thresholds and the fallback matrix live in [`docs/JEV.md`](docs/JEV.md).
 
 | Tool | What it does |
 | --- | --- |
-| `jev_decide` | Run one of the **three decision templates defined in code** (`tool_route`, `result_review`, `video_intent_focus`) over bounded state and return the typed answer with its `probabilities`, the `certainty` the model reported, the `policy` band DEMO applied, and DEMO's own deterministic value alongside. Accepts an optional `provider` (`auto`/`laya`/`jev`) to steer the routing chain; the result reports `source` plus `requestedProvider`/`effectiveRoutingMode` so nothing pretends. Refuses caller-supplied instructions or option sets, and requires the existing `DEMO_API_KEY` bearer on the tool call — an open endpoint must not be able to spend your API quota. |
+| `jev_decide` | Run one of the **three decision templates defined in code** (`tool_route`, `result_review`, `video_intent_focus`) over bounded state and return the typed answer with its `probabilities`, the `certainty` the model reported, the `policy` band DEMO applied, and DEMO's deterministic value alongside. Accepts an optional `provider` (`auto`/`laya`/`jev`) to steer routing; refuses caller-supplied instructions or option sets. Requires the user's `decision:use` DEMO OAuth scope before a paid provider call; `TYPESAFE_API_KEY` remains server-side. |
 | `jev_capabilities` | Live report: configured/enabled state, model id, thresholds, limits, the templates, documented status codes, and what this is *not*. Presence-only — it never reads or echoes the credential, and it names no endpoint the operator can redirect. |
 | `laya_capabilities` | Live report for the Laya decision provider: enabled/configured state, endpoint **hostname only**, model, routing mode and chain, reliability budgets, SSRF guarantees and what this is *not*. Presence-only — the optional credential is reported as `credentialConfigured`, never a value, and the variable name stays out of runtime output (see `.env.example`). The `/laya` command adds operator status, a live `/laya check` probe and `/laya mode`. |
 | `skill_builtin_typesafe` | The bundled TypeSafe guidance note for a connected AI, same shape as `skill_builtin_caveman`. Documentation only: DEMO does not install or execute skill code. |
@@ -622,7 +633,9 @@ TYPESAFE_API_KEY   Worker secret (Cloudflare dashboard → Settings → Variable
 ```
 
 Verify from a browser: `GET /capabilities/jev` (or `/health`, which reports
-`jevDecisionEngine`, `jevApiKeyConfigured`, `jevModel`). Disable everything with
+`jevDecisionEngine`, `jevApiKeyConfigured`, `jevModel`). The capability flag indicates
+only whether the server-side provider credential exists; `jev_decide` separately requires
+the caller's `decision:use` OAuth scope. Disable everything with
 `TYPESAFE_ENABLED=false`: the code path returns DEMO's own rules with zero network calls.
 `jev_decide` is also reachable from a browser-free client only — see `docs/JEV.md` §6.
 
@@ -657,13 +670,18 @@ Bindings (`wrangler.jsonc`):
 | `BROWSER` | Browser Rendering (Browser Run) | The real browser. **Required** for any browser tool. |
 | `SCREENSHOTS` | R2 bucket (`demo-mcp-screenshots`) | Screenshot + frame storage. |
 | `BROWSER_SESSIONS` | Durable Object (`BrowserSession`) | Session/tab state across requests. |
-| `ROBLOX_AUTH` | Durable Object (`RobloxAuth`) | Encrypted Roblox tokens, single-use OAuth state, rate counters, refresh lease. Required for durable account links. |
+| `ROBLOX_AUTH` | Durable Object (`RobloxAuth`) | Encrypted Roblox grants, single-use OAuth state, rate counters, refresh lease. Required for protected Roblox operations. |
+| `MCP_AUTH` | Durable Object (`McpAuth`) | Hashed DEMO authorization codes/tokens, consent requests, link codes, revocation and rate limits. |
 
-Variables (all optional):
+Variables:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `DEMO_API_KEY` | *(unset)* | Existing bearer for private `roblox_account_*` / `jev_decide` calls only; never gates `/mcp` transport. Keep configured for private tools. |
+| `MCP_PUBLIC_ORIGIN` | `https://demo-mcp.amidevz.workers.dev` | Canonical HTTPS issuer/resource origin. Must match the public deployment origin exactly; never inferred from `Host`. |
+| `MCP_AUTH_ACCESS_TEAM_DOMAIN` | placeholder | Cloudflare Access team domain used to verify signed identity assertions. |
+| `MCP_AUTH_ACCESS_AUD` | placeholder | Audience tag for the human Cloudflare Access application. |
+| `MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS` | `900` | DEMO access-token lifetime (clamped to 5–15 minutes); no refresh token is issued. |
+| `MCP_AUTH_RATE_LIMIT_PER_MINUTE` | `30` | OAuth route and client rate budget. |
 | `DEMO_PLATFORM_ORIGIN` | `https://demo-platform.pages.dev` | CORS allowlist for Platform. |
 | `BROWSER_PROVIDER` | `cloudflare` | `cloudflare` or `node` (node = local dev only). |
 | `BROWSER_KEEPALIVE_MS` | `300000` | Session keep-alive heartbeat (10 s – 10 min). |
@@ -678,11 +696,12 @@ Variables (all optional):
 | `VIDEO_TRANSCRIPTION_MODEL` | `@cf/openai/whisper` | Workers AI model used when optional `AI` is bound. |
 | `VIDEO_VISION_MODEL` | `@cf/llava-hf/llava-1.5-7b-hf` | Optional Workers AI vision model for `video_analyze`. |
 | `TRANSCRIPTION_ENDPOINT` | *(unset)* | Optional HTTPS speech-to-text endpoint; API key stays in the Worker secret `TRANSCRIPTION_API_KEY`. |
-| `ROBLOX_CLIENT_ID` / `ROBLOX_CLIENT_SECRET` | *(unset = feature off)* | Roblox OAuth app credentials. The secret is a Worker secret and is only ever POSTed to `apis.roblox.com`. |
-| `ROBLOX_TOKEN_KEY` | *(unset = memory only)* | 32+ random bytes (base64). AES-256-GCM key for tokens at rest; rotating it invalidates stored sessions on purpose. |
-| `ROBLOX_OAUTH_SCOPES` | `openid profile` | Scopes requested at consent. `openid` is required; see `docs/ROBLOX.md` for what each extra scope unlocks. |
-| `ROBLOX_REDIRECT_URI` / `ROBLOX_ALLOWED_HOSTS` | *(derived)* | Pin the callback origin, or restrict which hosts may run the flow. |
-| `OAUTH_STATE_TTL_SECONDS` / `ROBLOX_SESSION_TTL_SECONDS` | `600` / `1209600` | State lifetime; browser-session lifetime. |
+| `ROBLOX_CLIENT_ID` | *(unset = feature off)* | Roblox OAuth app client ID; non-secret Worker variable. |
+| `ROBLOX_CLIENT_SECRET` | *(unset = feature off)* | Roblox OAuth app secret; encrypted Worker secret, POSTed only to Roblox's pinned token endpoint. |
+| `ROBLOX_TOKEN_KEY` | *(unset = protected linking unavailable)* | Random 32-byte secret used to derive the AES-256-GCM encryption key for Roblox tokens and pending PKCE verifiers. Rotating it invalidates existing grants. |
+| `ROBLOX_OAUTH_SCOPES` | `openid profile` | Scopes requested at Roblox consent. `openid` is required; see `docs/ROBLOX.md` for additional scopes. |
+| `ROBLOX_REDIRECT_URI` / `ROBLOX_ALLOWED_HOSTS` | *(derived)* | Pin the Roblox callback URI and optionally restrict accepted hosts. |
+| `OAUTH_STATE_TTL_SECONDS` | `600` | Roblox authorization-state lifetime (60–900 seconds). |
 | `ROBLOX_RATE_LIMIT_PER_MINUTE` / `ROBLOX_OPEN_CLOUD_RATE_PER_MINUTE` | `20` / `10` | Per-client cap on the OAuth routes; self-imposed budget kept below Roblox's published per-authorization limits. |
 | `TYPESAFE_ENABLED` | on when the key exists | Jev decision-engine switch. `false`/`0`/`off`/`no` short-circuits every decision path to DEMO's own rules with **no network call**. |
 | `TYPESAFE_MODEL` | `jev-latest` | The `model` id sent to the API. `jev-latest` tracks the newest stable release; pin `jev-1.13.0` if you tune thresholds against a fixed version. |
@@ -732,8 +751,13 @@ DEMO reports these limits through `browser_capabilities` and surfaces
 * **Third-party accounts** — Roblox sign-in is the official OAuth 2.0 authorization-code
   + PKCE flow; `.ROBLOSECURITY` cookies and password forms are not supported anywhere in
   the codebase. Tokens are encrypted at rest, never appear in a URL, HTML, log line, MCP
-  result or cookie, and `roblox_account_*` tools refuse unauthenticated calls, even
-  though `/mcp` transport is public.
+  result or cookie. Protected account tools require an appropriately scoped DEMO OAuth
+  token; they bind data to the server-verified Access subject, even though `/mcp` is public.
+* **DEMO OAuth** — ChatGPT → DEMO uses separate OAuth 2.1 authorization-code + PKCE,
+  validated client/redirect registration, one-time codes, hashed short-lived access grants,
+  replay prevention and revocation. Identity comes from a cryptographically verified
+  Cloudflare Access assertion at consent, never from a tool argument. Public tools stay
+  `noauth`; only account-specific Roblox tools and `jev_decide` are protected.
 * **Structured decisions** — the TypeSafe key is a Worker secret read at call time, never
   stored on a config object, never in a URL or result, and the API origin is pinned in code.
   The optional Laya credential gets the same treatment, and its configurable endpoint is
@@ -741,13 +765,15 @@ DEMO reports these limits through `browser_capabilities` and surfaces
   back still can't smuggle it into DEMO's errors or logs (pinned by tests). Both providers
   answer only from option sets DEMO enumerated in code; an out-of-set answer is rejected
   rather than mapped, and no decision can widen a limit, skip a confirmation or enable a tool.
-* **Auth separation** — `/mcp` transport is public. Existing private-tool checks
-  and Roblox OAuth remain enforced; all tools remain registered.
+* **Auth separation** — `/mcp`, discovery, resources and public tools stay available
+  without login. Per-tool DEMO OAuth protects account data and paid decisions; a DEMO
+  grant never authorizes Roblox. Roblox consent is a separate flow. All tools remain
+  registered, with public `noauth` and protected `oauth2` security schemes.
 
 ## Testing
 
 ```bash
-npm test              # 400+ offline unit/integration tests, including a wrangler build gate
+npm test              # offline unit/integration tests, including a wrangler build gate
 npm run typecheck     # tsc --noEmit (src + tests)
 DEMO_MCP_LIVE=1 CLOUDFLARE_ACCOUNT_ID=… CLOUDFLARE_API_TOKEN=… npm run test:live
 # video acceptance only:
@@ -757,16 +783,16 @@ DEMO_MCP_LIVE=1 LIVE_WORKER_URL=https://demo-mcp.<sub>.workers.dev npm run test:
 * Unit/Integration (no network): SSRF guard, redaction, challenge detection,
   page scripts (real DOM via jsdom), snapshots, TikTok payload parsing, media
   reports, frame sampling, session/tab/challenge flows, the HTTP + MCP surface
-  (tool inventory, auth, routes, graceful capability errors), and the
-  `video_ingest`/`video_inspect_pipeline` pipeline — download-to-R2, frame
-  mapping to MCP image blocks, admin gating and stage reporting
+  (tool inventory, public no-login tools, per-tool OAuth challenges, routes,
+  graceful capability errors), and the `video_ingest`/`video_inspect_pipeline`
+  pipeline — download-to-R2, frame mapping to MCP image blocks and stage reporting
   (`tests/video-ingest.test.ts`).
 * Roblox OAuth + account (no network): the full flow against a stubbed
   `apis.roblox.com` — state mismatch/expiry/replay/browser-binding, token exchange
   400/429/5xx/network failure, refresh-on-expiry with single-use rotation, forced refresh
   on 401, `Retry-After`, scope gating, revocation on logout, cookie flags, per-route rate
   limiting, Durable Object atomicity, and a console spy proving no token is ever logged
-  (`tests/roblox-oauth.test.ts`, `tests/roblox-account.test.ts`).
+  (`tests/roblox-oauth.test.ts`, `tests/roblox-routes.test.ts`, `tests/roblox-account.test.ts`).
 * Build gate: `wrangler deploy --dry-run` must succeed and must not pull any
   Node-only code into the Worker bundle.
 * Live: opt-in tests that drive the real Browser Run service; the video suite

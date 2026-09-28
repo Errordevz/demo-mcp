@@ -3,7 +3,7 @@
  *
  * Responsibilities:
  *
- *  - resolve the encrypted token material for one account slot;
+ *  - resolve the encrypted token material for one verified DEMO identity;
  *  - refresh it before it expires (Roblox access tokens live 15 minutes) and
  *    persist the rotated refresh token atomically, because theirs are single use;
  *  - serialize concurrent refreshes with a lease so a race cannot burn a token;
@@ -75,7 +75,7 @@ export class RobloxAccountClient {
     const { config } = this.deps;
     if (!config.enabled || !config.clientId) {
       throw robloxAuthError("not_configured", config.disabledReason ?? "Roblox OAuth is not configured on this Worker.", {
-        hint: "Set ROBLOX_CLIENT_ID and the ROBLOX_CLIENT_SECRET secret, then connect from /oauth/roblox/start.",
+        hint: "Set ROBLOX_CLIENT_ID and the ROBLOX_CLIENT_SECRET secret. Then call roblox_account_link_start and submit its one-time code at /oauth/roblox/link.",
         status: 503,
       });
     }
@@ -97,14 +97,14 @@ export class RobloxAccountClient {
     const { vault, config } = this.deps;
     const record = await vault.getAccount(accountKey);
     if (!record) {
-      throw robloxAuthError("unauthenticated", `No Roblox account is connected for this deployment slot (${accountKey}).`, {
-        hint: "Open /oauth/roblox/start in the same browser, or pass the account key that owns the connection.",
+      throw robloxAuthError("unauthenticated", "No Roblox account is linked to this verified DEMO identity.", {
+        hint: "Call roblox_account_link_start, then paste its one-time code into /oauth/roblox/link in a browser signed in with this same Access identity.",
         status: 401,
       });
     }
     if (record.reauthorizationRequired) {
       throw robloxAuthError("reauthorization_required", record.reauthorizationReason ?? "This Roblox authorization needs to be granted again.", {
-        hint: "Open /oauth/roblox/start and approve the consent screen.",
+        hint: "Call roblox_account_link_start and submit its one-time code at /oauth/roblox/link to approve a fresh Roblox authorization.",
         status: 401,
       });
     }
@@ -114,8 +114,8 @@ export class RobloxAccountClient {
       throw robloxAuthError("reauthorization_required", "The stored Roblox token could not be read.", {
         hint:
           vault.mode === "memory"
-            ? "Sessions are living in isolate memory because ROBLOX_TOKEN_KEY or the ROBLOX_AUTH binding is missing. Configure both, then reconnect."
-            : "ROBLOX_TOKEN_KEY was probably rotated. Reconnect from /oauth/roblox/start.",
+            ? "Protected Roblox operations require the ROBLOX_AUTH Durable Object and ROBLOX_TOKEN_KEY; configure both before reconnecting."
+            : "ROBLOX_TOKEN_KEY may have been rotated. Configure the original key or start a fresh link from ChatGPT.",
         status: 401,
       });
     }
@@ -127,7 +127,7 @@ export class RobloxAccountClient {
       if (!stored.refreshToken) {
         if (options.forceRefresh || this.now() >= stored.expiresAt) {
           throw robloxAuthError("reauthorization_required", "The Roblox access token expired and no refresh token is stored.", {
-            hint: "Reconnect from /oauth/roblox/start.",
+            hint: "Call roblox_account_link_start and submit its one-time code at /oauth/roblox/link to reconnect this Access identity.",
             status: 401,
           });
         }
@@ -212,14 +212,14 @@ export class RobloxAccountClient {
     const granted = new Set(record.scopes ?? []);
     if (required.some((scope) => !granted.has(scope))) {
       throw robloxAuthError("insufficient_scope", `This account action needs the Roblox scope ${required.join(", ")}, which this authorization does not have.`, {
-        hint: `Tick the scope on the Roblox app, then reconnect from /oauth/roblox/start so the consent screen grants it. Requested scopes on this deployment: ${record.scopes.join(", ")}.`,
+        hint: `Add the scope to the Roblox app and deployment, then call roblox_account_link_start and submit its fresh code at /oauth/roblox/link to consent and reconnect. Requested scopes on this deployment: ${record.scopes.join(", ")}.`,
         data: { required, granted: record.scopes, scopesSource: record.scopesSource },
         status: 403,
       });
     }
     if (anyOf.length > 0 && !anyOf.some((scope) => granted.has(scope))) {
       throw robloxAuthError("insufficient_scope", `This account action needs one of: ${anyOf.join(", ")}.`, {
-        hint: "Grant the scope on the Roblox app and reconnect.",
+        hint: "Grant one of the required scopes to the Roblox app, then create a fresh link code in ChatGPT and consent to it on Roblox.",
         data: { anyOf, granted: record.scopes },
         status: 403,
       });
@@ -353,7 +353,7 @@ export class RobloxAccountClient {
     const userId = session.record.userId;
     if (!userId) {
       throw robloxAuthError("insufficient_scope", "No Roblox user id is stored for this account, so the Open Cloud profile cannot be read.", {
-        hint: "Reconnect from /oauth/roblox/start with the openid scope.",
+        hint: "Enable the openid scope on the Roblox app, then use roblox_account_link_start and the /oauth/roblox/link form to consent again.",
         status: 403,
       });
     }

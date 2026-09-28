@@ -32,18 +32,18 @@ function bootFromHtml(html: string): { serverUrl: string; connect: { title: stri
 }
 
 describe("official MCP client integrations", () => {
-  it("uses the public no-login endpoint and nothing else", () => {
+  it("uses the public endpoint while declaring which client supports protected-tool OAuth", () => {
     expect(MCP_ENDPOINT).toBe("demo-mcp.amidevz.workers.dev/mcp");
     expect(MCP_SERVER_URL).toBe("https://demo-mcp.amidevz.workers.dev/mcp");
     expect(MCP_SERVER_NAME).toBe("demo");
     expect(CONNECT_RESEARCHED_ON).toBe("2026-09-25");
     expect(CONNECT_PICKER).toEqual({
       title: "Connect DEMO",
-      subtitle: "Choose where you want to connect DEMO.",
+      subtitle: "Choose a client. Public tools stay login-free; protected tools use OAuth when supported.",
     });
     for (const client of MCP_CLIENTS) {
       expect(client.transport).toBe("streamable-http");
-      expect(client.authentication).toBe("none");
+      expect(client.authentication).toBe(client.id === "chatgpt" ? "mixed" : "none");
       expect(client.documentationUrl.startsWith("https://")).toBe(true);
       expect(client.sources.length).toBeGreaterThan(0);
       expect(client.sources.every((source) => source.startsWith("https://"))).toBe(true);
@@ -112,6 +112,10 @@ describe("official MCP client integrations", () => {
     expect(chatgpt?.verification).toBe("verified");
     expect(chatgpt?.confirmTitle).toBe("Connect DEMO to ChatGPT?");
     expect(chatgpt?.confirmBody).toBe("You're about to connect DEMO as a remote MCP server in ChatGPT.");
+    expect(chatgpt?.authentication).toBe("mixed");
+    expect(chatgpt?.steps.join(" ")).toMatch(/Mixed Authentication/i);
+    expect(chatgpt?.steps.join(" ")).toMatch(/roblox_account_link_start/i);
+    expect(chatgpt?.limitations.join(" ")).toMatch(/No live ChatGPT connection was exercised/i);
     expect(chatgpt?.steps.join(" ")).toMatch(/does not document a link/i);
   });
 
@@ -151,13 +155,24 @@ describe("official MCP client integrations", () => {
     expect(mcpClientById("other")?.destinationPromptsUser).toBe(false);
   });
 
+  it("uses the pinned public origin for every dynamic client handoff and rejects paths", () => {
+    const pinned = demoUiHtml("https://request-host.invalid/", { MCP_PUBLIC_ORIGIN: "https://canonical.example" });
+    const boot = bootFromHtml(pinned);
+    expect(boot.serverUrl).toBe("https://canonical.example/mcp");
+    const cursor = boot.clients.find((client) => client.id === "cursor");
+    expect(cursor?.manualConfig).toContain("https://canonical.example/mcp");
+    const invalidConfig = demoUiHtml("https://request-host.invalid/ui", { MCP_PUBLIC_ORIGIN: "https://wrong.example/prefix" });
+    expect(bootFromHtml(invalidConfig).serverUrl).toBe("https://request-host.invalid/mcp");
+  });
+
   it("ships the same registry in the inspector, with no secrets and no invented schemes", () => {
     const html = demoUiHtml();
     const boot = bootFromHtml(html);
     expect(boot.serverUrl).toBe(MCP_SERVER_URL);
     expect(boot.connect).toEqual(CONNECT_PICKER);
     expect(boot.clients).toEqual(connectClientPayload());
-    expect(html).not.toMatch(/(ROBLOX_CLIENT_SECRET|DEMO_API_KEY|LAYA_API_KEY)\s*[:=]\s*["'][^"']{8,}/);
+    expect(html).not.toMatch(/(ROBLOX_CLIENT_SECRET|LAYA_API_KEY)\s*[:=]\s*["'][^"']{8,}/);
+    expect(html).not.toContain("DEMO_API_KEY");
     expect(html).not.toContain('href="chatgpt://');
     expect(html).not.toContain('href="claude://');
     expect(html).not.toContain('href="claude-cli://');

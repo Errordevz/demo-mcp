@@ -173,7 +173,7 @@ export function describeJevCapabilities(input: { config: JevConfig; usage?: JevC
       "The API host is pinned in code (`https://api.typesafe.ai`); no variable can redirect the credential elsewhere.",
       "Answer values are validated against the option set defined in this repository. An unexpected value is rejected and the deterministic path runs.",
       "Free text from a caller is capped and redacted before it becomes `state`; provider text is capped and redacted before it is returned.",
-      "A decision cannot authorize anything: it never bypasses DEMO's permission checks, `DEMO_API_KEY` gating, human-confirmation requirements, or the Roblox/browser safety rules, and it cannot mark a destructive action approved.",
+      "A decision cannot authorize anything: it never bypasses DEMO's per-tool `decision:use` OAuth grant, human-confirmation requirements, or the Roblox/browser safety rules, and it cannot mark a destructive action approved.",
       "Jev is not a chat model: DEMO does not use it for text generation, summarisation, extraction of arbitrary values, or as a replacement for any configured LLM, and image state is not sent (the documented model is text-in only).",
     ],
     configuration: {

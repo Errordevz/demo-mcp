@@ -1,5 +1,7 @@
 # DEMO UI Evolution 2.0 — Research & Design Brief
 
+> **Historical design brief.** The Roblox linking contract has since changed: the UI opens the Cloudflare Access-protected `/oauth/roblox/link` form, which accepts only a short-lived code minted by `roblox_account_link_start`. The current implementation and deployment instructions are in [`ROBLOX.md`](ROBLOX.md) and [`CONNECT-MCP.md`](CONNECT-MCP.md).
+
 **Date:** 2026-09-26
 **Version:** 0.9.0 base
 **Scope:** Complete premium UX overhaul, no backend rewrite
@@ -23,7 +25,7 @@
 - `#/video` — pipeline stages, platform support (lazy `/capabilities/video`), providers, guardrails, honesty contract
 - `#/research` — expanded capabilities (lazy `/capabilities/expanded`), web extraction/diff/monitor, sources, research tools
 - `#/routing` — decision routing mode, Jev/Laya config presence-only, commands, decision tools
-- `#/roblox` — optional OAuth, connect/disconnect via `location.href='/oauth/roblox/start'`, status, details
+- `#/roblox` — optional Roblox OAuth, connect/disconnect via the Access-protected `/oauth/roblox/link` code form and `/oauth/roblox/logout`, status, details
 - `#/skills` — builtin skills + skills.sh surface
 - `#/about` — project, security & privacy, routes, architecture
 - `#/notfound` — polished 404 for unknown hashes
@@ -71,7 +73,7 @@
 
 ### Constraints
 - No external fonts, no frameworks, no analytics, no cookies on JSON routes, no login, no tracking
-- Must preserve `location.href='/oauth/roblox/start'` literal and "Connect Roblox account" / "Disconnect" labels (pinned by tests)
+- Must preserve the `location.href='/oauth/roblox/link'` code-form handoff and "Connect Roblox account" / "Disconnect" labels (pinned by tests)
 - Must preserve MCP endpoint `https://demo-mcp.amidevz.workers.dev/mcp` exact (pinned)
 - Must preserve Connect dialog strings: "Connect DEMO", "Choose where you want to connect DEMO.", "No DEMO account required.", "This dialog never confirms a connection.", "Copied!"
 - Must preserve client URL builders (Claude, Cursor, VS Code, ChatGPT) exactly — no invented params

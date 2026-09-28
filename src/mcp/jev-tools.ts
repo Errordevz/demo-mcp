@@ -9,16 +9,15 @@
  *  - `jev_capabilities` — what this deployment can decide, with what model, under which
  *    limits, and what the engine is explicitly not allowed to do.
  *
- * `jev_decide` spends a paid API call, so it is gated behind `DEMO_API_KEY` the same way
- * the Roblox account tools are: an anonymously reachable `/mcp` endpoint must not be able
- * to run up someone's TypeSafe bill. `jev_capabilities` is free and stays open.
+ * `jev_decide` spends a paid API call, so it requires a short-lived, user-bound DEMO
+ * OAuth grant. `jev_capabilities` is free and remains public.
  */
 
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/server";
-import { errorResult, textResult, type ToolResult } from "./results.js";
+import { textResult, type ToolResult } from "./results.js";
 import { redactValue, safeLog } from "../core/redact.js";
-import { bearerCredentialMatches } from "../core/credential.js";
+import { requireMcpScope } from "../auth/tool-auth.js";
 import { resolveJevConfig } from "../jev/config.js";
 import { decideResultReview, decideToolRoute, resolveVideoIntentWithJev, RESULT_REVIEW_LEVELS, VIDEO_FOCUS_CRITERIA, type DecisionOutcome, type JevDecisionContext } from "../jev/decisions.js";
 import { resolveDecisionRoutingMode } from "../decisions/provider.js";
@@ -42,34 +41,6 @@ export interface JevToolContext {
 
 function jevContext(ctx: JevToolContext, mode?: DecisionRoutingMode): JevDecisionContext {
   return { env: ctx.env, ...(mode ? { mode } : {}) };
-}
-
-/**
- * Authenticate the paid tool call, not the public MCP transport. A configured
- * secret alone must not let anonymous callers spend the account owner's quota.
- * Read-only capability reporting is unaffected. The comparison is
- * constant-time-ish (`bearerCredentialMatches`).
- */
-async function guardPaidEndpoint(ctx: JevToolContext): Promise<ToolResult | null> {
-  const key = String(ctx.env.DEMO_API_KEY ?? "").trim();
-  if (key && (await bearerCredentialMatches(ctx.authorization, key))) return null;
-  if (key) return errorResult(JSON.stringify({
-    error: "unauthorized",
-    message: "jev_decide requires the configured private-tool bearer credential. Public MCP requests do not.",
-    retryable: false,
-  }));
-  return errorResult(
-    JSON.stringify(
-      {
-        error: "not_configured",
-        message: "jev_decide is disabled because DEMO_API_KEY is not set.",
-        hint: "Each decision is a paid TypeSafe API call. Set the DEMO_API_KEY secret (`wrangler secret put DEMO_API_KEY`) and reconnect your MCP client with that bearer token. jev_capabilities stays available without it.",
-        retryable: false,
-      },
-      null,
-      2,
-    ),
-  );
 }
 
 async function run(work: () => Promise<unknown>): Promise<ToolResult> {
@@ -117,7 +88,7 @@ export function registerJevTools(mcp: McpServer, ctx: JevToolContext): void {
     {
       title: "Ask Jev for a Typed Decision",
       description:
-        "Run one of DEMO's predefined typed-decision templates (TypeSafe/Jev and/or Laya, per the provider argument and DECISION_PROVIDER_MODE) over the text you supply and return the typed answer with its probabilities, confidence and how DEMO's policy treated it. Choices are limited to the options in code: this is a judgment primitive, not a chat model, and it cannot call tools or authorize anything. Returns the deterministic fallback with policy `unavailable_fallback` when no provider is configured or every provider fails.",
+        "Run one of DEMO's predefined typed-decision templates (TypeSafe/Jev and/or Laya, per the provider argument and DECISION_PROVIDER_MODE) over the text you supply and return the typed answer with its probabilities, confidence and how DEMO's policy treated it. Choices are limited to the options in code: this is a judgment primitive, not a chat model, and it cannot call tools or authorize anything. This tool can incur paid provider usage and requires the user-bound DEMO OAuth scope decision:use. Returns the deterministic fallback with policy `unavailable_fallback` when no provider is configured or every provider fails.",
       annotations: {
         title: "Ask Jev for a Typed Decision",
         readOnlyHint: true,
@@ -138,8 +109,8 @@ export function registerJevTools(mcp: McpServer, ctx: JevToolContext): void {
       },
     },
     async ({ decision, request, result, evidence, provider }) => {
-      const blocked = await guardPaidEndpoint(ctx);
-      if (blocked) return blocked;
+      const auth = await requireMcpScope(ctx, "jev_decide", "decision:use");
+      if (!auth.ok) return auth.result;
       return run(async () => {
         const jev = jevContext(ctx, provider);
         const config = resolveJevConfig(ctx.env);

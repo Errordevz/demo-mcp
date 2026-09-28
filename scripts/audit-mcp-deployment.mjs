@@ -26,22 +26,28 @@ const expected = {
   BROWSER_KEEPALIVE_MS: "300000",
   BROWSER_PROVIDER: "cloudflare",
   DEMO_PLATFORM_ORIGIN: "https://demo-platform.pages.dev",
+  MCP_PUBLIC_ORIGIN: "https://demo-mcp.amidevz.workers.dev",
+  MCP_AUTH_ACCESS_TEAM_DOMAIN: "<your-team>.cloudflareaccess.com",
+  MCP_AUTH_ACCESS_AUD: "<your-cloudflare-access-application-aud-tag>",
+  MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS: "900",
+  MCP_AUTH_RATE_LIMIT_PER_MINUTE: "30",
   OAUTH_STATE_TTL_SECONDS: "600",
   ROBLOX_OAUTH_SCOPES: "openid profile",
 };
 const report = {
   worker: "demo-mcp",
   bindingNames: bindings.map(binding => binding.name).sort(),
-  demoApiKeyConfigured: bindings.some(binding => binding.name === "DEMO_API_KEY"),
   importantVarsMatch: Object.fromEntries(Object.entries(expected).map(([name, value]) => [name, bindings.find(binding => binding.name === name)?.text === value])),
-  // Wrangler's unminified production bundle retains these route guard names.
+  // Wrangler's unminified production bundle retains these policy markers.
   // These are evidence markers, not a claim of executing the deployed code.
   codeMarkers: {
-    platformTransportGuard: /authError\s*=\s*unauthorized\(request,\s*env\)/.test(content),
-    workerTransportGuard: /if\s*\(!authorized\(request,\s*env\)\)/.test(content),
-    unauthorizedResponse: /error:\s*["']Unauthorized["']/.test(content),
     mcpTransport: content.includes("createMcpHandler"),
+    perToolOAuth: content.includes("requireMcpScope"),
+    securitySchemes: content.includes("securitySchemes"),
+    protectedResourceMetadata: content.includes("oauth-protected-resource"),
+    accessIdentityVerifier: content.includes("CF-Access-Jwt-Assertion"),
     robloxOAuthCallback: content.includes("/oauth/roblox/callback"),
+    robloxTokenEncryption: content.includes("ROBLOX_TOKEN_KEY"),
   },
   downloadedContentSha256: createHash("sha256").update(content).digest("hex"),
 };

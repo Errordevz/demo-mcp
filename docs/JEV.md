@@ -208,9 +208,10 @@ failed browser tool, or a `500` from `/mcp`.
    Expect `source: "jev"` with a `decision`, `certainty`, `policy` and `probabilities`. If
    it comes back `policy: "unavailable_fallback"`, the `note` field says why.
 
-`jev_decide` refuses to run when `DEMO_API_KEY` is unset, because each call is a paid
-request and an open `/mcp` endpoint is reachable by anyone who finds the URL. Set
-`DEMO_API_KEY` and pass it as a bearer token in your MCP client config.
+`jev_decide` requires the calling user's short-lived DEMO OAuth grant with the
+`decision:use` scope before any paid provider call. This is per-tool OAuth; it does
+not gate `/mcp`, discovery, capability reports, or public tools. Separately, the
+TypeSafe provider requires the server-side `TYPESAFE_API_KEY` Worker secret.
 
 To turn it off, set `TYPESAFE_ENABLED=false` — every workflow immediately returns to
 DEMO's own rules.
@@ -284,7 +285,7 @@ Discoverability, honestly scoped:
 * the video hook: not called when the regexes decided or there is no text, curated-hint-only
   prompt injection resistance, and `applyIntentHook` absorbing a throwing, lying or
   malformed provider;
-* the MCP surface: tool discovery, the `DEMO_API_KEY` gate on the paid tool, argument
+* the MCP surface: public capability discovery, the per-tool `decision:use` OAuth scope on the paid tool, argument
   validation before any network use, a capabilities report with no masked or leaked field,
   and `/capabilities/jev` + `/health` flags;
 * configuration: all eleven browser/video vars plus the five `TYPESAFE_*` policy vars present

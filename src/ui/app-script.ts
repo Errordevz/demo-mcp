@@ -7,13 +7,13 @@
  *
  * Live data from same-origin /health, /platform/stats, /capabilities/*,
  * /oauth/roblox/status; static facts from generated catalog. No mocking,
- * no secrets, no login.
+ * no secrets, public tools need no login; protected tools use per-tool OAuth.
  *
  * Style constraints:
  *  - embedded via String.raw, so body must not contain backticks or
  *    dollar-brace sequences;
- *  - Roblox connect control pinned to exact literal location.href='/oauth/roblox/start'
- *    and labels "Connect Roblox account" / "Disconnect" — keep those literals.
+ *  - Roblox connect control opens the Access-protected one-time-code form at
+ *    /oauth/roblox/link, and labels "Connect Roblox account" / "Disconnect".
  */
 export const APP_SCRIPT = String.raw`(function () {
 "use strict";
@@ -78,6 +78,12 @@ function jfetch(path, opts) {
     return r.text().then(function (t) {
       var j = null;
       try { j = t ? JSON.parse(t) : null; } catch (e) { j = null; }
+      if (r.ok && !j && /text\/html/i.test(r.headers.get("content-type") || "")) {
+        var accessErr = new Error("Cloudflare Access sign-in is required to view this Roblox status.");
+        accessErr.status = 401;
+        accessErr.payload = { error: "unauthenticated", message: accessErr.message };
+        throw accessErr;
+      }
       if (!r.ok) {
         var err = new Error((j && (j.message || j.error)) || "Request failed (HTTP " + r.status + ")");
         err.status = r.status;
@@ -176,7 +182,7 @@ function hv(k) { return S.health ? S.health[k] : undefined; }
 function toolAvail(key) {
   if (!S.health && !S.stats) {
     if (key === "always") return { s: "ok", l: "Available" };
-    if (key === "bearer") return { s: "warn", l: "Private · credential" };
+    if (key === "oauth") return { s: "warn", l: "Protected · OAuth" };
     return { s: "idle", l: "Checking" };
   }
   var c = caps(), sc = statCaps();
@@ -190,7 +196,7 @@ function toolAvail(key) {
     case "frames": return hv("videoFrames") ? { s: "ok", l: "Available" } : { s: "off", l: "Needs browser binding" };
     case "artifacts": return hv("videoArtifacts") ? { s: "ok", l: "Available" } : { s: "off", l: "Needs R2" };
     case "snapshots": return sc.expanded && sc.expanded.webMonitor ? { s: "ok", l: "Available" } : { s: "off", l: "Needs R2" };
-    case "bearer": return { s: "warn", l: "Private · credential" };
+    case "oauth": return { s: "warn", l: "Protected · OAuth" };
     default: return { s: "ok", l: "Available" };
   }
 }
@@ -200,6 +206,7 @@ function robloxState() {
   if (S.robloxErr) {
     var p = S.robloxErr.payload || {};
     if (p.error === "not_configured" || S.robloxErr.status === 503) return { s: "off", l: "Not configured", short: "Not configured" };
+    if (p.error === "unauthenticated" || S.robloxErr.status === 401) return { s: "warn", l: "Cloudflare Access sign-in required", short: "Sign in required" };
     return { s: "err", l: "Status unavailable", short: "Error" };
   }
   var r = S.roblox || {};
@@ -414,7 +421,7 @@ function renderFoot() {
   } else {
     bits.push('<span class="mono">' + CAT.length + ' tools</span>');
   }
-  bits.push("<span>no cookies · no tracking · no login</span>");
+  bits.push("<span>public tools · no login · no tracking</span>");
   var links = '<span class="foot-links">' +
     '<a href="#/capabilities">Capabilities</a><a href="#/status">Status</a>' +
     (proj.docsTreeUrl ? '<a href="' + esc(proj.docsTreeUrl) + '" target="_blank" rel="noreferrer noopener">Docs</a>' : "") +
@@ -541,7 +548,7 @@ function overviewStatusRows() {
 function accessPanel() {
   var proj = DATA.PROJECT || {};
   return panel("Access model", "shield",
-    '<div class="row" style="margin-bottom:12px"><span class="badge-secure">' + ic("shield") + "No account required</span></div>" +
+    '<div class="row" style="margin-bottom:12px"><span class="badge-secure">' + ic("shield") + "Public tools · no login</span></div>" +
     note("Connect DEMO directly to your MCP-compatible client. The browser, video, research and utility tools work immediately — external authorization is asked for only where a capability genuinely needs it: today that is <b>Roblox OAuth</b>, and only for Roblox-account features.") +
     '<div class="row" style="margin-top:14px">' +
       '<button class="btn btn--primary" type="button" data-act="connect-open">' + ic("plug") + "Connect MCP</button>" +
@@ -601,7 +608,7 @@ function filteredTools() {
       var a = toolAvail(t.availability).s;
       if (S.tf.avail === "ok" && a !== "ok") continue;
       if (S.tf.avail === "off" && a !== "off" && a !== "idle") continue;
-      if (S.tf.avail === "warn" && t.availability !== "bearer") continue;
+      if (S.tf.avail === "warn" && t.availability !== "oauth") continue;
     }
     if (q) {
       var hay = (t.name + " " + t.title + " " + (t.description || "") + " " + t.group).toLowerCase();
@@ -663,7 +670,7 @@ function explorerPanel() {
     var f = EXPLORER_FILTERS[i];
     chips += '<button class="chip" type="button" data-act="filter-group" data-g="' + esc(f.id) + '" aria-pressed="' + (S.tf.group === f.id ? "true" : "false") + '">' + esc(f.label) + '<span class="cnt">' + filterCount(f.id) + "</span></button>";
   }
-  var availChips = [["", "Any state"], ["ok", "Available"], ["off", "Needs setup"], ["warn", "Private"]].map(function (o) {
+  var availChips = [["", "Any state"], ["ok", "Available"], ["off", "Needs setup"], ["warn", "Protected"]].map(function (o) {
     return '<button class="chip" type="button" data-act="filter-avail" data-a="' + o[0] + '" aria-pressed="' + (S.tf.avail === o[0] ? "true" : "false") + '">' + o[1] + "</button>";
   }).join("");
 
@@ -1005,7 +1012,7 @@ function routingView() {
         secretRow("Roblox OAuth client", sc.robloxOAuth ? sc.robloxOAuth.configured : undefined, "id + secret configured server-side") +
         secretRow("Roblox token vault", sc.robloxOAuth ? sc.robloxOAuth.storage === "durable-object" : undefined, sc.robloxOAuth ? "encryption: " + sc.robloxOAuth.tokenEncryption : "") +
         "</div>" +
-        '<div class="panel-bd"><div class="hint">These rows read <b>presence booleans</b> from <code class="chip-v">/platform/stats</code>. Secret values live only as Worker secrets — they are never sent to a browser, never logged, never rendered. The private-tool bearer used by <code class="chip-v">roblox_account_*</code> and <code class="chip-v">jev_decide</code> is deliberately not reported publicly.</div></div>',
+        '<div class="panel-bd"><div class="hint">These rows read <b>presence booleans</b> from <code class="chip-v">/platform/stats</code>. Secret values live only as Worker secrets — they are never sent to a browser, never logged, never rendered. Per-tool OAuth protects <code class="chip-v">roblox_account_*</code> and <code class="chip-v">jev_decide</code>; public tools remain available without a login.</div></div>',
         { flush: false }) +
     "</div>" +
     '<div class="grid grid--2" style="margin-top:16px">' +
@@ -1031,16 +1038,17 @@ function robloxView() {
   var r = S.roblox;
   var conf = (r && r.configuration) || {};
   var acc = (r && r.account) || null;
-  var canConnect = (s.l === "Not connected" || s.l === "Authorization required" || s.l === "Insufficient scope" || s.l === "Checking");
+  var canConnect = (s.l === "Not connected" || s.l === "Authorization required" || s.l === "Insufficient scope" || s.l === "Cloudflare Access sign-in required" || s.l === "Checking");
 
   var head = '<div class="panel"><div class="panel-bd">' +
-    '<div class="eyebrow">Optional external authorization — not a DEMO login</div>' +
+    '<div class="eyebrow">Separate approvals — no DEMO signup</div>' +
     '<h1 style="font-size:22px;margin:10px 0 12px;letter-spacing:-.02em;font-weight:800;line-height:1.2">Roblox account connection</h1>' +
     '<div class="row" style="gap:10px">' + st(s.s, s.l) +
       (acc && acc.username ? '<span class="mono" style="font-size:14px;font-weight:600">@' + esc(acc.username) + "</span>" : "") +
     "</div>" +
     (s.s === "err" && S.robloxErr ? note(esc(S.robloxErr.message || "Status could not be read.")) : "") +
     (s.l === "Not configured" && S.robloxErr && S.robloxErr.payload && S.robloxErr.payload.hint ? note("<b>Setup:</b> " + esc(S.robloxErr.payload.hint)) : "") +
+    (s.l === "Cloudflare Access sign-in required" ? note("<b>Sign in required:</b> Open the link-code form and authenticate to Cloudflare Access with the same identity you use for ChatGPT.") : "") +
     (s.l === "Insufficient scope" ? note("<b>Missing scope:</b> " + esc(s.missing || "a requested scope") + " is not on the granted token. Reconnect and approve every scope — account tools report <code class=\"chip-v\">scope_required</code> until then.") : "") +
     (s.l === "Disabled" && conf.disabledReason ? note(esc(conf.disabledReason)) : "") +
     (s.l === "Not configured" && conf.enabled === false && conf.disabledReason ? note(esc(conf.disabledReason)) : "") +
@@ -1052,9 +1060,9 @@ function robloxView() {
 
   var connectNote = "";
   if (canConnect) {
-    connectNote = note("Connecting opens <b>Roblox's own consent page</b> (OAuth 2.0 + PKCE) in a top-level navigation — no login form here, no password, no cookie ever asked for. DEMO itself has no account system. Tokens stay server-side in the encrypted vault; this page only ever sees the safe status below.");
+    connectNote = note("To link Roblox, first connect in ChatGPT using <b>Mixed Authentication</b> and call <code class=\"chip-v\">roblox_account_link_start</code>. Open its <code class=\"chip-v\">linkUrl</code>, paste the one-time <code class=\"chip-v\">linkCode</code>, sign in to Cloudflare Access as the same human identity, then approve only on Roblox's official consent page. DEMO OAuth and Roblox OAuth are separate approvals. No Roblox password or cookie is requested; Roblox tokens stay encrypted server-side.");
   } else if (s.l === "Connected") {
-    connectNote = note("Linked through Roblox's official OAuth. Identity comes from Roblox's verified userinfo (<code class=\"chip-v\">sub</code> claim), so a rename never breaks the link. Public lookups (<code class=\"chip-v\">roblox_user</code>, <code class=\"chip-v\">roblox_game</code>) work without any connection — they are separate, keyless tools.");
+    connectNote = note("Linked through Roblox's official OAuth. The encrypted grant is owned by the verified Cloudflare Access identity used to link it; the stored Roblox identity comes from Roblox's verified userinfo (<code class=\"chip-v\">sub</code> claim). Public lookups (<code class=\"chip-v\">roblox_user</code>, <code class=\"chip-v\">roblox_game</code>) remain login-free.");
   }
 
   var details;
@@ -1066,7 +1074,6 @@ function robloxView() {
       rows.push(kv("User id (sub)", '<code class="chip-v">' + esc(acc.userId || "—") + "</code>"));
       rows.push(kv("Granted scopes", (acc.grantedScopes || []).map(function (x) { return '<span class="in-chip">' + esc(x) + "</span>"; }).join(" ") || "—"));
       rows.push(kv("Expiry", '<span class="mono">' + esc(fmtTs(acc.accessTokenExpiresAt)) + "</span>", acc.canRefresh ? "refresh available" : "cannot refresh"));
-      if (acc.sessionExpiresAt) rows.push(kv("Session valid until", '<span class="mono">' + esc(fmtTs(acc.sessionExpiresAt)) + "</span>"));
       if (acc.reauthorizationRequired && acc.reauthorizationReason) rows.push(kv("Re-authorization", st("warn", "Required"), esc(acc.reauthorizationReason)));
     }
     rows.push(kv("Flow", st("ok", "OAuth 2.0 + PKCE " + (conf.pkce || "S256"))));
@@ -1092,7 +1099,7 @@ function robloxView() {
   var rtools = CAT.filter(function (t) { return t.group === "Roblox"; });
   var rRows = rtools.length ? rtools.map(function (t) { return toolRow(t); }).join("") : emptyState("game", "No Roblox tools", "Roblox tools are not registered on this deployment.");
 
-  return pageHead("Roblox", "Roblox", "Optional OAuth for your own account — public lookups need nothing at all. DEMO has no account system.") +
+  return pageHead("Roblox", "Roblox", "Public lookups need no login. Account tools require DEMO OAuth, followed by separate Roblox consent through official OAuth.") +
     '<div style="height:20px"></div>' +
     '<div style="margin-bottom:16px">' + head + "</div>" + connectNote +
     '<div style="margin-top:16px">' + details + "</div>" +
@@ -1159,7 +1166,7 @@ function aboutView() {
     '<div style="margin-top:16px">' + panel("This Worker's routes", "terminal", '<div class="panel-bd--flush">' + routes + "</div>", { flush: true, right: '<span class="hint mono">same-origin</span>' }) + "</div>" +
     '<div style="margin-top:16px">' + panel("Architecture", "layers",
       '<pre class="codeblock">' + esc(DATA.ARCHITECTURE_TEXT || "") + "</pre>" +
-      note("DEMO is open source: read it, self-host it, extend it. The inspector you are using is served by the same Worker as <code class=\"chip-v\">/mcp</code> — one deployment, no separate control plane, no login.")) +
+      note("DEMO is open source: read it, self-host it, extend it. The inspector and <code class=\"chip-v\">/mcp</code> share one Worker. Public tools need no login; protected tools use per-tool OAuth.")) +
     "</div>"
   );
 }
@@ -1196,7 +1203,7 @@ function connectFooter(withUrl) {
     extra = '<code id="mcp-endpoint" class="connect-ft-url">' + esc(SERVER_URL) + "</code>" +
       '<button class="btn btn--sm" type="button" id="copy-endpoint" data-act="copy" data-copy="' + esc(SERVER_URL) + '" data-swap="Copied!">' + ic("copy", 13) + "Copy</button>";
   }
-  return '<div class="modal-ft connect-ft"><span class="connect-ft-note">' + ic("shield") + "<span>No DEMO account required. This dialog never confirms a connection.</span></span>" + extra + "</div>";
+  return '<div class="modal-ft connect-ft"><span class="connect-ft-note">' + ic("shield") + "<span>Public tools need no login. Protected tools require per-tool OAuth where supported; this dialog never confirms a connection.</span></span>" + extra + "</div>";
 }
 function endpointBlock(primary) {
   var cls = primary ? "btn btn--primary" : "btn";
@@ -1229,7 +1236,7 @@ function metaLine(c) {
   var plats = c.platforms || [];
   for (var i = 0; i < plats.length; i++) parts.push(plats[i]);
   parts.push("Streamable HTTP");
-  parts.push("No authentication");
+  parts.push(c.authentication === "mixed" ? "Mixed Authentication · per-tool OAuth" : "Public tools · no login");
   return parts.join(" · ");
 }
 function providerButton(c) {
@@ -1749,7 +1756,7 @@ document.addEventListener("click", function (ev) {
     if (!key || key === "core") { S.core = null; loadCore(true); }
     else { S.lazyErr[key] = null; S.lazy[key] = null; loadLazy(key); }
   }
-  else if (act === "roblox-connect") { location.href='/oauth/roblox/start'; }
+  else if (act === "roblox-connect") { location.href='/oauth/roblox/link'; }
   else if (act === "roblox-disconnect") {
     el.disabled = true;
     jfetch("/oauth/roblox/logout", { method: "POST" }).then(function () {

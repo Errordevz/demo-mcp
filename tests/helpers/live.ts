@@ -20,7 +20,6 @@ export const LIVE_SKIP_REASON: string | null = (() => {
 export interface LiveConfig {
   enabled: boolean;
   baseUrl: string;
-  apiKey: string | null;
   tiktokUrl: string;
   /** Stable public MP4 (small, short, no DRM, no auth) used by the direct-MP4
    * acceptance tests (video_ingest, inspect_video, video_resolve, video_fetch).
@@ -46,7 +45,6 @@ export function liveEnv(): LiveConfig {
   return {
     enabled: LIVE_SKIP_REASON === null,
     baseUrl: (remote ?? process.env.LIVE_BASE_URL ?? "http://127.0.0.1:8799").replace(/\/$/, ""),
-    apiKey: process.env.LIVE_API_KEY ?? process.env.DEMO_API_KEY ?? null,
     tiktokUrl: process.env.LIVE_TIKTOK_URL ?? "https://www.tiktok.com/@tiktok/video/7106594312292453675",
     publicVideoUrl: publicVideoOverride || DEFAULT_PUBLIC_VIDEO_URL,
     local: !remote,
@@ -177,15 +175,13 @@ export interface LiveClient {
   close(): Promise<void>;
 }
 
-export function connectLive(baseUrl?: string, apiKey?: string): LiveClient {
+export function connectLive(baseUrl?: string): LiveClient {
   const config = liveEnv();
   const origin = (baseUrl ?? config.baseUrl).replace(/\/$/, "");
-  const token = apiKey ?? config.apiKey;
   const headers: Record<string, string> = {
     "content-type": "application/json",
     accept: "application/json, text/event-stream",
   };
-  if (token) headers.authorization = `Bearer ${token}`;
   let id = 0;
 
   return {

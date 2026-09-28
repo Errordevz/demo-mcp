@@ -19,7 +19,6 @@ import { TOOL_CATALOG, TOOL_GROUPS } from "./src/ui/tool-catalog.js";
 import { UI_CSS } from "./src/ui/styles.js";
 import { APP_SCRIPT } from "./src/ui/app-script.js";
 import {
-  MCP_ENDPOINT,
   PROJECT,
   SECTIONS,
   CAPABILITY_CATEGORIES,
@@ -39,17 +38,43 @@ import { CONNECT_PICKER, MCP_SERVER_URL, connectClientPayload } from "./src/ui/m
 /** UI build stamp — safe to expose; contains no secret values. */
 const VERSION = "0.9.0";
 
+type UiEnv = { MCP_PUBLIC_ORIGIN?: string };
+
 /**
  * Boot payload. All strings are escaped for embedding inside <script>: "<"
  * becomes \u003c so nothing can ever close the tag or start markup from data.
  */
-function bootPayload(): string {
+function canonicalUiEndpoint(requestUrl?: string, env?: UiEnv): { endpoint: string; serverUrl: string } {
+  const configured = String(env?.MCP_PUBLIC_ORIGIN ?? "").trim();
+  const requestOrigin = requestUrl ? (() => { try { return new URL(requestUrl).origin; } catch { return ""; } })() : "";
+  let origin = "";
+  for (const candidate of [configured, requestOrigin]) {
+    if (!candidate) continue;
+    try {
+      const parsed = new URL(candidate);
+      const local = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1";
+      if ((parsed.protocol === "https:" || (local && parsed.protocol === "http:")) && !parsed.username && !parsed.password && !parsed.search && !parsed.hash && (!parsed.pathname || parsed.pathname === "/")) {
+        origin = parsed.origin;
+        break;
+      }
+    } catch {
+      // A bad configured origin is not reflected into this page. Use the request origin if valid.
+    }
+  }
+  if (!origin) origin = MCP_SERVER_URL.replace(/\/mcp$/, "");
+  const serverUrl = `${origin}/mcp`;
+  const host = new URL(serverUrl).host;
+  return { endpoint: `${host}/mcp`, serverUrl };
+}
+
+function bootPayload(serverUrl: string, endpoint: string): string {
   const json = JSON.stringify({
     version: VERSION,
-    endpoint: MCP_ENDPOINT,
-    serverUrl: MCP_SERVER_URL,
+    endpoint,
+    serverUrl,
     connect: CONNECT_PICKER,
-    clients: connectClientPayload(),
+    clients: connectClientPayload(serverUrl),
+
     catalog: TOOL_CATALOG,
     groups: TOOL_GROUPS,
     data: {
@@ -71,7 +96,7 @@ function bootPayload(): string {
   return json.replace(/</gu, "\\u003c");
 }
 
-function page(): string {
+function page(serverUrl: string, endpoint: string): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -80,27 +105,29 @@ function page(): string {
 <meta name="color-scheme" content="dark light">
 <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f7f7f8">
 <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0a0b0e">
-<meta name="description" content="DEMO — execution infrastructure for AI agents. Browser, video, web, Roblox, skills and decision routing over MCP. No account required.">
+<meta name="description" content="DEMO — execution infrastructure for AI agents. Public MCP tools need no login; protected Roblox and decision tools use per-tool OAuth.">
 <title>DEMO — Execution infrastructure for AI agents</title>
 <style>${UI_CSS}</style>
 </head>
 <body>
 <div id="app"><noscript><main style="max-width:640px;margin:80px auto;padding:0 20px;font-family:ui-sans-serif,system-ui,sans-serif;color:#e7ebf1;background:#0a0b0e">
 <h1 style="font-size:20px">DEMO — Execution infrastructure for AI agents</h1>
-<p style="color:#98a2b0;line-height:1.6">This page renders live deployment status with a small inline script. JavaScript is disabled, so the status view cannot load — the Worker itself needs nothing from you: the MCP endpoint at <code>/mcp</code> works without a login or account.</p>
+<p style="color:#98a2b0;line-height:1.6">This page renders live deployment status with a small inline script. JavaScript is disabled, so the status view cannot load — the Worker itself needs nothing from you: public tools at <code>/mcp</code> work without a login; protected tools use OAuth.</p>
 </main></noscript></div>
-<script>window.__DEMO_BOOT__=${bootPayload()};</script>
+<script>window.__DEMO_BOOT__=${bootPayload(serverUrl, endpoint)};</script>
 <script>${APP_SCRIPT}</script>
 </body>
 </html>`;
 }
 
-export function demoUiHtml(): string {
-  return page();
+export function demoUiHtml(requestUrl?: string, env?: UiEnv): string {
+  const { endpoint, serverUrl } = canonicalUiEndpoint(requestUrl, env);
+  return page(serverUrl, endpoint);
 }
 
-export function demoUi(): Response {
-  return new Response(page(), {
+export function demoUi(requestUrl?: string, env?: UiEnv): Response {
+  const { endpoint, serverUrl } = canonicalUiEndpoint(requestUrl, env);
+  return new Response(page(serverUrl, endpoint), {
     headers: {
       "content-type": "text/html; charset=UTF-8",
       "cache-control": "no-store",

@@ -1,5 +1,7 @@
 # MCP authorization audit and fix — 2026-09-20
 
+> **Historical snapshot.** This audit describes the pre-OAuth public `/mcp` design and the former `DEMO_API_KEY` transport gate. It is superseded by [`MCP-OAUTH.md`](MCP-OAUTH.md): current `/mcp` stays public, with per-tool DEMO OAuth for protected operations.
+
 ## Status: locally fixed and verified; production deployment blocked
 
 No production deployment succeeded in this session. No new Cloudflare deployment

@@ -12,12 +12,17 @@ import { RobloxAccountClient } from "../src/roblox/client.js";
 import { resolveRobloxConfig } from "../src/roblox/config.js";
 import { handleRobloxOAuthRoute } from "../src/roblox/routes.js";
 import { RobloxAuth } from "../src/roblox/do.js";
+import { InMemoryMcpAuthStore } from "../src/auth/oauth-store.js";
+import { robloxAccountKeyForSubjectHash } from "../src/auth/tool-auth.js";
 import { describeRobloxCapabilities } from "../src/roblox/capabilities.js";
 import worker, { DEMO_TOOL_NAMES, TOOL_COUNT } from "../index.js";
 import platform from "../platform-entry.js";
 
 const CTX = { waitUntil: (promise: Promise<unknown>) => void promise.catch(() => undefined), passThroughOnException: () => undefined } as unknown as ExecutionContext;
-const WORKER_ORIGIN = "https://demo-mcp.test.workers.dev";
+const WORKER_ORIGIN = "https://demo.test";
+const MCP_SUBJECT_A = "a".repeat(64);
+const MCP_SUBJECT_B = "b".repeat(64);
+const DEMO_TOKEN_FOR = (subjectHash: string) => `mcp-roblox-${subjectHash.slice(0, 48)}-test-token`;
 const ACCESS = "AT.access-token-value-abcdefghijklmnop";
 const REFRESH = "RT.refresh-token-value-abcdefghijklmnop";
 const IDTOKEN = "ID.id-token-value-abcdefghijklmnopqrst";
@@ -93,6 +98,7 @@ async function seedAccount(vault: AccountVault, overrides: Record<string, unknow
   });
   const record = {
     version: 1 as const,
+    principalHash: "a".repeat(64),
     accountKey: "default",
     connectedAt: Date.now() - 60_000,
     updatedAt: Date.now() - 60_000,
@@ -184,7 +190,7 @@ describe("token lifecycle", () => {
     const client = clientFor(vault, {});
     await expect(client.authorize("default")).rejects.toMatchObject({
       code: "reauthorization_required",
-      hint: expect.stringMatching(/\/oauth\/roblox\/start/),
+      hint: expect.stringMatching(/\/oauth\/roblox\/link/),
     });
   });
 
@@ -247,7 +253,7 @@ describe("token lifecycle", () => {
     const client = clientFor(vault, {});
     await expect(client.inventory("default")).rejects.toMatchObject({
       code: "insufficient_scope",
-      hint: expect.stringMatching(/Tick the scope on the Roblox app/),
+      hint: expect.stringMatching(/Add the scope to the Roblox app/),
     });
     expect(stub.calls.filter((call) => call.url.includes("/cloud/v2/"))).toHaveLength(0);
   });
@@ -432,11 +438,11 @@ describe("storage selection", () => {
 describe("Worker routing", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it("serves OAuth routes through the platform entry without disturbing the rest", async () => {
-    const env = { DEMO_PLATFORM_ORIGIN: "https://demo-platform.pages.dev", DEMO_API_KEY: "demo-key" } as never;
+  it("fails closed on private Roblox status without Access while preserving public MCP routes", async () => {
+    const env = { DEMO_PLATFORM_ORIGIN: "https://demo-platform.pages.dev" } as never;
     const status = await platform.fetch(new Request(`${WORKER_ORIGIN}/oauth/roblox/status`, { headers: { Accept: "application/json" } }), env, CTX);
-    expect(status.status).toBe(200);
-    expect(await status.json()).toMatchObject({ connected: false, configuration: { enabled: false } });
+    expect(status.status).toBe(401);
+    expect(await status.json()).toMatchObject({ error: "unauthenticated" });
 
     const health = await platform.fetch(new Request(`${WORKER_ORIGIN}/health`), env, CTX);
     expect(health.status).toBe(200);
@@ -453,15 +459,16 @@ describe("Worker routing", () => {
     expect(mcp.status).toBe(200);
   });
 
-  it("gives the inspector UI a connect control that only ever talks to this Worker", async () => {
+  it("gives the inspector UI a Connect control for the identity-bound Roblox link form", async () => {
     const env = { DEMO_PLATFORM_ORIGIN: "https://demo-platform.pages.dev" } as never;
     const response = await platform.fetch(new Request(`${WORKER_ORIGIN}/`), env, CTX);
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toMatch(/text\/html/);
     const html = await response.text();
-    // Everything the iPhone-only user needs is a tap: no terminal, no copy-paste step.
+    // The no-login dashboard opens the protected form; the user brings only the
+    // short-lived code returned by roblox_account_link_start, never Roblox credentials.
     expect(html).toContain("Roblox account");
-    expect(html).toContain('location.href=\'/oauth/roblox/start\'');
+    expect(html).toContain('location.href=\'/oauth/roblox/link\'');
     expect(html).toContain("/oauth/roblox/status");
     expect(html).toContain("/oauth/roblox/logout");
     expect(html).toContain("redirectUri"); // the page shows the URL to register at Roblox
@@ -473,7 +480,11 @@ describe("Worker routing", () => {
 
   it("refuses a cross-site fetch of an OAuth route but allows the navigation back from Roblox", async () => {
     const env = { ROBLOX_CLIENT_ID: "cid", ROBLOX_CLIENT_SECRET: SECRET } as never;
-    const handle = async (): Promise<VaultHandle> => ({ vault: (await makeVault("routing")).vault, mode: "memory", encryption: "aes-gcm-256", reason: null });
+    const handle = async (): Promise<VaultHandle> => {
+      const kv = new MemoryKv();
+      const cipher = await TokenCipher.fromSecret("routing-test-key-1234567890abcdef");
+      return { vault: new AccountVault(kv, cipher, "durable-object"), mode: "durable-object", encryption: "aes-gcm-256", reason: null };
+    };
     const crossSite = await handleRobloxOAuthRoute(
       new Request(`${WORKER_ORIGIN}/oauth/roblox/status`, { headers: { Origin: "https://evil.test", "Sec-Fetch-Mode": "cors", Accept: "application/json" } }),
       env,
@@ -485,6 +496,7 @@ describe("Worker routing", () => {
 
     const navigation = await handleRobloxOAuthRoute(new Request(`${WORKER_ORIGIN}/oauth/roblox/status`, { headers: { Origin: "https://www.roblox.com", "Sec-Fetch-Mode": "navigate", Accept: "text/html" } }), env, CTX, {
       vault: await handle(),
+      identity: async () => ({ subjectHash: MCP_SUBJECT_A, issuer: "https://demo.cloudflareaccess.com" }),
     });
     expect(navigation!.status).toBe(200);
   });
@@ -508,8 +520,9 @@ async function rpc(method: string, params: Record<string, unknown>, env: unknown
   return JSON.parse(dataLines[dataLines.length - 1].slice(5).trim());
 }
 
-async function callTool(name: string, args: Record<string, unknown>, env: unknown) {
-  const response = await rpc("tools/call", { name, arguments: args }, env, { authorization: "Bearer mcp-key" });
+async function callTool(name: string, args: Record<string, unknown>, env: unknown, subjectHash = MCP_SUBJECT_A) {
+  const token = DEMO_TOKEN_FOR(subjectHash);
+  const response = await rpc("tools/call", { name, arguments: args }, env, { authorization: `Bearer ${token}` });
   expect(response.error).toBeUndefined();
   const text = (response.result?.content ?? []).map((entry: { text?: string }) => entry.text ?? "").join("\n");
   let parsed: any = null;
@@ -521,112 +534,170 @@ async function callTool(name: string, args: Record<string, unknown>, env: unknow
   return { isError: Boolean(response.result?.isError), text, parsed };
 }
 
-/** Complete a real OAuth flow against the isolate-shared vault, then return the env. */
-async function connectAccount(scopes: string) {
-  const accountKey = `t${Math.random().toString(36).slice(2, 8)}`;
-  const env = {
+interface RobloxMcpHarness {
+  env: Record<string, any>;
+  mcpStore: InMemoryMcpAuthStore;
+  robloxDo: RobloxAuth;
+  robloxState: ReturnType<typeof fakeDoContext>;
+}
+
+async function addMcpPrincipal(harness: RobloxMcpHarness, subjectHash: string, scopes = ["roblox:read", "roblox:link", "roblox:disconnect"]): Promise<void> {
+  const token = DEMO_TOKEN_FOR(subjectHash);
+  const now = Date.now();
+  await harness.mcpStore.putAccessToken(await sha256Hex(token), {
+    version: 1,
+    clientIdHash: await sha256Hex("https://chatgpt.com/oauth/client.json"),
+    principalHash: subjectHash,
+    scopes,
+    audience: WORKER_ORIGIN,
+    issuedAt: now,
+    expiresAt: now + 15 * 60_000,
+  });
+}
+
+async function makeRobloxMcpHarness(): Promise<RobloxMcpHarness> {
+  const mcpStore = new InMemoryMcpAuthStore();
+  const robloxState = fakeDoContext();
+  const robloxDo = new RobloxAuth(robloxState.ctx, {} as never);
+  const env: Record<string, any> = {
+    MCP_PUBLIC_ORIGIN: WORKER_ORIGIN,
+    MCP_AUTH_ACCESS_TEAM_DOMAIN: "demo.cloudflareaccess.com",
+    MCP_AUTH_ACCESS_AUD: "test-access-audience",
+    MCP_AUTH: { idFromName: (name: string) => name, get: () => mcpStore },
+    ROBLOX_AUTH: { idFromName: (name: string) => name, get: () => robloxDo },
     ROBLOX_CLIENT_ID: "cid",
     ROBLOX_CLIENT_SECRET: SECRET,
-    ROBLOX_OAUTH_SCOPES: scopes,
-    ROBLOX_ACCOUNT_KEY: accountKey,
-    DEMO_API_KEY: "mcp-key",
-  } as Record<string, any>;
-  const start = (await handleRobloxOAuthRoute(new Request(`${WORKER_ORIGIN}/oauth/roblox/start?format=json`, { headers: { Accept: "application/json" } }), env, CTX))!;
-  const started = (await start.json()) as { authorizeUrl: string };
-  const stateCookie = start.headers.getSetCookie()[0].split(";")[0];
-  const state = new URL(started.authorizeUrl).searchParams.get("state");
-  const callback = (await handleRobloxOAuthRoute(new Request(`${WORKER_ORIGIN}/oauth/roblox/callback?code=authcode1234567890&state=${state}`, { headers: { Accept: "application/json", Cookie: stateCookie } }), env, CTX))!;
+    ROBLOX_TOKEN_KEY: "key-for-roblox-mcp-tests-0123456789abcdef",
+    ROBLOX_OAUTH_SCOPES: "openid profile",
+  };
+  const harness = { env, mcpStore, robloxDo, robloxState };
+  await addMcpPrincipal(harness, MCP_SUBJECT_A);
+  return harness;
+}
+
+/** Complete both DEMO's user-bound link-code handoff and Roblox's official PKCE flow. */
+async function connectAccount(scopes: string, subjectHash = MCP_SUBJECT_A, providedHarness?: RobloxMcpHarness) {
+  const harness = providedHarness ?? await makeRobloxMcpHarness();
+  await addMcpPrincipal(harness, subjectHash);
+  harness.env.ROBLOX_OAUTH_SCOPES = scopes;
+
+  const started = await callTool("roblox_account_link_start", {}, harness.env, subjectHash);
+  expect(started.isError).toBe(false);
+  const linkCode = started.parsed.linkCode as string;
+  expect(linkCode).toMatch(/^[A-Za-z0-9_-]{32,128}$/);
+  const vault = await createVault(harness.env);
+  const routeDeps = {
+    vault,
+    mcpAuthStore: harness.mcpStore,
+    identity: async () => ({ subjectHash, issuer: "https://demo.cloudflareaccess.com" }),
+  };
+  const start = (await handleRobloxOAuthRoute(new Request(`${WORKER_ORIGIN}/oauth/roblox/start`, {
+    method: "POST",
+    headers: {
+      Origin: WORKER_ORIGIN,
+      "Sec-Fetch-Site": "same-origin",
+      "Content-Type": "application/x-www-form-urlencoded",
+      Accept: "application/json",
+    },
+    body: new URLSearchParams({ link_code: linkCode }).toString(),
+  }), harness.env, CTX, routeDeps))!;
+  expect(start.status).toBe(302);
+  const authorizeUrl = new URL(start.headers.get("Location")!);
+  const state = authorizeUrl.searchParams.get("state")!;
+  const stateCookie = start.headers.getSetCookie().find((cookie) => cookie.startsWith("roblox_oauth_state="))!.split(";")[0];
+  const callback = (await handleRobloxOAuthRoute(new Request(`${WORKER_ORIGIN}/oauth/roblox/callback?code=authcode1234567890&state=${encodeURIComponent(state)}`, {
+    headers: { Accept: "application/json", Cookie: stateCookie },
+  }), harness.env, CTX, routeDeps))!;
   expect(callback.status).toBe(200);
-  return { env, accountKey, sessionCookie: callback.headers.getSetCookie().find((cookie) => cookie.startsWith("roblox_session="))!.split(";")[0] };
+  return { env: harness.env, harness, accountKey: robloxAccountKeyForSubjectHash(subjectHash), subjectHash };
 }
 
 describe("Roblox MCP account tools", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it("registers the account tools alongside the existing surface", async () => {
-    for (const name of ["roblox_account_status", "roblox_account_profile", "roblox_account_inventory", "roblox_account_avatar_thumbnail", "roblox_account_capabilities", "roblox_account_unlink"]) {
+  it("registers protected account tools beside public no-login Roblox lookups", async () => {
+    for (const name of ["roblox_account_status", "roblox_account_link_start", "roblox_account_profile", "roblox_account_inventory", "roblox_account_avatar_thumbnail", "roblox_account_capabilities", "roblox_account_unlink"]) {
       expect(DEMO_TOOL_NAMES).toContain(name);
     }
-    const response = await rpc("tools/list", {}, {});
-    const names: string[] = (response.result?.tools ?? []).map((tool: { name: string }) => tool.name);
-    expect(names.length).toBe(TOOL_COUNT);
-    for (const name of DEMO_TOOL_NAMES) expect(names).toContain(name);
-    // Public Roblox tools stay separate and unauthenticated.
-    expect(names).toContain("roblox_user");
-    expect(names).toContain("roblox_game");
+    const harness = await makeRobloxMcpHarness();
+    const response = await rpc("tools/list", {}, harness.env);
+    const tools: Array<{ name: string; securitySchemes?: unknown }> = response.result?.tools ?? [];
+    const byName = new Map(tools.map((tool) => [tool.name, tool]));
+    expect(tools).toHaveLength(TOOL_COUNT);
+    expect(byName.get("roblox_user")?.securitySchemes).toEqual([{ type: "noauth" }]);
+    expect(byName.get("roblox_game")?.securitySchemes).toEqual([{ type: "noauth" }]);
+    expect(byName.get("roblox_account_status")?.securitySchemes).toEqual([{ type: "oauth2", scopes: ["roblox:read"] }]);
+    expect(byName.get("roblox_account_link_start")?.securitySchemes).toEqual([{ type: "oauth2", scopes: ["roblox:link"] }]);
+    expect(byName.get("roblox_account_unlink")?.securitySchemes).toEqual([{ type: "oauth2", scopes: ["roblox:disconnect"] }]);
+
+    const ping = await rpc("tools/call", { name: "demo_ping", arguments: {} }, harness.env);
+    expect(ping.result.isError).not.toBe(true);
+    expect(JSON.parse(ping.result.content[0].text)).toMatchObject({ ok: true, name: "DEMO" });
   });
 
-  it("refuses account data over an unauthenticated MCP endpoint", async () => {
-    const response = await rpc("tools/call", { name: "roblox_account_status", arguments: {} }, { ROBLOX_CLIENT_ID: "cid", ROBLOX_CLIENT_SECRET: SECRET });
+  it("returns a scoped OAuth challenge for account data without a DEMO bearer", async () => {
+    const harness = await makeRobloxMcpHarness();
+    const response = await rpc("tools/call", { name: "roblox_account_status", arguments: {} }, harness.env);
     const text = response.result.content.map((entry: { text: string }) => entry.text).join("");
-    expect(text).toMatch(/DEMO_API_KEY/);
-    expect(text).toMatch(/not_configured/);
-    // Nothing about an account is disclosed on the refusal path either.
+    expect(text).toMatch(/invalid_token/);
+    expect(response.result._meta["mcp/www_authenticate"][0]).toContain('resource_metadata="https://demo.test/.well-known/oauth-protected-resource"');
     expect(text).not.toMatch(/userId|1516563360/);
   });
 
-  it("reports a connected account without any token material", async () => {
+  it("reports the authenticated user's linked account without any Roblox token material", async () => {
     stubRoblox();
-    const { env, accountKey } = await connectAccount("openid profile");
-    const result = await callTool("roblox_account_status", { account: accountKey }, env);
+    const { env } = await connectAccount("openid profile");
+    const result = await callTool("roblox_account_status", {}, env);
     expect(result.isError).toBe(false);
     expect(result.parsed).toMatchObject({ connected: true, userId: "1516563360", displayName: "exampleuser", username: "exampleuser", canRefresh: true, credentialsReturnedToClient: false });
     expect(result.parsed.grantedScopes).toEqual(["openid", "profile"]);
+    expect(result.parsed.storage).toMatchObject({ mode: "durable-object", encryption: "aes-gcm-256" });
     for (const secret of [ACCESS, REFRESH, IDTOKEN, SECRET]) expect(result.text).not.toContain(secret);
     expect(result.text).not.toMatch(/access_token|refresh_token|id_token/i);
   });
 
-  it("returns an honest not-connected shape for an unknown account slot", async () => {
+  it("does not accept tool-supplied account ids or selectors", async () => {
     stubRoblox();
-    const env = { ROBLOX_CLIENT_ID: "cid", ROBLOX_CLIENT_SECRET: SECRET, DEMO_API_KEY: "mcp-key", ROBLOX_ACCOUNT_KEY: "never-connected" } as never;
-    const result = await callTool("roblox_account_status", {}, env);
+    const { env } = await makeRobloxMcpHarness();
+    const result = await callTool("roblox_account_status", { account: "../../other-user", userId: "1516563360" }, env);
+    expect(result.isError).toBe(false);
     expect(result.parsed.connected).toBe(false);
-    expect(result.parsed.connectByOpening).toMatch(/\/oauth\/roblox\/start$/);
+    expect(result.parsed.userId).toBeUndefined();
   });
 
-  it("rejects an invalid account label instead of reflecting it", async () => {
-    stubRoblox();
-    const env = { ROBLOX_CLIENT_ID: "cid", ROBLOX_CLIENT_SECRET: SECRET, DEMO_API_KEY: "mcp-key" } as never;
-    const result = await callTool("roblox_account_status", { account: "../../etc/passwd" }, env);
-    expect(result.isError).toBe(true);
-    expect(result.text).toMatch(/account key/i);
-  });
-
-  it("reads the live profile through the server-side token", async () => {
+  it("reads the authenticated user's live profile with the server-side Roblox token", async () => {
     const stub = stubRoblox();
-    const { env, accountKey } = await connectAccount("openid profile");
-    const result = await callTool("roblox_account_profile", { account: accountKey }, env);
+    const { env } = await connectAccount("openid profile");
+    const result = await callTool("roblox_account_profile", {}, env);
     expect(result.parsed.profile).toMatchObject({ userId: "1516563360", displayName: "exampleuser", username: "exampleuser" });
-    expect(result.parsed.identityNote).toMatch(/only stable identifier/);
+    expect(result.parsed.identityNote).toMatch(/stable account id/);
     const userinfo = stub.calls.filter((call) => call.url.includes("/oauth/v1/userinfo"));
     expect(userinfo.at(-1)?.authorization).toBe(`Bearer ${ACCESS}`);
-    // The token is used, never echoed.
     expect(result.text).not.toContain(ACCESS);
   });
 
-  it("marks an ungranted scope as insufficient rather than trying a workaround", async () => {
+  it("marks a Roblox API scope as insufficient rather than trying a workaround", async () => {
     stubRoblox();
-    const { env, accountKey } = await connectAccount("openid profile");
-    const result = await callTool("roblox_account_inventory", { account: accountKey }, env);
+    const { env } = await connectAccount("openid profile");
+    const result = await callTool("roblox_account_inventory", {}, env);
     expect(result.isError).toBe(true);
     expect(result.parsed.error).toBe("insufficient_scope");
     expect(result.parsed.message).toMatch(/user\.inventory-item:read/);
-    expect(result.parsed.hint).toMatch(/never falls back|reconnect/i);
+    expect(result.parsed.hint).toMatch(/reconnect/i);
   });
 
-  it("reads inventory when the scope was actually granted", async () => {
+  it("reads inventory only after that Roblox scope was separately granted", async () => {
     const stub = stubRoblox({
       "/oauth/v1/token": [() => jsonResponse({ access_token: ACCESS, refresh_token: REFRESH, token_type: "Bearer", expires_in: 900, scope: "openid profile user.inventory-item:read" })],
       "/cloud/v2/users/1516563360/inventory-items": [
-        () =>
-          jsonResponse({
-            inventoryItems: [{ path: "users/1516563360/inventory-items/x", assetDetails: { assetId: "1028595", inventoryItemAssetType: "CLASSIC_TSHIRT", instanceId: "200105119388" } }],
-            nextPageToken: "",
-          }),
+        () => jsonResponse({
+          inventoryItems: [{ path: "users/1516563360/inventory-items/x", assetDetails: { assetId: "1028595", inventoryItemAssetType: "CLASSIC_TSHIRT", instanceId: "200105119388" } }],
+          nextPageToken: "",
+        }),
       ],
     });
-    const { env, accountKey } = await connectAccount("openid profile user.inventory-item:read");
-    const result = await callTool("roblox_account_inventory", { account: accountKey, assertAssetIds: [1028595, 9999999] }, env);
+    const { env } = await connectAccount("openid profile user.inventory-item:read");
+    const result = await callTool("roblox_account_inventory", { assertAssetIds: [1028595, 9999999] }, env);
     expect(result.isError).toBe(false);
     expect(result.parsed.itemCount).toBe(1);
     expect(result.parsed.ownership).toEqual([
@@ -636,7 +707,7 @@ describe("Roblox MCP account tools", () => {
     expect(stub.calls.some((call) => decodeURIComponent(call.url).includes("assetIds=1028595,9999999"))).toBe(true);
   });
 
-  it("answers unsupported account actions with the official limitation, not a workaround", async () => {
+  it("reports unsupported actions and confirms encrypted Durable Object storage", async () => {
     stubRoblox();
     const { env } = await connectAccount("openid profile");
     const result = await callTool("roblox_account_capabilities", {}, env);
@@ -647,8 +718,8 @@ describe("Roblox MCP account tools", () => {
     expect(notSupported.some((entry) => /Robux balance/.test(entry.action))).toBe(true);
     expect(notSupported.some((entry) => /friends/.test(entry.action))).toBe(true);
     expect(JSON.stringify(result.parsed.refusals)).toMatch(/\.ROBLOSECURITY/);
-    expect(result.parsed.storage.encryption).toBe("none"); // no ROBLOX_TOKEN_KEY in this env
-    expect(result.parsed.storage.mode).toBe("memory");
+    expect(result.parsed.storage.encryption).toBe("aes-gcm-256");
+    expect(result.parsed.storage.mode).toBe("durable-object");
   });
 
   it("describes capabilities honestly when nothing is configured", () => {
@@ -660,7 +731,6 @@ describe("Roblox MCP account tools", () => {
         unrecognizedScopes: [],
         redirectUri: `${WORKER_ORIGIN}/oauth/roblox/callback`,
         stateTtlSeconds: 600,
-        sessionTtlSeconds: 1_209_600,
         rateLimitPerMinute: 20,
         openCloudRatePerMinute: 10,
         storageMode: "durable-object",
@@ -677,29 +747,39 @@ describe("Roblox MCP account tools", () => {
     expect(report.refusals.join(" ")).toMatch(/CAPTCHA/);
   });
 
-  it("revokes and forgets on roblox_account_unlink", async () => {
+  it("isolates status and disconnect per verified DEMO subject", async () => {
     stubRoblox({ "/oauth/v1/token/revoke": [() => new Response(null, { status: 200 })] });
-    const { env, accountKey } = await connectAccount("openid profile");
-    const unlinked = await callTool("roblox_account_unlink", { account: accountKey }, env);
-    expect(unlinked.parsed).toMatchObject({ disconnected: true, revoked: true, revocationAttempted: true });
-    const after = await callTool("roblox_account_status", { account: accountKey }, env);
+    const harness = await makeRobloxMcpHarness();
+    const { env } = await connectAccount("openid profile", MCP_SUBJECT_A, harness);
+    await addMcpPrincipal(harness, MCP_SUBJECT_B);
+
+    const otherStatus = await callTool("roblox_account_status", {}, env, MCP_SUBJECT_B);
+    expect(otherStatus.parsed.connected).toBe(false);
+    expect(otherStatus.parsed.userId).toBeUndefined();
+    const otherDisconnect = await callTool("roblox_account_unlink", {}, env, MCP_SUBJECT_B);
+    expect(otherDisconnect.parsed).toMatchObject({ disconnected: false, revocationAttempted: false });
+    expect(harness.robloxState.store.has(`account:${robloxAccountKeyForSubjectHash(MCP_SUBJECT_A)}`)).toBe(true);
+
+    const ownerStatus = await callTool("roblox_account_status", {}, env, MCP_SUBJECT_A);
+    expect(ownerStatus.parsed.connected).toBe(true);
+    const ownerDisconnect = await callTool("roblox_account_unlink", {}, env, MCP_SUBJECT_A);
+    expect(ownerDisconnect.parsed).toMatchObject({ disconnected: true, revokedAtRoblox: true, revocationAttempted: true });
+    expect(harness.robloxState.store.has(`account:${robloxAccountKeyForSubjectHash(MCP_SUBJECT_A)}`)).toBe(false);
+    const after = await callTool("roblox_account_status", {}, env, MCP_SUBJECT_A);
     expect(after.parsed.connected).toBe(false);
   });
 
-  it("refreshes an expired token inside a tool call and rotates it", async () => {
+  it("refreshes an expired token during the owner's tool call and atomically rotates it", async () => {
     const stub = stubRoblox({
-      "/oauth/v1/token": [
-        () => jsonResponse({ access_token: "AT.second", refresh_token: "RT.second", token_type: "Bearer", expires_in: 900, scope: "openid profile" }),
-      ],
+      "/oauth/v1/token": [() => jsonResponse({ access_token: "AT.second", refresh_token: "RT.second", token_type: "Bearer", expires_in: 900, scope: "openid profile" })],
     });
     const { env, accountKey } = await connectAccount("openid profile");
-    // Age the stored token past expiry through the same isolate vault the tools use.
     const handle = await createVault(env);
     const record = (await handle.vault.getAccount(accountKey))!;
     const sealed = await handle.vault.sealTokens({ accessToken: ACCESS, refreshToken: REFRESH, idToken: null, scopes: ["openid", "profile"], expiresAt: Date.now() - 5_000 });
     await handle.vault.putAccount({ ...record, token: sealed, expiresAt: Date.now() - 5_000 });
 
-    const result = await callTool("roblox_account_profile", { account: accountKey }, env);
+    const result = await callTool("roblox_account_profile", {}, env);
     expect(result.isError).toBe(false);
     expect(stub.calls.some((call) => call.body?.grant_type === "refresh_token")).toBe(true);
     const refreshed = (await handle.vault.getAccount(accountKey))!;
@@ -708,7 +788,7 @@ describe("Roblox MCP account tools", () => {
     expect(result.text).not.toContain("AT.second");
   });
 
-  it("never writes a token to the console during a full flow", async () => {
+  it("never writes Roblox tokens to the console during the full dual-OAuth flow", async () => {
     stubRoblox();
     const lines: string[] = [];
     const capture = (...args: unknown[]) => lines.push(args.map(String).join(" "));
@@ -716,9 +796,9 @@ describe("Roblox MCP account tools", () => {
     vi.spyOn(console, "warn").mockImplementation(capture);
     vi.spyOn(console, "error").mockImplementation(capture);
     try {
-      const { env, accountKey } = await connectAccount("openid profile");
-      await callTool("roblox_account_profile", { account: accountKey }, env);
-      await callTool("roblox_account_unlink", { account: accountKey }, env);
+      const { env } = await connectAccount("openid profile");
+      await callTool("roblox_account_profile", {}, env);
+      await callTool("roblox_account_unlink", {}, env);
     } finally {
       vi.restoreAllMocks();
     }

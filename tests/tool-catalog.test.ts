@@ -19,7 +19,7 @@ describe("generated UI tool catalog", () => {
   });
 
   it("every tool has a title, a known group and an availability mapping", () => {
-    const knownAvailability = new Set(["browser", "youtube", "jev", "laya", "transcription", "vision", "frames", "artifacts", "snapshots", "bearer", "always"]);
+    const knownAvailability = new Set(["browser", "youtube", "jev", "laya", "transcription", "vision", "frames", "artifacts", "snapshots", "oauth", "always"]);
     for (const tool of TOOL_CATALOG) {
       expect(tool.title, tool.name).toBeTruthy();
       expect(TOOL_GROUPS, `group of ${tool.name}`).toContain(tool.group);

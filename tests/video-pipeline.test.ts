@@ -937,11 +937,11 @@ describe("video capability discovery", () => {
     // Configuration guidance names the env vars on purpose; a secret VALUE must
     // never appear. Prove it with a deployment that has one configured.
     const withSecrets = describeVideoCapabilities(
-      { SCREENSHOTS: createBucket(), TRANSCRIPTION_API_KEY: "sk-super-secret-value", DEMO_API_KEY: "demo-key-value", VIDEO_DECODER_API_KEY: "decoder-key-value" },
+      { SCREENSHOTS: createBucket(), TRANSCRIPTION_API_KEY: "sk-super-secret-value", VIDEO_DECODER_API_KEY: "decoder-key-value" },
       browserOff,
     );
     const serialized = JSON.stringify(withSecrets);
-    expect(serialized).not.toMatch(/sk-super-secret-value|demo-key-value|decoder-key-value/);
+    expect(serialized).not.toMatch(/sk-super-secret-value|decoder-key-value/);
     expect(serialized).not.toMatch(/Bearer\s+[A-Za-z0-9]/);
   });
 
@@ -1067,11 +1067,10 @@ describe("Workers AI binding (video_transcribe + vision)", () => {
   });
 
   it("exposes no secret values on /health or /capabilities/video when AI is bound", async () => {
-    const env = { SCREENSHOTS: createBucket(), SSRF_DNS_CHECK: "false", AI: { run: async () => ({}) }, TRANSCRIPTION_API_KEY: "sk-health-should-never-leak", DEMO_API_KEY: "demo-health-key" } as never;
+    const env = { SCREENSHOTS: createBucket(), SSRF_DNS_CHECK: "false", AI: { run: async () => ({}) }, TRANSCRIPTION_API_KEY: "sk-health-should-never-leak" } as never;
     const health = await worker.fetch(new Request("https://demo.test/health"), env, CTX);
     const healthText = await health.text();
     expect(healthText).not.toContain("sk-health-should-never-leak");
-    expect(healthText).not.toContain("demo-health-key");
     expect(healthText).toMatch(/videoTranscription/);
     const capability = await worker.fetch(new Request("https://demo.test/capabilities/video"), env, CTX);
     const capabilityText = await capability.text();

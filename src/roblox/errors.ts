@@ -15,9 +15,9 @@ export type RobloxAuthErrorCode =
   | "not_configured"
   /** Storage or encryption is unavailable for the requested operation. */
   | "storage_unavailable"
-  /** The caller has no session cookie. */
+  /** The request has no valid verified identity or no linked grant. */
   | "unauthenticated"
-  /** The session existed but passed its own expiry. */
+  /** Legacy browser-session error retained for stored historical records only. */
   | "session_expired"
   /** Callback carried no `state`. */
   | "state_missing"
@@ -175,7 +175,7 @@ export function fromHttpResponse(
   if (status === 401 || status === 403) {
     if (context === "refresh") {
       return new RobloxAuthError("reauthorization_required", "Roblox refused to refresh this authorization.", {
-        hint: "Open /oauth/roblox/start in Safari and approve the consent screen again. Refresh tokens are single-use, so a lost response can also mean the previous one was already consumed.",
+        hint: "Generate a fresh code with roblox_account_link_start, submit it on /oauth/roblox/link in the same Access identity, and approve again. Refresh tokens are single-use, so a lost response can mean the previous one was already consumed.",
         data: { source: context, oauthError },
       });
     }
@@ -200,14 +200,14 @@ export function fromHttpResponse(
       return new RobloxAuthError("token_exchange_failed", "Roblox refused the authorization code.", {
         hint:
           oauthError && /invalid_grant|invalid authorization code|expired|already used/i.test(oauthError)
-            ? "Authorization codes are single-use and expire after about one minute. Start the flow again and let the callback run to completion in the same browser."
+            ? "Roblox authorization codes are single-use and expire after about one minute. Generate a new DEMO link code, submit it at /oauth/roblox/link, and finish in the same browser."
             : `Roblox said: ${oauthError ?? "invalid_request"}. Check the redirect URI registered on the Roblox app against the one DEMO reports (GET /oauth/roblox/status), and confirm the client id/secret belong to the same app.`,
         data: { httpStatus: status, oauthError: oauthError ?? "invalid_request" },
       });
     }
     if (context === "refresh") {
       return new RobloxAuthError("reauthorization_required", "The refresh token is no longer valid.", {
-        hint: "Reconnect the account from /oauth/roblox/start. Refresh tokens are valid for 90 days and are consumed on first use.",
+        hint: "Call roblox_account_link_start and approve a fresh Roblox authorization through /oauth/roblox/link. Roblox refresh tokens can be consumed only once and may expire after 90 days.",
         data: { httpStatus: status, oauthError },
       });
     }

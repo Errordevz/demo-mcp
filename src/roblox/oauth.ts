@@ -159,8 +159,8 @@ async function postForm(endpoint: string, form: Record<string, string>, fetchImp
       retryable: true,
       hint:
         context === "revoke"
-          ? "DEMO cleared the local session anyway; Roblox may still hold the authorization until the refresh token expires (90 days). You can also revoke it from Roblox account settings."
-          : "Roblox's OAuth service may be unavailable. Start /oauth/roblox/start again — the authorization code is single-use, so a retry needs a fresh code.",
+          ? "DEMO deleted the local encrypted grant anyway; Roblox may still hold the authorization until its refresh token expires. You can also revoke it from Roblox account settings."
+          : "Roblox's OAuth service may be unavailable. Generate a fresh link code with roblox_account_link_start and submit it at /oauth/roblox/link; authorization codes are single-use.",
       data: { cause: error instanceof Error ? error.name : "FetchFailure" },
     });
   }
@@ -261,7 +261,7 @@ export async function exchangeAuthorizationCode(input: TokenExchangeInput): Prom
   const body = await readJsonBody<RobloxTokenResponse>(response);
   const tokens = normalizeTokenResponse(body, config.scopes);
   // Roblox issues a refresh token for this grant. If one is ever missing the caller
-  // still gets a working 15-minute session and `canRefresh: false`, so the status
+  // still gets a usable 15-minute grant and `canRefresh: false`, so the status
   // surfaces the limitation instead of a silent expiry surprise.
   return tokens;
 }
@@ -294,7 +294,7 @@ export async function refreshAuthorizationTokens(input: RefreshInput): Promise<N
     throw robloxAuthError(
       "reauthorization_required",
       "Roblox refreshed the access token but returned no replacement refresh token.",
-      { hint: "Roblox refresh tokens are single-use, so DEMO cannot keep a usable session without the new one. Reconnect from /oauth/roblox/start." },
+      { hint: "Roblox refresh tokens are single-use, so DEMO cannot keep the grant without the newly rotated token. Call roblox_account_link_start and approve a fresh link at /oauth/roblox/link." },
     );
   }
   return tokens;
@@ -308,7 +308,7 @@ export interface RevokeInput {
 }
 
 /**
- * Revoke the authorization session (documented endpoint: `POST v1/token/revoke`
+ * Revoke the OAuth grant (documented endpoint: `POST v1/token/revoke`
  * with the *refresh* token). Returns false when Roblox could not be reached; the
  * caller always clears local state regardless.
  */
@@ -329,7 +329,7 @@ export async function revokeAuthorization(input: RevokeInput): Promise<{ attempt
     // surfacing as a failure: the end state the user asked for is already true.
     return { attempted: true, revoked: false, oauthError: (await readOauthError(response)) ?? undefined };
   } catch {
-    // Revocation is best-effort: the caller has already dropped the local session,
+    // Revocation is best-effort: the caller has already deleted the local grant,
     // and failing the logout round-trip would strand the user in a broken state.
     return { attempted: true, revoked: false };
   }

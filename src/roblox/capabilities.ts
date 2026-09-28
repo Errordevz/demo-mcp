@@ -107,7 +107,6 @@ export interface RobloxCapabilityReport {
     encryption: "aes-gcm-256" | "none";
     note: string | null;
     stateTtlSeconds: number;
-    sessionTtlSeconds: number;
   };
   flow: {
     grantType: "authorization_code";
@@ -132,7 +131,6 @@ export interface BuildReportInput {
     unrecognizedScopes: string[];
     redirectUri: string;
     stateTtlSeconds: number;
-    sessionTtlSeconds: number;
     rateLimitPerMinute: number;
     openCloudRatePerMinute: number;
     storageMode: "durable-object" | "memory";
@@ -167,14 +165,14 @@ export function describeRobloxCapabilities(input: BuildReportInput): RobloxCapab
     disabledReason: input.config.disabledReason,
     separation: {
       publicTools: {
-        names: ["roblox_user", "roblox_game", "roblox_oauth_status", "roblox_oauth_capabilities"],
+        names: ["roblox_user", "roblox_game"],
         authenticated: false,
         note: "Public Roblox lookups send no credentials of any kind and never touch a stored token. `roblox_user` is a username lookup against Roblox's public users API.",
       },
       accountTools: {
-        names: ["roblox_account_status", "roblox_account_profile", "roblox_account_inventory", "roblox_account_thumbnail", "roblox_account_unlink"],
+        names: ["roblox_account_status", "roblox_account_link_start", "roblox_account_profile", "roblox_account_inventory", "roblox_account_avatar_thumbnail", "roblox_account_capabilities", "roblox_account_unlink"],
         authenticated: true,
-        note: "Account tools resolve a server-side token for one named account slot and return public claims only. They require DEMO_API_KEY to be set on the Worker so the /mcp surface cannot be read by a stranger.",
+        note: "Each account tool requires a short-lived, user-bound DEMO OAuth grant with a per-tool scope. The verified Access subject selects exactly one encrypted Roblox grant; no account selector or user id is accepted. Public tools and routes remain available without login."
       },
     },
     endpoints: {
@@ -195,12 +193,11 @@ export function describeRobloxCapabilities(input: BuildReportInput): RobloxCapab
       encryption: input.config.encryption,
       note: input.config.encryptionReason,
       stateTtlSeconds: input.config.stateTtlSeconds,
-      sessionTtlSeconds: input.config.sessionTtlSeconds,
     },
     flow: {
       grantType: "authorization_code",
       pkce: "S256",
-      stateValidation: "cryptographic state, hashed at rest, single-use, expiring, browser-bound via HttpOnly cookie",
+      stateValidation: "cryptographic state, hashed at rest, single-use, expiring, browser-bound; pending grant includes the verified DEMO principal hash",
       secretsInUrls: false,
       passwordOrCookieFlow: false,
       accessTokenLifetimeSeconds: 900,

@@ -169,12 +169,20 @@ describe("worker routes", () => {
   });
 
   it("serves telemetry without secrets", async () => {
-    const response = await platform.fetch(new Request("https://demo.test/platform/stats"), ENV as never, CTX);
+    const sentinels = ["typesafe-secret-sentinel", "laya-secret-sentinel", "roblox-secret-sentinel"];
+    const telemetryEnv = {
+      TYPESAFE_API_KEY: sentinels[0],
+      LAYA_API_KEY: sentinels[1],
+      ROBLOX_CLIENT_SECRET: sentinels[2],
+    };
+    const response = await platform.fetch(new Request("https://demo.test/platform/stats"), telemetryEnv as never, CTX);
     const body = (await response.json()) as Record<string, any>;
+    const serialized = JSON.stringify(body);
     expect(body.telemetry.containsSecrets).toBe(false);
     expect(body.capabilities).toHaveProperty("browserSessions");
     expect(body.endpoints.mcp).toBe("/mcp");
-    expect(JSON.stringify(body)).not.toMatch(/api[_-]?key|authorization|bearer/i);
+    for (const sentinel of sentinels) expect(serialized).not.toContain(sentinel);
+    expect(serialized).not.toMatch(/\"(?:authorization|access_token|refresh_token|client_secret|api_key)\"\s*:/i);
   });
 
   it("offers an obvious Connect Roblox entry point in the UI and the server instructions", async () => {
@@ -183,12 +191,12 @@ describe("worker routes", () => {
     const html = await root.text();
     // The affordance a human looks for, wired to the real route.
     expect(html).toContain("Connect Roblox account");
-    expect(html).toMatch(/location\.href='\/oauth\/roblox\/start'/);
+    expect(html).toMatch(/location\.href='\/oauth\/roblox\/link'/);
     expect(html).toContain("/oauth/roblox/status");
     expect(html).toContain("/oauth/roblox/logout"); // disconnect/revoke is reachable too
     expect(html).toContain("Disconnect");
-    // And nothing that could impersonate Roblox: no form, no credential field, no
-    // tokens in the page — the connect step is a plain navigation to Roblox.
+    // The static dashboard does not collect credentials or tokens; the link route
+    // separately asks only for the short-lived code returned by the protected MCP tool.
     expect(html).not.toMatch(/<form/i);
     expect(html).not.toMatch(/type=["']?password/i);
     expect(html).not.toMatch(/autocomplete=["']?(current-)?password/i);
@@ -196,9 +204,11 @@ describe("worker routes", () => {
 
     const init = await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test-client", version: "1" } });
     const instructions = String(init.result?.instructions ?? "");
-    expect(instructions).toMatch(/Connect Roblox/i);
-    expect(instructions).toMatch(/\/oauth\/roblox\/start/);
-    expect(instructions).toMatch(/https:\/\/apis\.roblox\.com\/oauth\/v1\/authorize/);
+    expect(instructions).toMatch(/ROBLOX ACCOUNT/i);
+    expect(instructions).toMatch(/roblox_account_link_start/);
+    expect(instructions).toMatch(/linkCode/);
+    expect(instructions).toMatch(/same Cloudflare Access identity/i);
+    expect(instructions).toMatch(/official consent page/i);
     expect(instructions).toMatch(/never build or link a Roblox login form/i);
     expect(instructions).toMatch(/not_supported/i);
   });

@@ -2,14 +2,10 @@
 //
 // Cloudflare's documented Worker download endpoint is
 //   GET /accounts/{account_id}/workers/scripts/{name}
-// while `/content` is not a valid route and returns HTTP 405, which previously
-// broke the "Deploy + live video tests" workflow before deployment.
-//
-// The test runs the real script in a child process against a local mock of the
-// Cloudflare API (fetch is redirected by tests/helpers/audit-fetch-redirect.mjs,
-// so no real network is used) and asserts which endpoints were requested.
-// Secrets used here are fixtures; the assertions also verify the script never
-// prints the token or the downloaded bundle source.
+// while `/content` is not a valid route and returns HTTP 405. The test runs the
+// real audit script against a local mock of the Cloudflare API and asserts the
+// current MCP OAuth/Access/Roblox-encryption checks without printing secrets or
+// downloaded source.
 import { expect, it } from "vitest";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -25,10 +21,13 @@ const scriptBase = `/client/v4/accounts/${accountId}/workers/scripts/demo-mcp`;
 const fakeToken = "fake-cloudflare-token-never-a-real-secret";
 // Tiny fixture standing in for the deployed bundle; not the real Worker source.
 const workerBundleFixture = [
-  `const authError = unauthorized(request, env);`,
-  `if (!authorized(request, env)) { throw new Error("error: Unauthorized"); }`,
-  `createMcpHandler(server); // /oauth/roblox/callback`,
-  ``,
+  `createMcpHandler(server);`,
+  `function requireMcpScope() { return "decision:use"; }`,
+  `securitySchemes`,
+  `oauth-protected-resource`,
+  `CF-Access-Jwt-Assertion`,
+  `/oauth/roblox/callback`,
+  `ROBLOX_TOKEN_KEY`,
 ].join("\n");
 
 function respond(req: IncomingMessage, res: ServerResponse) {
@@ -38,10 +37,18 @@ function respond(req: IncomingMessage, res: ServerResponse) {
       success: true,
       result: {
         bindings: [
-          { type: "secret_text", name: "DEMO_API_KEY" },
+          { type: "durable_object_namespace", name: "MCP_AUTH" },
+          { type: "durable_object_namespace", name: "ROBLOX_AUTH" },
+          { type: "secret_text", name: "ROBLOX_CLIENT_SECRET" },
+          { type: "secret_text", name: "ROBLOX_TOKEN_KEY" },
           { type: "plain_text", name: "BROWSER_KEEPALIVE_MS", text: "300000" },
           { type: "plain_text", name: "BROWSER_PROVIDER", text: "cloudflare" },
           { type: "plain_text", name: "DEMO_PLATFORM_ORIGIN", text: "https://demo-platform.pages.dev" },
+          { type: "plain_text", name: "MCP_PUBLIC_ORIGIN", text: "https://demo-mcp.amidevz.workers.dev" },
+          { type: "plain_text", name: "MCP_AUTH_ACCESS_TEAM_DOMAIN", text: "<your-team>.cloudflareaccess.com" },
+          { type: "plain_text", name: "MCP_AUTH_ACCESS_AUD", text: "<your-cloudflare-access-application-aud-tag>" },
+          { type: "plain_text", name: "MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS", text: "900" },
+          { type: "plain_text", name: "MCP_AUTH_RATE_LIMIT_PER_MINUTE", text: "30" },
           { type: "plain_text", name: "OAUTH_STATE_TTL_SECONDS", text: "600" },
           { type: "plain_text", name: "ROBLOX_OAUTH_SCOPES", text: "openid profile" },
         ],
@@ -59,7 +66,7 @@ function respond(req: IncomingMessage, res: ServerResponse) {
   res.end(JSON.stringify({ success: false, errors: [{ code: 10000, message: "Method not allowed" }] }));
 }
 
-it("audit downloads the deployed Worker from the documented script endpoint", async () => {
+it("audits the deployed Worker from the documented script endpoint without revealing credentials or code", async () => {
   const requests: Array<{ method: string; url: string }> = [];
   const server = createServer((req, res) => {
     requests.push({ method: req.method ?? "GET", url: req.url ?? "/" });
@@ -70,13 +77,11 @@ it("audit downloads the deployed Worker from the documented script endpoint", as
   if (!address || typeof address === "string") throw new Error("mock server did not report a port");
   try {
     const childEnv = { ...process.env };
-    delete childEnv.GITHUB_ACTIONS; // keep the child's stdout to the plain JSON report
+    delete childEnv.GITHUB_ACTIONS;
     childEnv.AUDIT_MOCK_ORIGIN = `http://127.0.0.1:${address.port}`;
     childEnv.CLOUDFLARE_ACCOUNT_ID = accountId;
     childEnv.CLOUDFLARE_API_TOKEN = fakeToken;
 
-    // Async spawn (not spawnSync): the mock server lives in this process, and a
-    // synchronous wait would block the event loop it needs to answer requests.
     const child = spawn(
       process.execPath,
       ["--import", pathToFileURL(hookPath).href, scriptPath],
@@ -94,33 +99,40 @@ it("audit downloads the deployed Worker from the documented script endpoint", as
     };
     if (signal) throw new Error(`audit script was killed by ${signal}`);
 
-    // The child's own error/success handling is the behavior under test; a
-    // failure surfaces here with its assertion message on stderr.
     expect(result.stderr, `audit script failed: ${result.stderr}`).toBe("");
     expect(result.status, `audit script exited nonzero: ${result.stderr}`).toBe(0);
-
-    // Exactly two read-only requests, settings first, then the script download
-    // on the documented endpoint — and never the 405-prone `/content` route.
     expect(requests.map(request => `${request.method} ${request.url}`)).toEqual([
       `GET ${scriptBase}/settings`,
       `GET ${scriptBase}`,
     ]);
 
-    // The settings-derived checks still ran and matched the fixture bindings.
     const report = JSON.parse(result.stdout);
     expect(report.importantVarsMatch).toEqual({
       BROWSER_KEEPALIVE_MS: true,
       BROWSER_PROVIDER: true,
       DEMO_PLATFORM_ORIGIN: true,
+      MCP_PUBLIC_ORIGIN: true,
+      MCP_AUTH_ACCESS_TEAM_DOMAIN: true,
+      MCP_AUTH_ACCESS_AUD: true,
+      MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS: true,
+      MCP_AUTH_RATE_LIMIT_PER_MINUTE: true,
       OAUTH_STATE_TTL_SECONDS: true,
       ROBLOX_OAUTH_SCOPES: true,
     });
-    expect(report.demoApiKeyConfigured).toBe(true);
-    expect(report.bindingNames).toContain("DEMO_API_KEY");
-
-    // The report is metadata only: no token, no bundle source.
+    expect(report.bindingNames).toContain("MCP_AUTH");
+    expect(report.bindingNames).toContain("ROBLOX_AUTH");
+    expect(report.bindingNames).toContain("ROBLOX_TOKEN_KEY");
+    expect(report.codeMarkers).toEqual({
+      mcpTransport: true,
+      perToolOAuth: true,
+      securitySchemes: true,
+      protectedResourceMetadata: true,
+      accessIdentityVerifier: true,
+      robloxOAuthCallback: true,
+      robloxTokenEncryption: true,
+    });
     expect(result.stdout).not.toContain(fakeToken);
-    expect(result.stdout).not.toContain("unauthorized(request, env)");
+    expect(result.stdout).not.toContain("requireMcpScope");
     expect(typeof report.downloadedContentSha256).toBe("string");
   } finally {
     await new Promise<void>((resolve, reject) => server.close(error => (error ? reject(error) : resolve())));
