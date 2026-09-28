@@ -46,7 +46,9 @@ var S = {
   session: null, sessionLoaded: false,
   authMode: "signin", authErr: "", authBusy: false, authMsg: "",
   resetToken: "", deleteArmed: false, verifyBusy: false, verifyMsg: "", verifyErr: "",
-  pwBusy: false, pwMsg: "", pwErr: "", sessions: null, sessionsErr: ""
+  pwBusy: false, pwMsg: "", pwErr: "", sessions: null, sessionsErr: "",
+  verifyToken: "", verifyBusyLink: false, verifyDone: false,
+  pwShow: {}, nameBusy: false, nameMsg: "", nameErr: "", nameValue: "", nameLoaded: false
 };
 
 var LAZY_ROUTES = {
@@ -487,7 +489,7 @@ function renderView() {
     overview: overviewView, capabilities: capabilitiesView, tools: toolsView, status: statusView,
     browser: browserView, video: videoView, research: researchView, routing: routingView,
     roblox: robloxView, skills: skillsView, about: aboutView,
-    auth: authView, account: accountView, reset: resetView, notfound: notfoundView
+    auth: authView, account: accountView, reset: resetView, verify: verifyLinkView, notfound: notfoundView
   };
   var fn = views[S.route] || notfoundView;
   var view = qs("#view");
@@ -1215,6 +1217,29 @@ function formField(id, label, type, extra) {
   return '<div class="form-field"><label for="' + id + '">' + esc(label) + '</label>' +
     '<input id="' + id + '" name="' + id + '" type="' + type + '" ' + (extra || "") + "></div>";
 }
+
+/**
+ * Password input with a visibility toggle. The input keeps type="password" (so
+ * password managers and autofill behave), and the toggle only flips the type and
+ * its own aria state — it never touches the value.
+ */
+function passwordField(id, label, autocomplete, required) {
+  var shown = !!S.pwShow[id];
+  return '<div class="form-field"><label for="' + id + '">' + esc(label) + '</label>' +
+    '<span class="pw-wrap">' +
+    '<input id="' + id + '" name="' + id + '" type="' + (shown ? "text" : "password") + '"' +
+    ' autocomplete="' + esc(autocomplete) + '" minlength="10" maxlength="128"' + (required === false ? "" : " required") + ">" +
+    '<button class="pw-toggle" type="button" data-act="pw-toggle" data-field="' + id + '"' +
+    ' aria-pressed="' + (shown ? "true" : "false") + '" aria-label="' + (shown ? "Hide" : "Show") + ' ' + esc(label) + '">' +
+    (shown ? "Hide" : "Show") + "</button></span></div>";
+}
+
+/** Advisory-only strength hint; the server policy is authoritative. */
+function passwordMeter(id) {
+  return '<div class="pw-meter" data-meter="' + id + '" aria-live="polite">' +
+    '<div class="pw-meter-bar" aria-hidden="true"><span></span><span></span><span></span><span></span></div>' +
+    '<span class="pw-meter-text">Use 10+ characters with letters and numbers.</span></div>';
+}
 function authAlert() {
   return (S.authErr ? '<p class="form-error" role="alert">' + esc(S.authErr) + "</p>" : "") +
     (S.authMsg ? '<p class="form-success" role="status">' + esc(S.authMsg) + "</p>" : "");
@@ -1242,10 +1267,13 @@ function authView() {
   var bodyHtml = "";
   if (S.authMode === "signin" || S.authMode === "register") {
     var isReg = S.authMode === "register";
-    bodyHtml = '<div class="auth-body">' + authAlert() +
+    bodyHtml = '<div class="auth-body">' + authAlert() + emailDeliveryNotice() +
       '<form data-form="' + S.authMode + '" novalidate>' +
-      formField("auth-email", "Email", "email", 'autocomplete="email" required') +
-      formField("auth-password", "Password", "password", 'autocomplete="' + (isReg ? "new-password" : "current-password") + '" required') +
+      formField("auth-email", "Email", "email", 'autocomplete="email" required maxlength="254"') +
+      (isReg ? formField("auth-name", "Display name (optional)", "text", 'autocomplete="nickname" minlength="3" maxlength="32"') : "") +
+      passwordField("auth-password", "Password", isReg ? "new-password" : "current-password") +
+      (isReg ? passwordField("auth-password2", "Confirm password", "new-password") : "") +
+      (isReg ? passwordMeter("auth-password") : "") +
       (isReg ? '<ul class="password-rules"><li>10–128 characters</li><li>Use letters and numbers</li><li>Not a commonly breached password</li></ul>' : "") +
       '<div class="form-actions"><button class="btn btn--primary" type="submit" ' + (S.authBusy ? "disabled aria-busy=\"true\"" : "") + ">" +
         (S.authBusy ? '<span class="spin" aria-hidden="true"></span> ' : "") + esc(isReg ? "Create account" : "Sign in") + "</button></div>" +
@@ -1255,9 +1283,9 @@ function authView() {
         : '<button type="button" data-act="auth-tab" data-tab="forgot">Forgot your password?</button>') +
       "</div></div>";
   } else {
-    bodyHtml = '<div class="auth-body">' + authAlert() +
+    bodyHtml = '<div class="auth-body">' + authAlert() + emailDeliveryNotice() +
       '<form data-form="forgot" novalidate>' +
-      formField("auth-email", "Email", "email", 'autocomplete="email" required') +
+      formField("auth-email", "Email", "email", 'autocomplete="email" required maxlength="254"') +
       '<p class="form-hint">If an account exists for this address we email a reset link. The link works once and expires within the hour.</p>' +
       '<div class="form-actions"><button class="btn btn--primary" type="submit" ' + (S.authBusy ? "disabled" : "") + ">" +
         (S.authBusy ? '<span class="spin" aria-hidden="true"></span> ' : "") + "Send reset link</button></div>" +
@@ -1265,6 +1293,45 @@ function authView() {
       '<div class="auth-alt"><button type="button" data-act="auth-tab" data-tab="signin">Back to sign in</button></div></div>';
   }
   return head + '<div style="height:20px"></div><div class="auth-wrap"><div class="auth-card">' + tabs + bodyHtml + "</div></div>";
+}
+
+/**
+ * Tell the truth about email delivery before the visitor types anything.
+ * Without this a visitor registers, is promised a verification email, and waits
+ * forever — the exact dead end this UI used to create.
+ */
+function emailDeliveryNotice() {
+  if (!S.sessionLoaded || !S.session) return "";
+  var d = S.session.emailDelivery;
+  if (!d || d.configured) return "";
+  var reason = d.reason || "Email delivery is not configured on this deployment.";
+  return '<p class="form-error" id="email-delivery-notice" role="status">' + ic("alert") + " " + esc(reason) +
+    " You can still create an account and sign in; verification and password reset become available once the operator configures the sender.</p>";
+}
+
+/** Landing view for the one-click verification link (/#/verify?token=…). */
+function verifyLinkView() {
+  var head = pageHead("Account", "Verify your email", "One click confirms the address your DEMO account was registered with.");
+  if (!S.verifyToken) {
+    return head + '<div style="height:20px"></div><div class="auth-wrap"><div class="auth-card"><div class="auth-body">' +
+      '<p class="form-error">This verification link is missing its token. Sign in and request a new email from your account page.</p>' +
+      '<div class="form-actions"><a class="btn btn--primary" href="#/auth">Go to sign in</a></div>' +
+      "</div></div></div>";
+  }
+  var body;
+  if (S.verifyBusyLink) {
+    body = '<div class="verify-state"><p>Checking your verification link…</p></div>';
+  } else if (S.verifyDone) {
+    body = '<div class="verify-state verify-state--ok"><span class="verify-state__icon">' + ic("check") + "</span>" +
+      "<h2>Email verified</h2><p>" + esc(S.verifyMsg || "Your email address is confirmed.") + "</p>" +
+      '<a class="btn btn--primary" href="' + (signedIn() ? "#/account" : "#/auth") + '">' +
+      (signedIn() ? "Open your account" : "Sign in") + "</a></div>";
+  } else {
+    body = '<div class="verify-state verify-state--err"><span class="verify-state__icon">' + ic("alert") + "</span>" +
+      "<h2>This link did not work</h2><p>" + esc(S.verifyErr || "The link was already used or has expired.") + "</p>" +
+      '<a class="btn btn--primary" href="#/auth">Sign in and request a new email</a></div>';
+  }
+  return head + '<div style="height:20px"></div><div class="auth-wrap"><div class="auth-card"><div class="auth-body">' + body + "</div></div></div>";
 }
 
 function resetView() {
@@ -1276,15 +1343,16 @@ function resetView() {
   }
   return head + '<div style="height:20px"></div><div class="auth-wrap"><div class="auth-card"><div class="auth-body">' + authAlert() +
     '<form data-form="reset" novalidate>' +
-    formField("auth-password", "New password", "password", 'autocomplete="new-password" required') +
-    '<ul class="password-rules"><li>10–128 characters</li><li>Use letters and numbers</li></ul>' +
+    passwordField("auth-password", "New password", "new-password") +
+    passwordField("auth-password2", "Confirm new password", "new-password") +
+    '<ul class="password-rules"><li>10–128 characters, letters and numbers</li><li>Every existing session is signed out</li></ul>' +
     '<div class="form-actions"><button class="btn btn--primary" type="submit" ' + (S.authBusy ? "disabled" : "") + ">" +
       (S.authBusy ? '<span class="spin" aria-hidden="true"></span> ' : "") + "Set new password</button></div>" +
     "</form></div></div></div>";
 }
 
 function verifyPanel() {
-  var bodyHtml = '<p class="note" id="verify-hint">The 8-character code arrived by email at registration. Request a new one any time — the newest code replaces older ones.</p>' +
+  var bodyHtml = '<p class="note" id="verify-hint">The verification email carries a one-click link and an 8-character code. Requesting a new one replaces both — only the newest works.</p>' +
     (S.verifyErr ? '<p class="form-error" role="alert">' + esc(S.verifyErr) + "</p>" : "") +
     (S.verifyMsg ? '<p class="form-success" role="status">' + esc(S.verifyMsg) + "</p>" : "") +
     '<form data-form="verify-code" novalidate><div class="form-field"><label for="auth-code">Verification code</label>' +
@@ -1297,25 +1365,51 @@ function verifyPanel() {
 
 function profilePanel() {
   var a = S.session && S.session.account ? S.session.account : {};
-  var initials = String(a.email || "?").trim().charAt(0).toUpperCase();
+  var label = a.displayName || a.email || "?";
+  var initials = String(label).trim().charAt(0).toUpperCase();
+  var delivery = (S.session && S.session.emailDelivery) || null;
+  var verified = !!a.emailVerified;
+  // The session's absolute expiry is session.expiresAt; the account object has no
+  // such field, so reading it here used to render an endless dash.
+  var expiresAt = S.session && S.session.session ? S.session.session.expiresAt : null;
   var rows = [
     kv("Email", '<code class="chip-v">' + esc(a.email || "—") + "</code>"),
-    kv("Verification", a.emailVerified ? st("ok", "Verified") : st("warn", "Not verified"), (S.session && S.session.emailDelivery) ? "codes arrive by email" : "email delivery is not configured — an operator shares the code"),
+    kv("Display name", a.displayName ? esc(a.displayName) : '<span class="faint">not set</span>',
+      "Shown on your account. Letters, numbers, spaces and . _ -"),
+    kv("Verification", verified ? st("ok", "Verified") : st("warn", "Not verified"),
+      verified
+        ? "verification-gated features are unlocked"
+        : (delivery && delivery.configured
+            ? "check your inbox, or request a new email below"
+            : (delivery && delivery.reason) || "email delivery is not configured on this deployment")),
     kv("Account created", '<span class="mono">' + esc(fmtTs(a.createdAt)) + "</span>"),
-    kv("Session expires", '<span class="mono">' + esc(fmtTs(a.sessionExpiresAt)) + "</span>", "absolute expiry — sign in again afterwards")
+    kv("Session expires", expiresAt ? '<span class="mono">' + esc(fmtTs(expiresAt)) + "</span>" : '<span class="faint">—</span>',
+      "absolute expiry — sign in again afterwards")
   ].join("");
+  var nameForm = S.nameLoaded
+    ? '<form data-form="display-name" novalidate><div class="form-field"><label for="name-input">Display name</label>' +
+      '<input id="name-input" name="name-input" type="text" minlength="3" maxlength="32" autocomplete="nickname" value="' + esc(S.nameValue || a.displayName || "") + '" required>' +
+      '<span class="form-hint">3—32 characters. Leave empty to clear it.</span></div>' +
+      (S.nameErr ? '<p class="form-error" role="alert">' + esc(S.nameErr) + "</p>" : "") +
+      '<div class="form-actions"><button class="btn btn--primary" type="submit" ' + (S.nameBusy ? "disabled" : "") + ">Save display name</button>" +
+      '<button class="btn" type="button" data-act="name-form-close">Cancel</button></div></form>'
+    : (S.nameMsg ? '<p class="form-success" role="status">' + esc(S.nameMsg) + "</p>" : "") +
+      '<div class="row" style="margin-top:12px"><button class="btn btn--sm" type="button" data-act="name-form-open">' +
+      (a.displayName ? "Change display name" : "Add a display name") + "</button></div>";
   return panel("Profile", "user",
     '<div class="acct-head"><span class="acct-avatar" aria-hidden="true">' + esc(initials) + "</span>" +
-    '<div class="acct-id"><h2>' + esc(a.email || "—") + "</h2><p>" + esc(a.id || "") + "</p></div></div>" +
-    '<div class="panel-bd--flush" style="margin-top:14px">' + rows + "</div>", { flush: false });
+    '<div class="acct-id"><h2>' + esc(label) + "</h2><p>" + esc(a.id || "") + "</p></div></div>" +
+    '<div class="panel-bd--flush" style="margin-top:14px">' + rows + "</div>" +
+    '<div class="panel-bd--flush" style="margin-top:8px">' + nameForm + "</div>", { flush: false });
 }
 
 function passwordPanel() {
   var bodyHtml = (S.pwErr ? '<p class="form-error" role="alert">' + esc(S.pwErr) + "</p>" : "") +
     (S.pwMsg ? '<p class="form-success" role="status">' + esc(S.pwMsg) + "</p>" : "") +
     '<form data-form="password-change" novalidate>' +
-    formField("pw-current", "Current password", "password", 'autocomplete="current-password" required') +
-    formField("pw-new", "New password", "password", 'autocomplete="new-password" required') +
+    passwordField("pw-current", "Current password", "current-password") +
+    passwordField("pw-new", "New password", "new-password") +
+    passwordField("pw-new2", "Confirm new password", "new-password") +
     '<ul class="password-rules"><li>10–128 characters, letters and numbers</li><li>Changing it signs out your other sessions</li></ul>' +
     '<div class="form-actions"><button class="btn btn--primary" type="submit" ' + (S.pwBusy ? "disabled" : "") + ">" +
       (S.pwBusy ? '<span class="spin" aria-hidden="true"></span> ' : "") + "Change password</button></div></form>";
@@ -2105,6 +2199,21 @@ document.addEventListener("click", function (ev) {
   }
   else if (act === "theme-toggle") cycleTheme();
   else if (act === "account-open") go(signedIn() ? "account" : "auth");
+  else if (act === "pw-toggle") {
+    var field = el.getAttribute("data-field");
+    var input = field ? qs("#" + field) : null;
+    if (input) {
+      var show = input.type === "password";
+      input.type = show ? "text" : "password";
+      S.pwShow[field] = show;
+      el.setAttribute("aria-pressed", show ? "true" : "false");
+      el.textContent = show ? "Hide" : "Show";
+      el.setAttribute("aria-label", (show ? "Hide " : "Show ") + (el.getAttribute("aria-label") || "").replace(/^(Hide|Show) /, "").replace(/ password/i, "") + " password");
+      if (input.focus) input.focus();
+    }
+  }
+  else if (act === "name-form-open") { S.nameLoaded = true; S.nameErr = ""; S.nameMsg = ""; renderView(); var ni = qs("#name-input"); if (ni) ni.focus(); }
+  else if (act === "name-form-close") { S.nameLoaded = false; S.nameErr = ""; S.nameMsg = ""; renderView(); }
   else if (act === "auth-tab") {
     S.authMode = el.getAttribute("data-tab") || "signin";
     S.authErr = ""; S.authMsg = "";
@@ -2130,9 +2239,16 @@ document.addEventListener("click", function (ev) {
     el.disabled = true;
     S.verifyErr = ""; S.verifyMsg = "";
     accountApi("/account/verify/request").then(function (d) {
-      S.verifyMsg = (d && d.delivery && d.delivery.ok) ? "Sent — check your inbox at " + accountEmail() + "."
-        : "Email delivery is unavailable on this deployment. Ask the operator to read the code from the verification record.";
-      if (d && d.nextCodeInSeconds) S.verifyMsg += " You can request another code in " + d.nextCodeInSeconds + "s.";
+      var v = (d && d.verification) || null;
+      if (d && d.alreadyVerified) {
+        S.verifyMsg = "Your email is already verified.";
+      } else if (v && v.sent) {
+        S.verifyMsg = "Sent — check your inbox at " + accountEmail() +
+          (v.linkIncluded ? " for a one-click link and an 8-character code." : " for the 8-character code.");
+        if (v.retryAfterSeconds) S.verifyMsg += " You can request another in " + v.retryAfterSeconds + "s.";
+      } else {
+        S.verifyErr = (v && v.reason) || "The verification email could not be sent.";
+      }
       renderView();
     }, function (e) {
       S.verifyErr = e.message || "Could not request a code.";
@@ -2168,6 +2284,33 @@ document.addEventListener("click", function (ev) {
   else if (act === "delete-cancel") { S.deleteArmed = false; S.authErr = ""; renderView(); }
 });
 
+/* Advisory password-strength meter: cosmetic only. The server's policy is the
+   authority, and this never blocks a submit. */
+document.addEventListener("input", function (ev) {
+  var el = ev.target;
+  if (!el || !el.id) return;
+  var meter = qs('[data-meter="' + el.id + '"]');
+  if (!meter) return;
+  var value = String(el.value || "");
+  var score = 0;
+  if (value.length >= 10) score++;
+  if (value.length >= 14) score++;
+  if (/[A-Za-z]/.test(value) && /[0-9]/.test(value)) score++;
+  if (/[^A-Za-z0-9]/.test(value) || value.length >= 20) score++;
+  var bars = meter.querySelectorAll(".pw-meter-bar span");
+  for (var i = 0; i < bars.length; i++) {
+    bars[i].setAttribute("data-on", i < score ? (score >= 3 ? "1" : "warn") : "");
+  }
+  var label = meter.querySelector(".pw-meter-text");
+  if (label) {
+    label.textContent = !value ? "Use 10+ characters with letters and numbers."
+      : score <= 1 ? "Too short \u2014 use at least 10 characters."
+      : score === 2 ? "Getting there \u2014 add numbers or length."
+      : score === 3 ? "Good \u2014 meets the DEMO policy."
+      : "Strong.";
+  }
+});
+
 document.addEventListener("submit", function (ev) {
   var form = ev.target;
   if (!form || !form.getAttribute) return;
@@ -2178,10 +2321,20 @@ document.addEventListener("submit", function (ev) {
   S.authErr = ""; S.authMsg = ""; S.verifyErr = ""; S.verifyMsg = ""; S.pwErr = ""; S.pwMsg = "";
 
   if (kind === "signin") {
-    accountApi("/account/login", "POST", { email: val("auth-email"), password: val("auth-password") }).then(function (d) {
-      afterAuthChange(d);
-      toast("Signed in.");
-      go("account");
+    // Read the form first: renderView() rebuilds the DOM, so values captured
+    // afterwards would arrive at the server blank.
+    var signinEmail = val("auth-email");
+    var signinPassword = val("auth-password");
+    S.authBusy = true; renderView();
+    accountApi("/account/login", "POST", { email: signinEmail, password: signinPassword }).then(function (d) {
+      if (d && d.authenticated && d.account) {
+        afterAuthChange(d);
+        toast(d.verificationRequired ? "Signed in — verify your email to unlock linked-account features." : "Signed in.");
+        go("account");
+        renderView();
+        return;
+      }
+      S.authErr = (d && d.message) || "Sign in did not complete. Try again.";
       renderView();
     }, function (e) {
       S.authErr = e.message || "Sign in failed.";
@@ -2190,14 +2343,29 @@ document.addEventListener("submit", function (ev) {
   } else if (kind === "register") {
     var issue = pwIssue(val("auth-password"));
     if (issue) { S.authErr = "Password: " + issue; renderView(); return; }
-    accountApi("/account/register", "POST", { email: val("auth-email"), password: val("auth-password") }).then(function (d) {
-      if (d && d.authenticated) {
+    if (val("auth-password") !== val("auth-password2")) { S.authErr = "The two passwords did not match."; renderView(); return; }
+    var wantedName = val("auth-name").replace(/\s+/g, " ").trim();
+    var regEmail = val("auth-email");
+    var regPassword = val("auth-password");
+    var regConfirm = val("auth-password2");
+    S.authBusy = true; renderView();
+    accountApi("/account/register", "POST", {
+      email: regEmail,
+      password: regPassword,
+      passwordConfirm: regConfirm,
+      displayName: wantedName || undefined
+    }).then(function (d) {
+      // 'authenticated' is the documented success field: it is true only when the
+      // server really created the account AND issued a session cookie. Reporting
+      // success on anything else is exactly what used to strand new accounts.
+      if (d && d.authenticated && d.account) {
         afterAuthChange(d);
-        toast("Account created — check your inbox for the verification code.");
+        S.authMsg = verificationMessage(d);
+        toast("Account created — you are signed in.");
         go("account");
-      } else {
-        S.authMsg = "If this email is not already registered, an account was created or verification was sent. Check your inbox — and try signing in.";
+        return;
       }
+      S.authMsg = (d && d.message) || "If this email is not already registered, an account was created. Check your inbox, or sign in.";
       renderView();
     }, function (e) {
       S.authErr = e.message || "Registration failed.";
@@ -2214,7 +2382,12 @@ document.addEventListener("submit", function (ev) {
   } else if (kind === "reset") {
     var issue2 = pwIssue(val("auth-password"));
     if (issue2) { S.authErr = "Password: " + issue2; renderView(); return; }
-    accountApi("/account/password/reset", "POST", { token: S.resetToken, password: val("auth-password") }).then(function () {
+    if (val("auth-password") !== val("auth-password2")) { S.authErr = "The two passwords did not match."; renderView(); return; }
+    accountApi("/account/password/reset", "POST", {
+      token: S.resetToken,
+      password: val("auth-password"),
+      passwordConfirm: val("auth-password2")
+    }).then(function () {
       S.resetToken = "";
       S.authMode = "signin";
       S.authMsg = "Password updated. Every previous session has been signed out — sign in with your new password.";
@@ -2241,8 +2414,13 @@ document.addEventListener("submit", function (ev) {
   } else if (kind === "password-change") {
     var issue3 = pwIssue(val("pw-new"));
     if (issue3) { S.pwErr = "New password: " + issue3; renderView(); return; }
+    if (val("pw-new") !== val("pw-new2")) { S.pwErr = "The two new passwords did not match."; renderView(); return; }
     S.pwBusy = true;
-    accountApi("/account/password/change", "POST", { currentPassword: val("pw-current"), newPassword: val("pw-new") }).then(function (d) {
+    accountApi("/account/password/change", "POST", {
+      currentPassword: val("pw-current"),
+      newPassword: val("pw-new"),
+      newPasswordConfirm: val("pw-new2")
+    }).then(function (d) {
       S.pwBusy = false;
       S.pwErr = "";
       S.pwMsg = "Password changed. " + (d && typeof d.otherSessionsRevoked === "number" ? d.otherSessionsRevoked : 0) + " other session(s) signed out.";
@@ -2251,6 +2429,25 @@ document.addEventListener("submit", function (ev) {
     }, function (e) {
       S.pwBusy = false;
       S.pwErr = e.message || "Could not change the password.";
+      renderView();
+    });
+  } else if (kind === "display-name") {
+    var nextName = val("name-input").replace(/\s+/g, " ").trim();
+    S.nameBusy = true; S.nameErr = ""; S.nameMsg = "";
+    renderView();
+    accountApi("/account/profile", "POST", { displayName: nextName }).then(function (d) {
+      S.nameBusy = false;
+      if (d && d.account) {
+        S.session = Object.assign({}, S.session, { account: d.account });
+        S.nameValue = d.account.displayName || "";
+      }
+      S.nameMsg = "Display name saved.";
+      S.nameLoaded = false;
+      toast("Display name updated.");
+      renderView();
+    }, function (e) {
+      S.nameBusy = false;
+      S.nameErr = e.message || "Could not save the display name.";
       renderView();
     });
   } else if (kind === "delete-account") {
@@ -2273,15 +2470,34 @@ document.addEventListener("submit", function (ev) {
 
 function afterAuthChange(d) {
   if (d && d.account) {
-    S.session = { signedIn: true, accountsAvailable: true, account: d.account, emailDelivery: true };
+    S.session = {
+      signedIn: true,
+      accountsAvailable: true,
+      account: d.account,
+      emailDelivery: d.emailDelivery || S.session && S.session.emailDelivery || null,
+      verificationRequired: !!d.verificationRequired
+    };
   } else {
     loadSession();
   }
   S.authMode = "signin"; S.authErr = ""; S.authMsg = "";
+  S.sessions = null; S.sessionsErr = "";
   S.roblox = null;         // Roblox state belongs to this identity now — re-read fresh
   S.robloxLoading = true;
   loadRoblox(true);
   renderHeaderState();
+}
+
+/** Plain-language result of a registration, driven by the server's own report. */
+function verificationMessage(d) {
+  var v = (d && d.verification) || null;
+  if (v && v.sent) {
+    return "Signed in. We emailed " + accountEmail() + (v.linkIncluded
+      ? " a one-click verification link and an 8-character code."
+      : " an 8-character verification code.") + " It expires in " + Math.round((v.expiresInSeconds || 1800) / 60) + " minutes.";
+  }
+  if (v && v.reason) return "Signed in. " + v.reason;
+  return "Signed in. Your account is ready.";
 }
 
 document.addEventListener("input", function (ev) {
@@ -2326,6 +2542,7 @@ window.addEventListener("hashchange", function () {
   var next = routeFromHash();
   if (next !== S.route) { S.route = next; S.openTool = null; }
   if (S.route === "reset") S.resetToken = hashParam("token");
+  if (S.route === "verify") { S.verifyToken = hashParam("token"); S.verifyDone = false; S.verifyErr = ""; }
   renderView();
   enterRoute();
 });
@@ -2344,13 +2561,37 @@ function enterRoute() {
   if (S.route === "roblox" && !S.roblox && !S.robloxErr) loadRoblox();
   if (S.route === "video") loadLazy("video");
   if (S.route === "research") loadLazy("expanded");
-  if (S.route === "account" && signedIn()) { if (!S.sessions && !S.sessionsErr) loadAccountExtras(); if (!S.roblox && !S.robloxErr) loadRoblox(); }
+  if (S.route === "account" && signedIn()) { loadSession(); if (!S.sessions && !S.sessionsErr) loadAccountExtras(); if (!S.roblox && !S.robloxErr) loadRoblox(); }
   if (S.route === "reset") S.resetToken = hashParam("token");
+  if (S.route === "verify") { S.verifyToken = hashParam("token"); confirmVerifyLink(); }
+}
+
+/**
+ * Redeem a one-click verification token. Deliberately independent of the
+ * session: the link often opens on a different device than the one used to
+ * register, and possession of the emailed token is the proof of mailbox control.
+ */
+function confirmVerifyLink() {
+  if (!S.verifyToken || S.verifyBusyLink || S.verifyDone) return;
+  S.verifyBusyLink = true; S.verifyErr = "";
+  accountApi("/account/verify/confirm", "POST", { token: S.verifyToken }).then(function (d) {
+    S.verifyBusyLink = false; S.verifyDone = true;
+    S.verifyMsg = (d && d.viaLink) ? "Your DEMO account can now use verification-gated features." : "Your email address is confirmed.";
+    if (d && d.account) loadSession();
+    renderView();
+  }, function (e) {
+    S.verifyBusyLink = false; S.verifyDone = false;
+    S.verifyErr = e.status === 410
+      ? "This link was already used or has expired. Sign in and request a fresh verification email."
+      : (e.message || "The verification link could not be checked.");
+    renderView();
+  });
 }
 
 function boot() {
   S.route = routeFromHash();
   if (S.route === "reset") S.resetToken = hashParam("token");
+  if (S.route === "verify") S.verifyToken = hashParam("token");
   applyStoredTheme();
   renderShell();
   renderView();

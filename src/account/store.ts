@@ -5,8 +5,10 @@
  *
  *   user:{userId}                    → account record (email, password hash, flags)
  *   email:{normalizedEmail}          → userId (uniqueness index)
+ *   dname:{normalizedDisplayName}    → userId (uniqueness index; only when set)
  *   sess:{userId}:{tokenHash}        → session record (revocable, expiring)
  *   vcode:{userId}                   → pending email-verification code (hash only)
+ *   vtok:{tokenHash}                 → userId index for a verification *link* token
  *   rtok:{tokenHash}                 → pending password-reset token (single use, hash only)
  *   limit:{bucket}:{key}             → rate-limit counters
  *
@@ -28,10 +30,37 @@ export interface AccountUserRecord {
   email: string;
   /** Lowercase uniqueness key. */
   emailNormalized: string;
+  /**
+   * Optional public handle. Records written before display names existed simply
+   * omit it, so every read path must treat `undefined` as "not set".
+   */
+  displayName?: string | null;
   passwordHash: string;
   createdAt: number;
   updatedAt: number;
   verifiedAt: number | null;
+}
+
+export const DISPLAY_NAME_MIN = 3;
+export const DISPLAY_NAME_MAX = 32;
+
+/**
+ * Validate and normalise a display name.
+ *
+ * A display name is a *public handle*, never a credential: it is not used to
+ * sign in, and uniqueness is enforced only so two accounts cannot share a
+ * visible identity. Returns `null` for anything unusable, and the normalised
+ * (lowercased) form for the uniqueness index.
+ */
+export function normalizeDisplayName(value: unknown): { display: string; normalized: string } | null {
+  if (typeof value !== "string") return null;
+  const collapsed = value.replace(/\s+/g, " ").trim();
+  if (collapsed.length < DISPLAY_NAME_MIN || collapsed.length > DISPLAY_NAME_MAX) return null;
+  // Letters, digits, spaces, and . _ - only: no markup, no control characters,
+  // no confusable punctuation that could be used to impersonate another handle.
+  if (!/^[A-Za-z0-9 ._-]+$/.test(collapsed)) return null;
+  if (!/[A-Za-z0-9]/.test(collapsed)) return null;
+  return { display: collapsed, normalized: collapsed.toLowerCase() };
 }
 
 export interface AccountSessionRecord {
@@ -52,7 +81,10 @@ export interface AccountSessionView {
 }
 
 export interface VerificationRecord {
+  /** SHA-256 of the 8-character code the user types. */
   hash: string;
+  /** SHA-256 of the opaque token carried by the one-click verification link. */
+  linkHash: string;
   expiresAt: number;
   attempts: number;
   sentAt: number;
@@ -71,11 +103,18 @@ export interface ChargeResult {
 
 export type ConsumeCodeOutcome = "ok" | "none" | "expired" | "mismatch" | "too_many_attempts";
 
+export type UpdateUserPatch = Partial<Pick<AccountUserRecord, "passwordHash" | "verifiedAt" | "updatedAt">>;
+
+export type DisplayNameOutcome = "ok" | "taken" | "missing";
+
 export interface AccountStoreApi {
   createUser(record: AccountUserRecord): Promise<"ok" | "exists">;
   getUser(userId: string): Promise<AccountUserRecord | null>;
   getUserByEmail(emailNormalized: string): Promise<AccountUserRecord | null>;
-  updateUser(userId: string, patch: Partial<Pick<AccountUserRecord, "passwordHash" | "verifiedAt" | "updatedAt">>): Promise<boolean>;
+  getUserByDisplayName(displayNameNormalized: string): Promise<AccountUserRecord | null>;
+  /** Atomically claim/release a unique display name. `null` clears it. */
+  setDisplayName(userId: string, displayName: string | null, displayNameNormalized: string | null): Promise<DisplayNameOutcome>;
+  updateUser(userId: string, patch: UpdateUserPatch): Promise<boolean>;
   deleteUser(userId: string): Promise<boolean>;
   putSession(tokenHash: string, record: AccountSessionRecord): Promise<void>;
   getSession(tokenHash: string, now: number): Promise<AccountSessionRecord | null>;
@@ -89,6 +128,8 @@ export interface AccountStoreApi {
   putVerificationCode(userId: string, record: VerificationRecord): Promise<void>;
   getVerificationState(userId: string): Promise<{ sentAt: number } | null>;
   consumeVerificationCode(userId: string, hash: string, now: number): Promise<ConsumeCodeOutcome>;
+  /** Resolve a one-click verification link token to its user, single use. */
+  consumeVerificationToken(tokenHash: string, now: number): Promise<{ userId: string } | "expired" | "none">;
   putResetToken(tokenHash: string, record: ResetRecord): Promise<void>;
   consumeResetToken(tokenHash: string, now: number): Promise<ResetRecord | null>;
   charge(bucket: string, key: string, limit: number, windowMs: number, now: number): Promise<ChargeResult>;
@@ -100,7 +141,9 @@ export class AccountStore implements AccountStoreApi {
   createUser(record: AccountUserRecord) { return this.stub.createUser(record); }
   getUser(userId: string) { return this.stub.getUser(userId); }
   getUserByEmail(emailNormalized: string) { return this.stub.getUserByEmail(emailNormalized); }
-  updateUser(userId: string, patch: Partial<Pick<AccountUserRecord, "passwordHash" | "verifiedAt" | "updatedAt">>) { return this.stub.updateUser(userId, patch); }
+  getUserByDisplayName(displayNameNormalized: string) { return this.stub.getUserByDisplayName(displayNameNormalized); }
+  setDisplayName(userId: string, displayName: string | null, displayNameNormalized: string | null) { return this.stub.setDisplayName(userId, displayName, displayNameNormalized); }
+  updateUser(userId: string, patch: UpdateUserPatch) { return this.stub.updateUser(userId, patch); }
   deleteUser(userId: string) { return this.stub.deleteUser(userId); }
   putSession(tokenHash: string, record: AccountSessionRecord) { return this.stub.putSession(tokenHash, record); }
   getSession(tokenHash: string, now: number) { return this.stub.getSession(tokenHash, now); }
@@ -113,6 +156,7 @@ export class AccountStore implements AccountStoreApi {
   putVerificationCode(userId: string, record: VerificationRecord) { return this.stub.putVerificationCode(userId, record); }
   getVerificationState(userId: string) { return this.stub.getVerificationState(userId); }
   consumeVerificationCode(userId: string, hash: string, now: number) { return this.stub.consumeVerificationCode(userId, hash, now); }
+  consumeVerificationToken(tokenHash: string, now: number) { return this.stub.consumeVerificationToken(tokenHash, now); }
   putResetToken(tokenHash: string, record: ResetRecord) { return this.stub.putResetToken(tokenHash, record); }
   consumeResetToken(tokenHash: string, now: number) { return this.stub.consumeResetToken(tokenHash, now); }
   charge(bucket: string, key: string, limit: number, windowMs: number, now: number) { return this.stub.charge(bucket, key, limit, windowMs, now); }
@@ -158,8 +202,12 @@ export class DemoAccounts extends DurableObject<Record<string, unknown>> {
     await this.serial(async () => {
       const emailKey = `email:${record.emailNormalized}`;
       if (await this.storage.get(emailKey)) return;
+      const displayName = normalizeDisplayName(record.displayName ?? null);
+      const displayKey = displayName ? `dname:${displayName.normalized}` : null;
+      if (displayKey && await this.storage.get(displayKey)) return;
       await this.storage.put(emailKey, record.id);
-      await this.storage.put(`user:${record.id}`, record);
+      if (displayKey) await this.storage.put(displayKey, record.id);
+      await this.storage.put(`user:${record.id}`, { ...record, displayName: displayName?.display ?? null });
       created = true;
     });
     if (created) this.ensureAlarm(Date.now() + 24 * 60 * 60 * 1000);
@@ -176,7 +224,49 @@ export class DemoAccounts extends DurableObject<Record<string, unknown>> {
     return typeof userId === "string" ? this.getUser(userId) : null;
   }
 
-  async updateUser(userId: string, patch: Partial<Pick<AccountUserRecord, "passwordHash" | "verifiedAt" | "updatedAt">>): Promise<boolean> {
+  async getUserByDisplayName(displayNameNormalized: string): Promise<AccountUserRecord | null> {
+    const userId = await this.storage.get(`dname:${displayNameNormalized}`);
+    return typeof userId === "string" ? this.getUser(userId) : null;
+  }
+
+  /**
+   * Claim, replace or release the caller's display name in one serialised step,
+   * so two concurrent registrations can never both take the same handle.
+   */
+  async setDisplayName(userId: string, displayName: string | null, displayNameNormalized: string | null): Promise<DisplayNameOutcome> {
+    let outcome: DisplayNameOutcome = "missing";
+    await this.serial(async () => {
+      const key = `user:${userId}`;
+      const record = (await this.storage.get(key)) as AccountUserRecord | undefined;
+      if (!record) return;
+      const current = normalizeDisplayName(record.displayName ?? null);
+      if (displayName === null) {
+        if (current) await this.storage.delete(`dname:${current.normalized}`);
+        await this.storage.put(key, { ...record, displayName: null });
+        outcome = "ok";
+        return;
+      }
+      const next = normalizeDisplayName(displayName);
+      if (!next || !displayNameNormalized || next.normalized !== displayNameNormalized) return;
+      if (current && current.normalized === next.normalized) {
+        await this.storage.put(key, { ...record, displayName: next.display });
+        outcome = "ok";
+        return;
+      }
+      const claimed = await this.storage.get(`dname:${next.normalized}`);
+      if (typeof claimed === "string" && claimed !== userId) {
+        outcome = "taken";
+        return;
+      }
+      if (current) await this.storage.delete(`dname:${current.normalized}`);
+      await this.storage.put(`dname:${next.normalized}`, userId);
+      await this.storage.put(key, { ...record, displayName: next.display });
+      outcome = "ok";
+    });
+    return outcome;
+  }
+
+  async updateUser(userId: string, patch: UpdateUserPatch): Promise<boolean> {
     let updated = false;
     await this.serial(async () => {
       const record = (await this.storage.get(`user:${userId}`)) as AccountUserRecord | undefined;
@@ -194,9 +284,11 @@ export class DemoAccounts extends DurableObject<Record<string, unknown>> {
       if (!record) return;
       await this.storage.delete(`user:${userId}`);
       await this.storage.delete(`email:${record.emailNormalized}`);
-      await this.storage.delete(`vcode:${userId}`);
-      const sessions = await this.storage.list({ prefix: `sess:${userId}:` });
-      for (const key of sessions.keys()) await this.storage.delete(key);
+      const displayName = normalizeDisplayName(record.displayName ?? null);
+      if (displayName) await this.storage.delete(`dname:${displayName.normalized}`);
+      const verification = (await this.storage.get(`vcode:${userId}`)) as VerificationRecord | undefined;
+      if (verification) await this.clearVerification(userId, verification);
+      await this.dropSessions(userId);
       deleted = true;
     });
     return deleted;
@@ -205,48 +297,54 @@ export class DemoAccounts extends DurableObject<Record<string, unknown>> {
   async putSession(tokenHash: string, record: AccountSessionRecord): Promise<void> {
     if (!Number.isFinite(record.expiresAt) || record.expiresAt > Date.now() + (MAX_SESSION_SECONDS + 60) * 1000) return;
     await this.storage.put(`sess:${record.userId}:${tokenHash}`, record);
+    // Reverse index so a cookie lookup is one key read instead of a full scan:
+    // the per-user prefix alone cannot address a session without knowing the user.
+    await this.storage.put(`sid:${tokenHash}`, record.userId);
     this.ensureAlarm(record.expiresAt);
   }
 
   async getSession(tokenHash: string, now: number): Promise<AccountSessionRecord | null> {
-    const entries = await this.storage.list({ prefix: "sess:" });
-    for (const [key, value] of entries) {
-      if (!key.endsWith(`:${tokenHash}`)) continue;
-      const record = value as AccountSessionRecord;
-      if (record.expiresAt <= now) {
-        await this.storage.delete(key);
-        return null;
-      }
-      return record;
+    if (!/^[a-f0-9]{64}$/.test(tokenHash)) return null;
+    const userId = await this.storage.get(`sid:${tokenHash}`);
+    if (typeof userId !== "string") return null;
+    const key = `sess:${userId}:${tokenHash}`;
+    const record = (await this.storage.get(key)) as AccountSessionRecord | undefined;
+    if (!record) {
+      await this.storage.delete(`sid:${tokenHash}`);
+      return null;
     }
-    return null;
+    if (record.expiresAt <= now) {
+      await this.storage.delete(key);
+      await this.storage.delete(`sid:${tokenHash}`);
+      return null;
+    }
+    return record;
   }
 
   async touchSession(tokenHash: string, expiresAt: number): Promise<void> {
-    const entries = await this.storage.list({ prefix: "sess:" });
-    for (const [key, value] of entries) {
-      if (!key.endsWith(`:${tokenHash}`)) continue;
-      await this.storage.put(key, { ...(value as AccountSessionRecord), expiresAt });
-      return;
-    }
+    const userId = await this.storage.get(`sid:${tokenHash}`);
+    if (typeof userId !== "string") return;
+    const key = `sess:${userId}:${tokenHash}`;
+    const record = (await this.storage.get(key)) as AccountSessionRecord | undefined;
+    if (!record) return;
+    await this.storage.put(key, { ...record, expiresAt });
   }
 
   async deleteSession(tokenHash: string): Promise<boolean> {
-    const entries = await this.storage.list({ prefix: "sess:" });
-    for (const key of entries.keys()) {
-      if (key.endsWith(`:${tokenHash}`)) {
-        await this.storage.delete(key);
-        return true;
-      }
-    }
-    return false;
+    const userId = await this.storage.get(`sid:${tokenHash}`);
+    if (typeof userId !== "string") return false;
+    await this.storage.delete(`sess:${userId}:${tokenHash}`);
+    await this.storage.delete(`sid:${tokenHash}`);
+    return true;
   }
 
   async deleteSessionByPrefix(userId: string, hashPrefix: string): Promise<boolean> {
     if (!/^[a-f0-9]{8,64}$/.test(hashPrefix)) return false;
-    const entries = await this.storage.list({ prefix: `sess:${userId}:${hashPrefix}` });
+    const prefix = `sess:${userId}:`;
+    const entries = await this.storage.list({ prefix: `${prefix}${hashPrefix}` });
     let removed = false;
     for (const key of entries.keys()) {
+      await this.storage.delete(`sid:${key.slice(prefix.length)}`);
       await this.storage.delete(key);
       removed = true;
     }
@@ -271,9 +369,12 @@ export class DemoAccounts extends DurableObject<Record<string, unknown>> {
 
   async deleteOtherSessions(userId: string, keepTokenHash: string): Promise<number> {
     let removed = 0;
-    const entries = await this.storage.list({ prefix: `sess:${userId}:` });
+    const prefix = `sess:${userId}:`;
+    const entries = await this.storage.list({ prefix });
     for (const key of entries.keys()) {
-      if (key.endsWith(`:${keepTokenHash}`)) continue;
+      const hash = key.slice(prefix.length);
+      if (hash === keepTokenHash) continue;
+      await this.storage.delete(`sid:${hash}`);
       await this.storage.delete(key);
       removed++;
     }
@@ -281,9 +382,16 @@ export class DemoAccounts extends DurableObject<Record<string, unknown>> {
   }
 
   async deleteUserSessions(userId: string): Promise<number> {
+    return this.dropSessions(userId);
+  }
+
+  /** Delete every session row for a user plus each reverse index entry. */
+  private async dropSessions(userId: string): Promise<number> {
     let removed = 0;
-    const entries = await this.storage.list({ prefix: `sess:${userId}:` });
+    const prefix = `sess:${userId}:`;
+    const entries = await this.storage.list({ prefix });
     for (const key of entries.keys()) {
+      await this.storage.delete(`sid:${key.slice(prefix.length)}`);
       await this.storage.delete(key);
       removed++;
     }
@@ -292,7 +400,12 @@ export class DemoAccounts extends DurableObject<Record<string, unknown>> {
 
   async putVerificationCode(userId: string, record: VerificationRecord): Promise<void> {
     if (!Number.isFinite(record.expiresAt) || record.expiresAt > Date.now() + (MAX_CODE_SECONDS + 60) * 1000) return;
+    const existing = (await this.storage.get(`vcode:${userId}`)) as VerificationRecord | undefined;
+    // A new code supersedes any previous link token; drop its index first so a
+    // stale link can never resolve to this user.
+    if (existing?.linkHash) await this.storage.delete(`vtok:${existing.linkHash}`);
     await this.storage.put(`vcode:${userId}`, record);
+    if (record.linkHash) await this.storage.put(`vtok:${record.linkHash}`, userId);
     this.ensureAlarm(record.expiresAt);
   }
 
@@ -308,12 +421,12 @@ export class DemoAccounts extends DurableObject<Record<string, unknown>> {
       const record = (await this.storage.get(key)) as VerificationRecord | undefined;
       if (!record) return;
       if (record.expiresAt <= now) {
-        await this.storage.delete(key);
+        await this.clearVerification(userId, record);
         outcome = "expired";
         return;
       }
       if (record.attempts >= 5) {
-        await this.storage.delete(key);
+        await this.clearVerification(userId, record);
         outcome = "too_many_attempts";
         return;
       }
@@ -322,10 +435,43 @@ export class DemoAccounts extends DurableObject<Record<string, unknown>> {
         outcome = "mismatch";
         return;
       }
-      await this.storage.delete(key);
+      await this.clearVerification(userId, record);
       outcome = "ok";
     });
     return outcome;
+  }
+
+  /**
+   * Consume a one-click verification link token. Resolving the token to its user
+   * is what lets a recipient who opens the link in a different browser (or on a
+   * phone) verify without a session — possession of the emailed token is the
+   * proof of mailbox control.
+   */
+  async consumeVerificationToken(tokenHash: string, now: number): Promise<{ userId: string } | "expired" | "none"> {
+    if (!/^[a-f0-9]{64}$/.test(tokenHash)) return "none";
+    let outcome: { userId: string } | "expired" | "none" = "none";
+    await this.serial(async () => {
+      const indexKey = `vtok:${tokenHash}`;
+      const userId = await this.storage.get(indexKey);
+      if (typeof userId !== "string") return;
+      const record = (await this.storage.get(`vcode:${userId}`)) as VerificationRecord | undefined;
+      // Single use: the index is consumed whether or not the record still matches.
+      await this.storage.delete(indexKey);
+      if (!record || record.linkHash !== tokenHash) return;
+      if (record.expiresAt <= now) {
+        await this.clearVerification(userId, record);
+        outcome = "expired";
+        return;
+      }
+      outcome = { userId };
+    });
+    return outcome;
+  }
+
+  /** Remove a verification record and both of its indexes. */
+  private async clearVerification(userId: string, record: VerificationRecord): Promise<void> {
+    await this.storage.delete(`vcode:${userId}`);
+    if (record.linkHash) await this.storage.delete(`vtok:${record.linkHash}`);
   }
 
   async putResetToken(tokenHash: string, record: ResetRecord): Promise<void> {
@@ -373,7 +519,15 @@ export class DemoAccounts extends DurableObject<Record<string, unknown>> {
     for (const [key, value] of entries) {
       if (key.startsWith("sess:") || key.startsWith("vcode:") || key.startsWith("rtok:") || key.startsWith("limit:")) {
         const expiresAt = (value as { expiresAt?: number } | undefined)?.expiresAt;
-        if (typeof expiresAt === "number" && expiresAt <= now) await this.storage.delete(key);
+        if (typeof expiresAt !== "number" || expiresAt > now) continue;
+        // Keep the addressing indexes in step with the rows they point at, so an
+        // expired session can never be resurrected through a stale `sid:` entry.
+        if (key.startsWith("sess:")) await this.storage.delete(`sid:${key.slice(key.lastIndexOf(":") + 1)}`);
+        if (key.startsWith("vcode:")) {
+          const record = value as VerificationRecord;
+          if (record?.linkHash) await this.storage.delete(`vtok:${record.linkHash}`);
+        }
+        await this.storage.delete(key);
       }
     }
     this.alarmPending = false;
@@ -408,15 +562,20 @@ interface DurableObjectStorageLike {
 export class InMemoryAccountStore implements AccountStoreApi {
   private users = new Map<string, AccountUserRecord>();
   private emails = new Map<string, string>();
+  private displayNames = new Map<string, string>();
   private sessions = new Map<string, AccountSessionRecord>();
   private vcodes = new Map<string, VerificationRecord>();
+  private vtokIndex = new Map<string, string>();
   private resets = new Map<string, ResetRecord>();
   private limits = new Map<string, { startedAt: number; count: number }>();
 
   async createUser(record: AccountUserRecord): Promise<"ok" | "exists"> {
     if (this.emails.has(record.emailNormalized)) return "exists";
+    const displayName = normalizeDisplayName(record.displayName ?? null);
+    if (displayName && this.displayNames.has(displayName.normalized)) return "exists";
     this.emails.set(record.emailNormalized, record.id);
-    this.users.set(record.id, structuredClone(record));
+    if (displayName) this.displayNames.set(displayName.normalized, record.id);
+    this.users.set(record.id, structuredClone({ ...record, displayName: displayName?.display ?? null }));
     return "ok";
   }
   async getUser(userId: string) {
@@ -427,7 +586,33 @@ export class InMemoryAccountStore implements AccountStoreApi {
     const userId = this.emails.get(emailNormalized);
     return userId ? this.getUser(userId) : null;
   }
-  async updateUser(userId: string, patch: Partial<Pick<AccountUserRecord, "passwordHash" | "verifiedAt" | "updatedAt">>) {
+  async getUserByDisplayName(displayNameNormalized: string) {
+    const userId = this.displayNames.get(displayNameNormalized);
+    return userId ? this.getUser(userId) : null;
+  }
+  async setDisplayName(userId: string, displayName: string | null, displayNameNormalized: string | null): Promise<DisplayNameOutcome> {
+    const record = this.users.get(userId);
+    if (!record) return "missing";
+    const current = normalizeDisplayName(record.displayName ?? null);
+    if (displayName === null) {
+      if (current) this.displayNames.delete(current.normalized);
+      this.users.set(userId, { ...record, displayName: null });
+      return "ok";
+    }
+    const next = normalizeDisplayName(displayName);
+    if (!next || !displayNameNormalized || next.normalized !== displayNameNormalized) return "missing";
+    if (current?.normalized === next.normalized) {
+      this.users.set(userId, { ...record, displayName: next.display });
+      return "ok";
+    }
+    const claimed = this.displayNames.get(next.normalized);
+    if (claimed && claimed !== userId) return "taken";
+    if (current) this.displayNames.delete(current.normalized);
+    this.displayNames.set(next.normalized, userId);
+    this.users.set(userId, { ...record, displayName: next.display });
+    return "ok";
+  }
+  async updateUser(userId: string, patch: UpdateUserPatch) {
     const record = this.users.get(userId);
     if (!record) return false;
     this.users.set(userId, { ...record, ...patch });
@@ -438,6 +623,10 @@ export class InMemoryAccountStore implements AccountStoreApi {
     if (!record) return false;
     this.users.delete(userId);
     this.emails.delete(record.emailNormalized);
+    const displayName = normalizeDisplayName(record.displayName ?? null);
+    if (displayName) this.displayNames.delete(displayName.normalized);
+    const verification = this.vcodes.get(userId);
+    if (verification?.linkHash) this.vtokIndex.delete(verification.linkHash);
     this.vcodes.delete(userId);
     for (const [key, session] of this.sessions) if (session.userId === userId) this.sessions.delete(key);
     return true;
@@ -506,7 +695,10 @@ export class InMemoryAccountStore implements AccountStoreApi {
     return removed;
   }
   async putVerificationCode(userId: string, record: VerificationRecord) {
+    const existing = this.vcodes.get(userId);
+    if (existing?.linkHash) this.vtokIndex.delete(existing.linkHash);
     this.vcodes.set(userId, structuredClone(record));
+    if (record.linkHash) this.vtokIndex.set(record.linkHash, userId);
   }
   async getVerificationState(userId: string) {
     const record = this.vcodes.get(userId);
@@ -516,19 +708,36 @@ export class InMemoryAccountStore implements AccountStoreApi {
     const record = this.vcodes.get(userId);
     if (!record) return "none";
     if (record.expiresAt <= now) {
-      this.vcodes.delete(userId);
+      this.clearVerification(userId, record);
       return "expired";
     }
     if (record.attempts >= 5) {
-      this.vcodes.delete(userId);
+      this.clearVerification(userId, record);
       return "too_many_attempts";
     }
     if (record.hash !== hash) {
       this.vcodes.set(userId, { ...record, attempts: record.attempts + 1 });
       return "mismatch";
     }
-    this.vcodes.delete(userId);
+    this.clearVerification(userId, record);
     return "ok";
+  }
+  async consumeVerificationToken(tokenHash: string, now: number): Promise<{ userId: string } | "expired" | "none"> {
+    if (!/^[a-f0-9]{64}$/.test(tokenHash)) return "none";
+    const userId = this.vtokIndex.get(tokenHash);
+    if (!userId) return "none";
+    this.vtokIndex.delete(tokenHash);
+    const record = this.vcodes.get(userId);
+    if (!record || record.linkHash !== tokenHash) return "none";
+    if (record.expiresAt <= now) {
+      this.clearVerification(userId, record);
+      return "expired";
+    }
+    return { userId };
+  }
+  private clearVerification(userId: string, record: VerificationRecord) {
+    this.vcodes.delete(userId);
+    if (record.linkHash) this.vtokIndex.delete(record.linkHash);
   }
   async putResetToken(tokenHash: string, record: ResetRecord) {
     this.resets.set(tokenHash, structuredClone(record));

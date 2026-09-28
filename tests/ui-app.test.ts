@@ -13,17 +13,23 @@ import { demoUiHtml } from "../ui.js";
 const NAV_PRIMARY = ["Overview", "Capabilities", "Status", "Browser", "Video", "Research", "Routing", "Roblox", "Skills", "About"];
 
 function stubFetchScript(signedIn: boolean) {
-  const sessionJson = JSON.stringify(
-    signedIn
-      ? { ok: true, signedIn: true, account: { id: "usr_demo1", email: "ui@test.dev", emailVerified: true, createdAt: "2026-01-01T00:00:00.000Z", sessionExpiresAt: "2027-01-01T00:00:00.000Z" }, accountsAvailable: true, emailDelivery: true }
-      : { ok: true, signedIn: false, accountsAvailable: true, emailDelivery: true },
-  );
   return `<script>
+    var ACCOUNT_DEMO = { id: "usr_demo1", email: "ui@test.dev", displayName: null, emailVerified: true, createdAt: "2026-01-01T00:00:00.000Z" };
+    var ACCOUNT_NEW = { id: "usr_new1", email: "new@test.dev", displayName: "Newcomer", emailVerified: false, createdAt: "2026-09-28T00:00:00.000Z" };
     window.__fetchCalls = [];
-    window.fetch = function (path) {
-      window.__fetchCalls.push(String(path));
+    window.__requests = [];
+    window.__signedIn = ${signedIn ? "true" : "false"};
+    window.__account = ACCOUNT_DEMO;
+    window.fetch = function (path, init) {
+      var p = String(path);
+      window.__fetchCalls.push(p);
+      window.__requests.push({ path: p, method: (init && init.method) || "GET", body: (init && init.body) || null });
       var j = { ok: true };
-      if (String(path) === "/account/session") j = ${sessionJson};
+      if (p === "/account/session") j = window.__signedIn
+        ? { ok: true, signedIn: true, account: window.__account, accountsAvailable: true, emailDelivery: { configured: true }, session: { expiresAt: "2027-01-01T00:00:00.000Z" } }
+        : { ok: true, signedIn: false, accountsAvailable: true, emailDelivery: { configured: true } };
+      else if (p === "/account/register") { window.__signedIn = true; window.__account = ACCOUNT_NEW; j = { ok: true, registered: true, authenticated: true, emailDelivery: { configured: true }, account: ACCOUNT_NEW, verification: { sent: true, linkIncluded: true, expiresInSeconds: 1800, resendAvailableInSeconds: 60 } }; }
+      else if (p === "/account/login") { window.__signedIn = true; j = { ok: true, authenticated: true, account: window.__account, emailDelivery: { configured: true }, verificationRequired: !window.__account.emailVerified }; }
       else if (String(path).indexOf("/account/sessions") === 0) j = { ok: true, sessions: [{ id: "abcd1234", label: "Test device", createdAt: "2026-09-01T00:00:00.000Z", expiresAt: "2027-01-01T00:00:00.000Z", current: true }] };
       else if (String(path).indexOf("/platform/stats") === 0) j = { status: "online", version: "9.9.9-test", toolCount: 90, generatedAt: "2026-09-28T00:00:00.000Z", uptimeSeconds: 42, requestCountSinceIsolateStart: 7, endpoints: { mcp: "/mcp" }, capabilities: {}, connections: [] };
       else if (String(path).indexOf("/health") === 0) j = { ok: true, capabilities: { browserAvailable: false, reason: "no binding in jsdom" } };
@@ -136,6 +142,73 @@ describe("DEMO UI shell", () => {
     expect(win.document.querySelector("#account-btn")?.textContent).toContain("ui@test.dev");
     await waitFor((w) => (w.document.querySelector("#view")?.innerHTML ?? "").includes("Test device"), win);
     expect(win.document.querySelector("#view")?.innerHTML).toContain("Test device");
+    dom.window.close();
+  });
+
+  it("adopts the session on a real register response instead of reporting it invalid", async () => {
+    const { win, dom } = await buildApp({ hash: "#/auth" });
+    await settle();
+    (win.document.querySelectorAll(".auth-tabs button")[1] as HTMLButtonElement).click(); // register tab
+    await settle();
+
+    const email = win.document.querySelector("#auth-email") as HTMLInputElement;
+    email.value = "new@test.dev";
+    email.dispatchEvent(new win.Event("input", { bubbles: true }));
+    const password = win.document.querySelector("#auth-password") as HTMLInputElement;
+    password.value = "correct-horse-9";
+    password.dispatchEvent(new win.Event("input", { bubbles: true }));
+    const confirm = win.document.querySelector("#auth-password2") as HTMLInputElement;
+    confirm.value = "correct-horse-9";
+    confirm.dispatchEvent(new win.Event("input", { bubbles: true }));
+
+    (win.document.querySelector('[data-form="register"]') as HTMLFormElement)
+      .dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }));
+    await waitFor((w) => (w.__fetchCalls || []).includes("/account/register"), win);
+    await settle();
+
+    // The request must carry the confirmation field the server validates.
+    const registration = win.__requests.find((r: any) => r.path === "/account/register");
+    expect(registration).toBeTruthy();
+    expect(registration.method).toBe("POST");
+    const sent = JSON.parse(registration.body) as Record<string, unknown>;
+    expect(sent.email).toBe("new@test.dev");
+    expect(sent.passwordConfirm).toBe("correct-horse-9");
+
+    // And the app must treat the account as live: header flips, no "invalid" copy.
+    await waitFor((w) => (w.document.querySelector("#account-btn")?.textContent ?? "").includes("new@test.dev"), win);
+    expect(win.document.querySelector("#account-btn")?.textContent).toContain("new@test.dev");
+    const view = win.document.querySelector("#view")?.textContent ?? "";
+    expect(view).not.toMatch(/invalid/i);
+    expect(view).toContain("new@test.dev");
+    dom.window.close();
+  });
+
+  it("surfaces a delivery warning on the sign-up form when email is unconfigured", async () => {
+    // Same shell, but the session probe reports no email provider.
+    let html = demoUiHtml("https://demo-mcp.amidevz.workers.dev/", {});
+    html = html.replace("</head>", `<script>
+      window.fetch = function () {
+        // The SPA reads bodies through response.text(), so text() and json()
+        // must agree — a mismatch is exactly the bug this asserts against.
+        var j = { ok: true, signedIn: false, accountsAvailable: true, emailDelivery: { configured: false, reason: "EMAIL_PROVIDER is not configured on this deployment." } };
+        var body = JSON.stringify(j);
+        return Promise.resolve({
+          ok: true, status: 200,
+          headers: { get: function (k) { return k === "content-type" ? "application/json" : null; } },
+          json: function () { return Promise.resolve(j); },
+          text: function () { return Promise.resolve(body); }
+        });
+      };
+    </script></head>`);
+    const dom = new JSDOM(html, { url: "https://demo-mcp.amidevz.workers.dev/", runScripts: "dangerously", pretendToBeVisual: true });
+    const win = dom.window;
+    await until(() => !!win.document.querySelector("#view"));
+    win.location.hash = "#/auth";
+    await settle();
+    (win.document.querySelectorAll(".auth-tabs button")[1] as HTMLButtonElement).click();
+    await settle();
+    const notice = win.document.querySelector("#email-delivery-notice")?.textContent ?? "";
+    expect(notice).toContain("EMAIL_PROVIDER");
     dom.window.close();
   });
 

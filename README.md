@@ -83,11 +83,14 @@ design tokens in `src/ui/styles.ts` (no UI framework, no external requests).
 
 Design invariants (enforced by `tests/ui-shell.test.ts`):
 
-* **Public tools need no login.** DEMO has no mandatory signup or account system;
-  initialization, discovery, resources, the inspector, and public tools stay open.
-  The Connect MCP dialog contains no credentials. Only account-specific Roblox
-  tools and paid `jev_decide` trigger per-tool DEMO OAuth; Roblox consent is a
-  separate optional approval in the Roblox section.
+* **Public tools need no login.** DEMO accounts (email + password, with email
+  verification and password recovery — see [`docs/ACCOUNTS.md`](docs/ACCOUNTS.md))
+  are optional: initialization, discovery, resources, the inspector and every
+  public tool stay open without one. Website accounts, MCP OAuth 2.1 + PKCE and
+  Roblox OAuth are three separate systems. The Connect MCP dialog contains no
+  credentials. Only account-specific Roblox tools and paid `jev_decide` trigger
+  per-tool DEMO OAuth; Roblox consent is a separate optional approval in the
+  Roblox section.
 * **No mocking.** Every status, count and flag is read live from same-origin
   routes (`/health`, `/platform/stats`, `/capabilities/*`, `/oauth/roblox/*`).
   Unreachable data renders an honest error state instead of fake values.
