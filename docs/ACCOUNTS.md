@@ -110,9 +110,47 @@ clear.
 | `SMTP_PASSWORD` | **secret** | Gmail App Password (or relay password) |
 | `RESEND_API_KEY` | **secret** | only for `resend` |
 
+The password secret is looked up under `SMTP_PASSWORD`, `GMAIL_APP_PASSWORD`,
+`SMTP_PASS`, `EMAIL_PASSWORD` and `APP_PASSWORD`, compared case- and
+separator-insensitively (`src/account/email.ts`), so a hand-typed name still
+works instead of leaving the deployment permanently "off".
+
 A rejected send is reported as a failure with the provider's stage and code
 (for example `rcpt_to 550`), and the account page shows that reason — the UI
 never claims a message went out when the provider refused it.
+
+### 3.5 "The secret is set, but the Worker still says it is not"
+
+A Cloudflare secret is bound under the exact name it was saved as, on the exact
+Worker it was saved for. Three mistakes produce the same dashboard view — a
+secret that looks set — and only the Worker can tell them apart, which is what
+`GET /account/session` (`emailDelivery.reason`) now reports.
+
+1. **Check the name and the Worker.** From the repo root, against the same
+   Worker the deploy workflow publishes (`demo-mcp`, per `wrangler.jsonc`):
+
+   ```bash
+   npx wrangler secret list          # names only — values are never printed
+   ```
+
+   Nothing sensitive is shown, but the list is authoritative: if `SMTP_PASSWORD`
+   (or an accepted alias) is not in it, the Worker cannot send. Secrets are per
+   Worker — setting one on the `demo-platform` Pages project, on another Worker,
+   or in a second Cloudflare account does nothing here. The deploy workflow
+   prints this list on every run.
+2. **Near-miss names now work, empty values are called out.** A secret saved as
+   `smtp_password`, `smtp-pass`, `GMAIL_APP_PASSWORD` or `SMTP_PASS` is accepted
+   (matching is case-insensitive). A secret that exists but holds only
+   whitespace is reported as *"the `X` secret exists on this Worker but its value
+   is empty"* — the dashboard shows names, never values, so that one is
+   invisible from outside the Worker.
+3. **The value itself must be an App Password.** App Passwords only exist once
+   2-Step Verification is on for `demomcp7@gmail.com`; they are 16 characters
+   shown in groups of four. Paste it with or without the spaces — the Gmail path
+   strips them before authenticating. A normal Google account password is
+   rejected by `smtp.gmail.com` at the `auth` step, not at configuration time.
+
+After changing a secret no redeploy is needed: it is live on the next request.
 
 ## 4. Security properties (implemented, tested)
 

@@ -7,6 +7,7 @@ import { handleRobloxOAuthRoute, isRobloxOAuthPath } from "./src/roblox/routes.j
 import { handleMcpOAuthRoute, isMcpOAuthPath } from "./src/auth/oauth-routes.js";
 import { handleAccountRoute, isAccountPath } from "./src/account/routes.js";
 import { accountStoreAvailable } from "./src/account/store.js";
+import { resolveAccountEmailConfig } from "./src/account/email.js";
 import { MCP_OAUTH_SCOPES, mcpOAuthReady, resolveMcpOAuthConfig } from "./src/auth/oauth-config.js";
 import { SessionManager } from "./src/session/manager.js";
 import { VideoArtifactStore, artifactBaseUrl, parseRangeHeader } from "./src/video/store.js";
@@ -190,13 +191,19 @@ function mcpOAuthSurface(env: Env) {
 
 function accountSurface(env: Env) {
   const available = accountStoreAvailable(env as unknown as Record<string, unknown>);
-  const emailConfigured = Boolean(String((env as unknown as { EMAIL_PROVIDER?: string }).EMAIL_PROVIDER ?? "").trim() && String((env as unknown as { EMAIL_FROM?: string }).EMAIL_FROM ?? "").trim() && String((env as unknown as { RESEND_API_KEY?: string }).RESEND_API_KEY ?? "").trim());
+  // Ask the email module itself. The old check read `RESEND_API_KEY` directly,
+  // which meant a deployment sending through Gmail SMTP — the shipped sender —
+  // reported email as unconfigured even with a working App Password secret.
+  const email = resolveAccountEmailConfig(env as unknown as Record<string, unknown>);
   return {
     available,
     storage: available ? "durable-object" : "unavailable",
     passwordHashing: "pbkdf2-hmac-sha256",
     sessions: available ? "opaque token, stored as hash, httpOnly cookie, server-side revocation" : "unavailable",
-    emailDelivery: emailConfigured,
+    // Presence only: the provider id and a boolean, never an address, a
+    // credential name or a value.
+    emailDelivery: email.configured,
+    emailProvider: email.provider,
     registrationOpen: available,
   };
 }

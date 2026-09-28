@@ -105,6 +105,13 @@
     //                            Requires the secret SMTP_PASSWORD, which is a
     //                            Google App Password for that mailbox:
     //                              wrangler secret put SMTP_PASSWORD
+    //                            The name is matched case-insensitively, and
+    //                            GMAIL_APP_PASSWORD / SMTP_PASS /
+    //                            EMAIL_PASSWORD / APP_PASSWORD are accepted too
+    //                            (src/account/email.ts), because a secret saved
+    //                            under a near-miss name is otherwise invisible
+    //                            to the Worker while looking perfectly set in
+    //                            the dashboard.
     //   EMAIL_PROVIDER=resend  → https://api.resend.com, requires the secret
     //                            RESEND_API_KEY (`wrangler secret put RESEND_API_KEY`)
     //                            and a From domain verified in Resend. Keeping
