@@ -56,6 +56,95 @@ export interface AccountEmailEnv extends Record<string, unknown> {
   SMTP_PASSWORD?: string;
 }
 
+/**
+ * Accepted binding names for the SMTP password secret, canonical name first.
+ *
+ * The value is typed by hand into the Cloudflare dashboard or piped into
+ * `wrangler secret put`, and a secret only ever reaches the Worker under the
+ * exact name it was saved as. Cloudflare binding names are case sensitive, so a
+ * secret saved as `smtp_password`, `SMTP_PASS` or `GMAIL_APP_PASSWORD` is
+ * perfectly visible in the dashboard while `env.SMTP_PASSWORD` stays undefined
+ * — the deployment then reports "the secret is not set" to an operator who is
+ * looking straight at it. Accepting the usual spellings, matched
+ * case- and separator-insensitively, turns that dead end into a working sender.
+ * Only the *name* is ever reported; the value never is.
+ */
+export const SMTP_PASSWORD_SECRETS = [
+  "SMTP_PASSWORD",
+  "GMAIL_APP_PASSWORD",
+  "SMTP_PASS",
+  "EMAIL_PASSWORD",
+  "APP_PASSWORD",
+] as const;
+
+export interface SecretPresence {
+  /** The env key the value was found under; null when no such key exists at all. */
+  key: string | null;
+  /** Trimmed value — empty when unset, or when set to whitespace only. */
+  value: string;
+}
+
+/** Binding names compare case- and separator-insensitively (`smtp-pass` == `SMTP_PASS`). */
+function normalizeKeyName(name: string): string {
+  return String(name ?? "").trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_");
+}
+
+/**
+ * Look a secret up under any of its accepted names.
+ *
+ * The key is returned even when the value is blank, because "no secret with
+ * this name exists" and "a secret with this name is set to nothing" are two
+ * different operator mistakes that look identical from the outside — and the
+ * second one is invisible from the Cloudflare dashboard, which shows the name
+ * and never the value.
+ */
+export function resolveEnvSecret(
+  env: AccountEmailEnv | Record<string, unknown>,
+  names: readonly string[],
+): SecretPresence {
+  const source = (env ?? {}) as Record<string, unknown>;
+  let blank: string | null = null;
+  const note = (key: string, value: string): SecretPresence => {
+    if (value) return { key, value };
+    if (blank === null) blank = key;
+    return { key: blank, value: "" };
+  };
+  // Exact names first, so the canonical spelling always wins over a lookalike.
+  for (const name of names) {
+    const raw = source[name];
+    if (typeof raw !== "string") continue;
+    const found = note(name, raw.trim());
+    if (found.value) return found;
+  }
+  const wanted = new Set(names.map(normalizeKeyName));
+  for (const [key, raw] of Object.entries(source)) {
+    if (typeof raw !== "string") continue;
+    if (!wanted.has(normalizeKeyName(key))) continue;
+    const found = note(key, raw.trim());
+    if (found.value) return found;
+  }
+  return { key: blank, value: "" };
+}
+
+/**
+ * The operator-facing explanation for a missing SMTP password.
+ *
+ * Says which names were looked for and how to set it, because "the secret is
+ * not set" is only actionable once the operator knows exactly what the Worker
+ * looks for and why it cannot see what they already saved.
+ */
+function smtpPasswordReason(secret: SecretPresence, mailbox: string | null): string {
+  if (secret.key) {
+    return `Email delivery is off: the ${secret.key} secret exists on this Worker but its value is empty. `
+      + "Re-set it with: wrangler secret put SMTP_PASSWORD";
+  }
+  const target = mailbox ? ` for ${mailbox}` : "";
+  return `Email delivery is off: no SMTP password secret is set on this Worker${target}. `
+    + `DEMO looks for a Google App Password under ${SMTP_PASSWORD_SECRETS.join(", ")} `
+    + "(names are matched case-insensitively) and found none of them. "
+    + "Set the canonical one with: wrangler secret put SMTP_PASSWORD";
+}
+
 export interface AccountEmailConfig {
   provider: EmailProviderId | null;
   /** True only when a real send has a complete, usable configuration. */
@@ -170,7 +259,7 @@ export function resolveAccountEmailConfig(env: AccountEmailEnv): AccountEmailCon
   // SMTP-family providers.
   if (provider === "gmail") {
     const username = String(env.SMTP_USERNAME ?? "").trim() || base.from;
-    const password = String(env.SMTP_PASSWORD ?? "").trim();
+    const secret = resolveEnvSecret(env, SMTP_PASSWORD_SECRETS);
     const smtp = { host: DEFAULT_GMAIL_HOST, port: DEFAULT_GMAIL_PORT, secureTransport: "on" as const };
     if (!isEmailAddress(username)) {
       return { ...base, provider, configured: false, reason: "Email delivery is off: the Gmail SMTP username is not a usable email address.", smtp };
@@ -186,12 +275,12 @@ export function resolveAccountEmailConfig(env: AccountEmailEnv): AccountEmailCon
         smtp,
       };
     }
-    if (!password) {
+    if (!secret.value) {
       return {
         ...base,
         provider,
         configured: false,
-        reason: "Email delivery is off: the SMTP_PASSWORD secret (a Google App Password for this mailbox) is not set on this Worker.",
+        reason: smtpPasswordReason(secret, base.from),
         smtp,
       };
     }
@@ -200,7 +289,7 @@ export function resolveAccountEmailConfig(env: AccountEmailEnv): AccountEmailCon
 
   const host = String(env.SMTP_HOST ?? "").trim().toLowerCase();
   const username = String(env.SMTP_USERNAME ?? "").trim();
-  const password = String(env.SMTP_PASSWORD ?? "").trim();
+  const secret = resolveEnvSecret(env, SMTP_PASSWORD_SECRETS);
   const port = portFrom(env.SMTP_PORT, 465);
   const plaintextLoopback = !boolFrom(env.SMTP_SECURE, true) && isLoopbackHost(host);
   const secureTransport: "on" | "starttls" | "off" = plaintextLoopback
@@ -222,8 +311,11 @@ export function resolveAccountEmailConfig(env: AccountEmailEnv): AccountEmailCon
   if (port === 25) {
     return { ...base, provider, configured: false, reason: "Email delivery is off: Cloudflare Workers cannot connect to SMTP port 25.", smtp };
   }
-  if (!username || !password) {
-    return { ...base, provider, configured: false, reason: "Email delivery is off: SMTP_USERNAME and the SMTP_PASSWORD secret are both required.", smtp };
+  if (!username) {
+    return { ...base, provider, configured: false, reason: "Email delivery is off: SMTP_USERNAME is not set on this Worker; a password alone cannot authenticate.", smtp };
+  }
+  if (!secret.value) {
+    return { ...base, provider, configured: false, reason: smtpPasswordReason(secret, base.from), smtp };
   }
   return { ...base, provider, configured: true, reason: null, smtp };
 }
@@ -310,6 +402,15 @@ async function sendViaSmtp(
 ): Promise<EmailSendResult> {
   const smtp = config.smtp!;
   const username = String(env.SMTP_USERNAME ?? "").trim() || config.from!;
+  // Resolve the credential through the same alias-aware lookup the
+  // configuration check used, so a password saved under an accepted alias is
+  // the password that actually goes on the wire.
+  const resolved = resolveEnvSecret(env, SMTP_PASSWORD_SECRETS);
+  // Google displays App Passwords in groups of four ("abcd efgh ijkl mnop").
+  // The grouping is display-only, so a value pasted verbatim would otherwise
+  // authenticate with spaces that were never part of the credential. Only the
+  // Gmail path strips them: a generic relay password is used exactly as saved.
+  const password = config.provider === "gmail" ? resolved.value.replace(/\s+/g, "") : resolved.value;
   const mime = buildMimeMessage({
     from: config.from!,
     fromName: config.fromName,
@@ -323,7 +424,7 @@ async function sendViaSmtp(
     port: smtp.port,
     secureTransport: smtp.secureTransport,
     username,
-    password: String(env.SMTP_PASSWORD ?? "").trim(),
+    password,
     envelopeFrom: config.from!,
     recipient: message.to,
     message: mime,

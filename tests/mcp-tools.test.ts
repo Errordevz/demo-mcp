@@ -185,6 +185,29 @@ describe("worker routes", () => {
     expect(serialized).not.toMatch(/\"(?:authorization|access_token|refresh_token|client_secret|api_key)\"\s*:/i);
   });
 
+  it("reports email delivery from the email configuration, not from one provider's key", async () => {
+    // Regression: /platform/stats used to read RESEND_API_KEY directly, so a
+    // deployment sending through Gmail SMTP — the shipped sender — reported
+    // email as unconfigured even with a working App Password secret.
+    const gmail = await platform.fetch(
+      new Request("https://demo.test/platform/stats"),
+      {
+        EMAIL_PROVIDER: "gmail",
+        EMAIL_FROM: "DEMO MCP <demomcp7@gmail.com>",
+        SMTP_PASSWORD: "app-password-sentinel",
+      } as never,
+      CTX,
+    );
+    const gmailBody = (await gmail.json()) as Record<string, any>;
+    expect(gmailBody.capabilities.accounts.emailDelivery).toBe(true);
+    expect(gmailBody.capabilities.accounts.emailProvider).toBe("gmail");
+    expect(JSON.stringify(gmailBody)).not.toContain("app-password-sentinel");
+
+    const none = await platform.fetch(new Request("https://demo.test/platform/stats"), {} as never, CTX);
+    const noneBody = (await none.json()) as Record<string, any>;
+    expect(noneBody.capabilities.accounts.emailDelivery).toBe(false);
+  });
+
   it("offers an obvious Connect Roblox entry point in the UI and the server instructions", async () => {
     const root = await platform.fetch(new Request("https://demo.test/"), ENV as never, CTX);
     expect(root.status).toBe(200);

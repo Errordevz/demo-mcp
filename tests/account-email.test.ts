@@ -16,6 +16,7 @@ import net from "node:net";
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_EMAIL_FROM,
+  SMTP_PASSWORD_SECRETS,
   parseFrom,
   resolveAccountEmailConfig,
   sendAccountEmail,
@@ -286,6 +287,88 @@ describe("MIME message construction", () => {
 });
 
 /* ------------------------------------------------------ provider policy rules */
+
+/**
+ * The App Password is a Cloudflare secret, so it only reaches the Worker under
+ * the exact name it was saved as — and Cloudflare binding names are case
+ * sensitive. These tests pin the lookup that makes a hand-typed name usable
+ * instead of a permanent "the secret is not set" report.
+ */
+describe("SMTP password secret lookup", () => {
+  it("accepts the App Password under any accepted name, in any case or separator", () => {
+    const spellings: Array<Record<string, string>> = [
+      { SMTP_PASSWORD: "app-password" },
+      { smtp_password: "app-password" },
+      { Smtp_Password: "app-password" },
+      { GMAIL_APP_PASSWORD: "app-password" },
+      { "smtp-pass": "app-password" },
+      { APP_PASSWORD: "app-password" },
+    ];
+    for (const secret of spellings) {
+      const config = resolveAccountEmailConfig({ EMAIL_PROVIDER: "gmail", EMAIL_FROM: DEFAULT_EMAIL_FROM, ...secret });
+      expect(config.configured, `secret saved as ${Object.keys(secret)[0]}`).toBe(true);
+      expect(config.smtp).toEqual({ host: "smtp.gmail.com", port: 465, secureTransport: "on" });
+    }
+    // Every accepted name is also honoured by the generic relay provider.
+    const relay = resolveAccountEmailConfig({
+      EMAIL_PROVIDER: "smtp", EMAIL_FROM: "DEMO MCP <auth@example.com>", SMTP_HOST: "smtp.example.com",
+      SMTP_PORT: "587", SMTP_USERNAME: "auth@example.com", GMAIL_APP_PASSWORD: "relay-password",
+    });
+    expect(relay.configured).toBe(true);
+  });
+
+  it("names every accepted secret when none is set, and the exact key when one is empty", () => {
+    const missing = resolveAccountEmailConfig({ EMAIL_PROVIDER: "gmail", EMAIL_FROM: DEFAULT_EMAIL_FROM });
+    expect(missing.configured).toBe(false);
+    for (const name of SMTP_PASSWORD_SECRETS) expect(missing.reason).toContain(name);
+    expect(missing.reason).toContain("wrangler secret put SMTP_PASSWORD");
+
+    // A secret that exists but holds nothing is a different mistake from a
+    // missing one, and the dashboard cannot show the difference: it lists the
+    // name and never the value.
+    const blank = resolveAccountEmailConfig({ EMAIL_PROVIDER: "gmail", EMAIL_FROM: DEFAULT_EMAIL_FROM, SMTP_PASSWORD: "   " });
+    expect(blank.configured).toBe(false);
+    expect(blank.reason).toContain("SMTP_PASSWORD");
+    expect(blank.reason).toContain("empty");
+  });
+
+  it("strips the display spacing Google puts in an App Password before authenticating", async () => {
+    const server = await startSmtpServer();
+    try {
+      const result = await sendAccountEmail(
+        { EMAIL_PROVIDER: "gmail", EMAIL_FROM: DEFAULT_EMAIL_FROM, GMAIL_APP_PASSWORD: "abcd efgh ijkl mnop" },
+        { to: "user@example.com", subject: "Verify your DEMO account", text: "code" },
+        { connect: server.connect },
+      );
+      expect(result.sent).toBe(true);
+      const line = server.captured.authPlain[0] ?? "";
+      const decoded = Buffer.from(line.slice("AUTH PLAIN ".length), "base64").toString("utf8");
+      expect(decoded).toBe("\u0000demomcp7@gmail.com\u0000abcdefghijklmnop");
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("keeps a relay password exactly as it was saved", async () => {
+    const server = await startSmtpServer();
+    try {
+      const result = await sendAccountEmail(
+        {
+          EMAIL_PROVIDER: "smtp", EMAIL_FROM: "DEMO MCP <auth@example.com>", SMTP_HOST: "smtp.example.com",
+          SMTP_PORT: "465", SMTP_USERNAME: "auth@example.com", SMTP_PASSWORD: "relay pass word",
+        },
+        { to: "user@example.com", subject: "Verify", text: "code" },
+        { connect: server.connect },
+      );
+      expect(result.sent).toBe(true);
+      const line = server.captured.authPlain[0] ?? "";
+      const decoded = Buffer.from(line.slice("AUTH PLAIN ".length), "base64").toString("utf8");
+      expect(decoded).toBe("\u0000auth@example.com\u0000relay pass word");
+    } finally {
+      await server.close();
+    }
+  });
+});
 
 describe("sender-identity policy", () => {
   it("defaults to the DEMO sender identity", () => {
