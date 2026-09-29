@@ -53,6 +53,14 @@ const ACCEPTABLE_BLOCK_ERRORS = [
   "UNSUPPORTED_MEDIA",
   "PROCESSING_TIMEOUT",
   "FRAMES_UNAVAILABLE",
+  // The per-source rate limit (`rate_limited`, retryable by design) is an
+  // honest "could not, try later" answer, not a pipeline failure: the suite
+  // calls many video tools in sequence against one public fixture, so it can
+  // legitimately hit its own throttle. The block is only accepted with
+  // success=false, an explicit message and frames=[], which every call site
+  // below already asserts; the live client also retries a refusal before the
+  // assertion runs.
+  "rate_limited",
 ];
 
 describe.skipIf(!liveEnv().enabled)("public video acceptance (live)", () => {

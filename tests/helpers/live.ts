@@ -258,10 +258,13 @@ export function connectLive(baseUrl?: string): LiveClient {
       const { attempts, delayMs } = transientRetry();
       let last = await callOnce();
       for (let attempt = 2; attempt <= attempts && isTransientRateLimit(last); attempt += 1) {
+        // Growing wait: a per-minute limiter is not ready after a fixed short
+        // nap, and hammering it turns a retryable refusal into a failure.
+        const waitMs = delayMs * (attempt - 1);
         console.warn(
-          `[live] ${name} was refused by an upstream rate limit; retry ${attempt}/${attempts} in ${delayMs} ms`,
+          `[live] ${name} was refused by an upstream rate limit; retry ${attempt}/${attempts} in ${waitMs} ms`,
         );
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
         last = await callOnce();
       }
       return last;
