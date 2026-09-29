@@ -1,5 +1,13 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { connectLive, liveEnv, LIVE_SKIP_REASON, skipIfUnavailable, startDevWorker } from "./helpers/live.js";
+import {
+  connectLive,
+  isTransientRateLimit,
+  liveEnv,
+  LIVE_SKIP_REASON,
+  skipIfUnavailable,
+  startDevWorker,
+  transientRetry,
+} from "./helpers/live.js";
 
 /**
  * Live tests drive the real Cloudflare Browser Rendering service. They only run
@@ -102,5 +110,36 @@ describe("live test helper", () => {
   it("documents why live tests are disabled by default", () => {
     if (liveEnv().enabled) expect(LIVE_SKIP_REASON).toBeNull();
     else expect(LIVE_SKIP_REASON).toMatch(/DEMO_MCP_LIVE/);
+  });
+
+  it("recognises upstream rate-limit refusals as retryable, and real failures as final", () => {
+    expect(
+      isTransientRateLimit({
+        text: '{"success":false,"message":"Unable to create new browser: code: 429: message: Rate limit exceeded"}',
+        parsed: { success: false, message: "Unable to create new browser: code: 429: message: Rate limit exceeded" },
+      }),
+    ).toBe(true);
+    expect(
+      isTransientRateLimit({ text: "Error: service temporarily unavailable", parsed: null, isError: true }),
+    ).toBe(true);
+    // A genuine product failure must never be retried into a pass.
+    expect(
+      isTransientRateLimit({
+        text: '{"success":false,"message":"The URL is not a valid video"}',
+        parsed: { success: false, message: "The URL is not a valid video" },
+      }),
+    ).toBe(false);
+    // A successful result that merely mentions a rate limit is not a refusal.
+    expect(
+      isTransientRateLimit({ text: '{"success":true,"note":"page shows 429"}', parsed: { success: true } }),
+    ).toBe(false);
+  });
+
+  it("bounds the retry policy read from the environment", () => {
+    const defaults = transientRetry();
+    expect(defaults.attempts).toBeGreaterThanOrEqual(1);
+    expect(defaults.attempts).toBeLessThanOrEqual(10);
+    expect(defaults.delayMs).toBeGreaterThanOrEqual(0);
+    expect(defaults.delayMs).toBeLessThanOrEqual(120_000);
   });
 });
