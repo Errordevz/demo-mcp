@@ -19,6 +19,11 @@
 name: Deploy + live video tests
 
 on:
+  # A merge to main is the release: typecheck + the full offline suite gate the
+  # deploy step below, so a broken tree cannot reach production. Remove this
+  # trigger if you prefer to release by hand from the Actions tab.
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       skip_live:
