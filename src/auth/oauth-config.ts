@@ -1,6 +1,6 @@
 /** Pinned public issuer and resource configuration for DEMO's MCP OAuth server. */
 
-export const MCP_OAUTH_SCOPES = ["roblox:read", "roblox:link", "roblox:disconnect", "decision:use"] as const;
+export const MCP_OAUTH_SCOPES = ["roblox:read", "roblox:link", "roblox:disconnect", "decision:use", "collab:write", "collab:admin"] as const;
 export type McpOAuthScope = (typeof MCP_OAUTH_SCOPES)[number];
 
 export const MCP_OAUTH_SCOPE_DESCRIPTIONS: Readonly<Record<McpOAuthScope, string>> = {
@@ -8,6 +8,8 @@ export const MCP_OAUTH_SCOPE_DESCRIPTIONS: Readonly<Record<McpOAuthScope, string
   "roblox:link": "Create a one-time link code to separately authorize a Roblox account.",
   "roblox:disconnect": "Revoke and remove the authenticated user's own Roblox grant.",
   "decision:use": "Run a DEMO paid typed-decision request.",
+  "collab:write": "Read and change the shared coding workspace (tasks, patches, reviews, test records).",
+  "collab:admin": "Perform administrator operations such as refreshing the Build Your Own X index.",
 };
 
 export interface McpOAuthConfig {

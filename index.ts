@@ -1,5 +1,6 @@
 import { createMcpHandler } from "agents/mcp/server";
 import { addToolSecuritySchemes } from "./src/auth/mcp-security.js";
+import { requireMcpScope } from "./src/auth/tool-auth.js";
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { SessionManager, type SessionManagerEnv } from "./src/session/manager.js";
@@ -20,6 +21,11 @@ import { registerJevTools, JEV_TOOL_NAMES, jevCapabilitiesReport } from "./src/m
 import { JEV_CAPABILITIES_URI } from "./src/jev/capabilities.js";
 import { jevFlags, type JevEnv } from "./src/jev/config.js";
 import { registerLayaTools, LAYA_TOOL_NAMES, layaCapabilitiesReport } from "./src/mcp/laya-tools.js";
+import { registerByoxTools, BYOX_TOOL_NAMES, byoxCapabilitiesReport, BYOX_CAPABILITIES_URI } from "./src/mcp/byox-tools.js";
+import { loadByoxIndex } from "./src/byox/store.js";
+import { BYOX_SOURCE_REPO } from "./src/mcp/byox-tools.js";
+import { accountStoreAvailable } from "./src/account/store.js";
+import { registerCollabTools, COLLAB_TOOL_NAMES, collabCapabilitiesReport, COLLAB_CAPABILITIES_URI } from "./src/mcp/collab-tools.js";
 import { LAYA_CAPABILITIES_URI } from "./src/laya/capabilities.js";
 import { layaFlags, type LayaEnv } from "./src/laya/config.js";
 import { resolveDecisionRoutingMode } from "./src/decisions/provider.js";
@@ -586,6 +592,26 @@ function server(env: Env, requestUrl: string | null = null, authorization: strin
 
   registerLayaTools(mcp, { env: env as unknown as Record<string, unknown>, requestUrl });
 
+  /* ----------------------- Build Your Own X catalog (metadata, read-only) */
+
+  registerByoxTools(mcp, {
+    env: env as unknown as Record<string, unknown>,
+    authorization,
+    // The administrator path accepts either the operator key from the HTTP
+    // route or a DEMO OAuth grant that carries the collab:admin scope. The
+    // scope check reuses the same verified-grant lookup as every other
+    // protected tool, so a token cannot self-assert it.
+    hasScope: async (scope) => {
+      const outcome = await requireMcpScope({ env: env as unknown as Record<string, unknown>, authorization }, "byox_refresh_index", scope);
+      return outcome.ok;
+    },
+  });
+
+  /* --------------------------- shared coding workspace and collaborators */
+
+  registerCollabTools(mcp, { env: env as unknown as Record<string, unknown>, authorization });
+
+
   /* ---------------------------------------------- public YouTube Data API v3 */
 
   registerYouTubeTools(mcp, { env: env as unknown as Record<string, unknown> & YouTubeEnv, requestUrl });
@@ -831,6 +857,10 @@ export const DEMO_TOOL_NAMES = [
   ...LAYA_TOOL_NAMES,
   // Public YouTube Data API v3
   ...YOUTUBE_TOOL_NAMES,
+  // Build Your Own X catalog (metadata only; refresh is administrator-only)
+  ...BYOX_TOOL_NAMES,
+  // Shared coding workspace and collaborator coordination
+  ...COLLAB_TOOL_NAMES,
   // DEMO 0.9 capability expansion (public, read-only)
   ...GIT_TOOL_NAMES,
   ...ARCHIVE_TOOL_NAMES,
@@ -869,9 +899,17 @@ export default {
       ...gitFlags(env as unknown as Record<string, unknown>),
       expandedCapabilities: true,
       skillsSh: true,
+      // Build Your Own X: an R2-backed reference catalog. `byoxIndexed` is not a
+      // presence flag — read /capabilities/byox for freshness and counts.
+      byoxCatalog: true,
+      byoxSource: BYOX_SOURCE_REPO,
+      // Collaboration state reuses the DEMO_ACCOUNTS object, so this is exactly
+      // "the account store is bound"; no separate binding or migration exists.
+      collabWorkspace: accountStoreAvailable(env as unknown as Record<string, unknown>),
+      collabApplyEnabled: String((env as unknown as Record<string, unknown>).COLLAB_ALLOW_APPLY ?? "true").toLowerCase() !== "false",
       composio: false,
       toolCount: TOOL_COUNT,
-      resources: [VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI, ROBLOX_CAPABILITIES_URI, JEV_CAPABILITIES_URI, LAYA_CAPABILITIES_URI, YOUTUBE_CAPABILITIES_URI, EXPANDED_CAPABILITIES_URI],
+      resources: [VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI, ROBLOX_CAPABILITIES_URI, JEV_CAPABILITIES_URI, LAYA_CAPABILITIES_URI, YOUTUBE_CAPABILITIES_URI, EXPANDED_CAPABILITIES_URI, BYOX_CAPABILITIES_URI, COLLAB_CAPABILITIES_URI],
     };
     // Register commands for the /mcp, /jev and /laya command system
     registerCommand(createMcpCommand({ version: VERSION, toolNames: DEMO_TOOL_NAMES, commands: listCommands() }));
@@ -880,11 +918,16 @@ export default {
     const headers = securityHeaders();
     if (url.pathname === "/") return Response.json({ ...status, capabilities }, { headers });
     if (url.pathname === "/health") return Response.json({ ok: true, ...status }, { headers });
-    if (url.pathname === "/tools") return Response.json({ count: TOOL_COUNT, tools: DEMO_TOOL_NAMES, resources: [VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI, YOUTUBE_CAPABILITIES_URI, EXPANDED_CAPABILITIES_URI] }, { headers });
+    if (url.pathname === "/tools") return Response.json({ count: TOOL_COUNT, tools: DEMO_TOOL_NAMES, resources: [VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI, YOUTUBE_CAPABILITIES_URI, EXPANDED_CAPABILITIES_URI, BYOX_CAPABILITIES_URI, COLLAB_CAPABILITIES_URI] }, { headers });
     if (url.pathname === "/capabilities/expanded") return Response.json(expandedCapabilitiesReport(env as unknown as Record<string, unknown>, { version: VERSION, browserAvailable: capabilities.browserAvailable }), { headers });
     if (url.pathname === "/capabilities/jev") return Response.json(jevCapabilitiesReport(env as unknown as Record<string, unknown>), { headers });
     if (url.pathname === "/capabilities/laya") return Response.json(layaCapabilitiesReport(env as unknown as Record<string, unknown>), { headers });
     if (url.pathname === "/capabilities/youtube") return Response.json(youTubeCapabilitiesReport(env as unknown as Record<string, unknown>), { headers });
+    if (url.pathname === "/capabilities/byox") {
+      const load = await loadByoxIndex(env as unknown as Record<string, unknown>);
+      return Response.json(byoxCapabilitiesReport(env as unknown as Record<string, unknown>, load, { version: VERSION }), { headers });
+    }
+    if (url.pathname === "/capabilities/collab") return Response.json(collabCapabilitiesReport(env as unknown as Record<string, unknown>, { version: VERSION }), { headers });
     if (url.pathname === "/capabilities/video") {
       return Response.json(describeVideoCapabilities(env as Env & Record<string, unknown>, browserCapabilitiesFor(env, request.url)), { headers });
     }

@@ -6,6 +6,8 @@ import { demoUi } from "./ui";
 import { handleRobloxOAuthRoute, isRobloxOAuthPath } from "./src/roblox/routes.js";
 import { handleMcpOAuthRoute, isMcpOAuthPath } from "./src/auth/oauth-routes.js";
 import { handleAccountRoute, isAccountPath } from "./src/account/routes.js";
+import { handleCollabRoute, isCollabPath } from "./src/collab/routes.js";
+import { handleByoxRoute, isByoxPath } from "./src/byox/routes.js";
 import { accountStoreAvailable } from "./src/account/store.js";
 import { resolveAccountEmailConfig } from "./src/account/email.js";
 import { MCP_OAUTH_SCOPES, mcpOAuthReady, resolveMcpOAuthConfig } from "./src/auth/oauth-config.js";
@@ -298,6 +300,8 @@ function telemetry(env: Env) {
       layaDecisionProvider: layaSurface(env),
       typedDecisions: jevSurface(env).available || layaSurface(env).available,
       youtube: youtubeSurface(env),
+      byox: { available: true, source: "codecrafters-io/build-your-own-x", refreshRequiresAdmin: true },
+      collaboration: { workspaceStorage: accountSurface(env).available, applyEnabled: String((env as unknown as Record<string, unknown>).COLLAB_ALLOW_APPLY ?? "true").toLowerCase() !== "false", scopes: ["collab:write", "collab:admin"] },
       expanded: {
         git: true,
         gitPublicOnly: true,
@@ -329,6 +333,8 @@ function telemetry(env: Env) {
       { name: "Laya", type: "External typed-decision provider (HTTP API)", connected: layaSurface(env).available },
       { name: "YouTube Data API", type: "Public metadata (Data API v3)", connected: youtubeSurface(env).available },
       { name: "Git (smart HTTP)", type: "Public repositories, no API key", connected: true },
+      { name: "Build Your Own X catalog", type: "R2-backed reference index (metadata only)", connected: true },
+      { name: "Collaboration workspace", type: "Durable Object (DemoAccounts, collab: keys)", connected: accountSurface(env).available },
       { name: "Internet Archive", type: "Wayback + archive.org public APIs", connected: true },
       { name: "Workers AI vision", type: "Image/PDF OCR + description", connected: Boolean(env.AI && typeof (env.AI as { run?: unknown }).run === "function") },
       { name: "Web snapshots", type: "R2 (expiring objects)", connected: Boolean(env.SCREENSHOTS || env.WEB_SNAPSHOTS) },
@@ -346,6 +352,11 @@ function telemetry(env: Env) {
       layaCapabilities: "/capabilities/laya",
       youtubeCapabilities: "/capabilities/youtube",
       expandedCapabilities: "/capabilities/expanded",
+      byoxCapabilities: "/capabilities/byox",
+      collabCapabilities: "/capabilities/collab",
+      collab: "/collab",
+      byox: "/byox",
+      byoxSearch: "/byox/search?q=",
     },
     telemetry: { scope: "worker-isolate", containsSecrets: false, containsUserContent: false },
   };
@@ -501,6 +512,22 @@ export default {
 
     if (origin && !allowedOrigin(origin, env)) return new Response("Forbidden origin", { status: 403, headers: { "Vary": "Origin" } });
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders(origin, env) });
+
+    if (isByoxPath(url.pathname)) {
+      // Public, metadata-only catalog API. The refresh sub-route is
+      // administrator-gated inside the handler, not here.
+      const byox = await handleByoxRoute(request, env as unknown as Record<string, unknown>);
+      if (byox) return withCors(byox, request, env);
+      return new Response("Not Found", { status: 404, headers: { Vary: "Origin" } });
+    }
+
+    if (isCollabPath(url.pathname)) {
+      // The workspace JSON API. Same origin policy as /mcp: the dashboard is
+      // same-origin, and every write additionally needs a collab:write grant.
+      const collab = await handleCollabRoute(request, env as unknown as Record<string, unknown>);
+      if (collab) return withCors(collab, request, env);
+      return new Response("Not Found", { status: 404, headers: { Vary: "Origin" } });
+    }
 
     if (url.pathname === "/") return demoUi(request.url, env);
 

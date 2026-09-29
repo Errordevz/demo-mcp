@@ -11,6 +11,19 @@ const READ: McpSecurityScheme[] = [{ type: "oauth2", scopes: ["roblox:read"] }];
 const LINK: McpSecurityScheme[] = [{ type: "oauth2", scopes: ["roblox:link"] }];
 const DISCONNECT: McpSecurityScheme[] = [{ type: "oauth2", scopes: ["roblox:disconnect"] }];
 const DECISION: McpSecurityScheme[] = [{ type: "oauth2", scopes: ["decision:use"] }];
+const COLLAB: McpSecurityScheme[] = [{ type: "oauth2", scopes: ["collab:write"] }];
+const BYOX_ADMIN: McpSecurityScheme[] = [{ type: "oauth2", scopes: ["collab:admin"] }];
+
+/** Tools that require the shared-workspace grant. */
+const COLLAB_TOOLS = new Set([
+  "collab_workspace",
+  "collab_task",
+  "collab_patch",
+  "collab_review",
+  "collab_tests",
+  "collab_delegate",
+  "collab_history",
+]);
 
 function cloneSchemes(schemes: McpSecurityScheme[]): McpSecurityScheme[] {
   return schemes.map((scheme) => scheme.type === "oauth2"
@@ -32,8 +45,10 @@ export function securitySchemesForTool(name: string): McpSecurityScheme[] {
       return cloneSchemes(DISCONNECT);
     case "jev_decide":
       return cloneSchemes(DECISION);
+    case "byox_refresh_index":
+      return cloneSchemes(BYOX_ADMIN);
     default:
-      return cloneSchemes(PUBLIC);
+      return COLLAB_TOOLS.has(name) ? cloneSchemes(COLLAB) : cloneSchemes(PUBLIC);
   }
 }
 

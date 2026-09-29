@@ -38,6 +38,8 @@ function groupFor(name) {
   if (name === "web_extract" || name === "web_diff" || name === "web_monitor") return "Web Intelligence";
   if (name === "web_research") return "Research";
   if (name === "openapi_inspect" || name === "net_diagnose" || name === "url_inspect") return "Network";
+  if (name.startsWith("byox_")) return "Build Your Own X";
+  if (name.startsWith("collab_")) return "Collaboration";
   return "Utilities";
 }
 
@@ -59,6 +61,11 @@ function availabilityFor(name) {
   if (name === "video_extract_frames" || name === "browser_video_frames") return "frames";
   if (name === "video_fetch" || name === "video_extract_audio" || name === "video_ingest" || name === "video_get_frame") return "artifacts";
   if (name === "web_monitor") return "snapshots";
+  // The BYOX catalog itself is public; only the administrator refresh is not.
+  if (name === "byox_refresh_index") return "oauth";
+  // Workspace content is project code: every collab tool but the capability
+  // listing needs a collab:write DEMO OAuth grant.
+  if (name.startsWith("collab_") && name !== "collab_collaborators") return "oauth";
   if (name === "web_research") return "always";
   return "always";
 }

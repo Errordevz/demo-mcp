@@ -168,6 +168,31 @@ Worker only accepts `type: "app"`. Failure output is byte-bounded (8 KiB read,
 600 chars printed) and redacted by `scripts/safe-diagnostics.mjs`. See
 [`docs/TESTING.md`](docs/TESTING.md) §Post-deploy smoke check.
 
+## Build Your Own X and collaboration
+
+DEMO indexes the public
+[`codecrafters-io/build-your-own-x`](https://github.com/codecrafters-io/build-your-own-x)
+catalog and exposes it as reference metadata (`byox_search`, `byox_get_tutorial`,
+`byox_read_tutorial`, `byox_categories`, `byox_refresh_index`,
+`byox_learning_plan`). The index is incremental — ETag/`If-None-Match` first, then
+a SHA-256 comparison — and a truncated or implausibly small README never replaces
+a good index. Only an administrator (the `DEMO_API_KEY` secret, or the
+`collab:admin` OAuth scope) can refresh it; tutorial text is never re-hosted,
+never summarized in place of the source, and a page that refuses anonymous
+readers is reported as such.
+
+Alongside it, `collab_*` tools give ChatGPT, Jev and Laya a shared workspace:
+dependency-checked tasks, isolated patches with a base hash, conflict detection
+at submit *and* apply, review (never by a patch's own author), recorded test
+results, and typed Jev/Laya delegation. DEMO executes no code and writes nothing
+to GitHub by itself: with no `GITHUB_ACTIONS_TOKEN` configured, patches stay in
+DEMO's workspace copy and the tools say so instead of implying a deployment
+happened. Workspace content lives in the already-bound `DEMO_ACCOUNTS` Durable
+Object (`collab:` keys) — no new binding, no new migration — and reads require the
+`collab:write` OAuth scope because workspace content is project code.
+
+Full detail, routes and environment knobs: [`docs/BYOX-COLLABORATION.md`](docs/BYOX-COLLABORATION.md).
+
 ## Browser tools (persistent sessions)
 
 | Tool | What it does |

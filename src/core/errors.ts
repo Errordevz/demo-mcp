@@ -27,6 +27,14 @@ export type BrowserErrorCode =
   | "rate_limited"
   | "unsupported"
   | "internal"
+  /** The caller is missing the deployment's administrator credential. */
+  | "admin_required"
+  /** A write was refused because the target is not in a writable state. */
+  | "conflict"
+  /** A requested object (workspace, task, patch, tutorial) does not exist. */
+  | "not_found"
+  /** A capability exists but is not configured on this deployment. */
+  | "not_configured"
   // Stable machine-readable video pipeline errors.
   | "VIDEO_NOT_FOUND"
   | "VIDEO_NOT_PUBLIC"
@@ -103,14 +111,41 @@ export function encodeForRpc(error: unknown): Error {
   return new Error(`${RPC_MARKER}${JSON.stringify(info)}`);
 }
 
+/**
+ * Decode an encoded error. The marker is searched for rather than required at
+ * position 0 because runtimes may prefix the message (workerd prefixes RPC
+ * failures with the error class), and the payload is trimmed to its closing
+ * brace for the same reason.
+ */
 function decodeRpcMessage(message: string): BrowserErrorDetails | null {
-  if (!message.startsWith(RPC_MARKER)) return null;
+  const at = message.indexOf(RPC_MARKER);
+  if (at < 0) return null;
+  const payload = message.slice(at + RPC_MARKER.length);
+  const end = payload.lastIndexOf("}");
+  if (end < 0) return null;
   try {
-    const parsed = JSON.parse(message.slice(RPC_MARKER.length)) as BrowserErrorDetails;
+    const parsed = JSON.parse(payload.slice(0, end + 1)) as BrowserErrorDetails;
     return typeof parsed?.code === "string" && typeof parsed?.message === "string" ? parsed : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * Rebuild the original error after a Durable Object RPC hop. Returns the input
+ * unchanged when it carries no DEMO error payload, so callers can hand the
+ * result straight to `throw`.
+ */
+export function decodeRpcError(error: unknown): unknown {
+  const raw = error instanceof Error ? error.message : String(error);
+  const info = decodeRpcMessage(raw);
+  if (!info) return error;
+  return new BrowserError(info.code, info.message, {
+    ...(info.hint ? { hint: info.hint } : {}),
+    retryable: info.retryable,
+    ...(info.capability ? { capability: info.capability } : {}),
+    ...(info.data ? { data: info.data } : {}),
+  });
 }
 
 /** Human readable, redaction-safe description of any thrown value. */

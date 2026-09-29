@@ -53,7 +53,10 @@ var S = {
 
 var LAZY_ROUTES = {
   video: "/capabilities/video",
-  expanded: "/capabilities/expanded"
+  expanded: "/capabilities/expanded",
+  collab: "/capabilities/collab",
+  byox: "/capabilities/byox",
+  collabWorkspaces: "/collab/workspaces"
 };
 
 var EXPLORER_FILTERS = [
@@ -519,7 +522,7 @@ function renderView() {
   var views = {
     overview: overviewView, capabilities: capabilitiesView, tools: toolsView, status: statusView,
     browser: browserView, video: videoView, research: researchView, routing: routingView,
-    roblox: robloxView, skills: skillsView, about: aboutView,
+    roblox: robloxView, skills: skillsView, about: aboutView, collab: collabView,
     auth: authView, account: accountView, reset: resetView, verify: verifyLinkView, notfound: notfoundView
   };
   var fn = views[S.route] || notfoundView;
@@ -1151,6 +1154,126 @@ function routingView() {
       panel("Decision tools", "zap", '<div class="panel-bd--flush">' + dtRows + "</div>", { flush: true }) +
     "</div>"
   );
+}
+
+/* collaboration + build your own x */
+function collabView() {
+  var collab = S.lazy.collab, err = S.lazyErr.collab;
+  var byox = S.lazy.byox, byoxErr = S.lazyErr.byox;
+  var spaces = S.lazy.collabWorkspaces, spacesErr = S.lazyErr.collabWorkspaces;
+
+  var head = pageHead("Collaboration", "Shared workspace",
+    "DEMO coordinates ChatGPT, Jev and Laya on real repository work: task planning, isolated patches, conflict detection, review, recorded tests and typed delegation. DEMO executes no code itself and never reports that a collaborator did something it cannot verify.") + '<div style="height:20px"></div>';
+
+  if (!collab && !err) {
+    return head + '<div class="grid grid--2">' + skeletonPanel(4) + skeletonPanel(4) + "</div>" +
+      '<div style="height:16px"></div><div class="grid grid--2">' + skeletonPanel(3) + skeletonPanel(3) + "</div>";
+  }
+  if (!collab) {
+    return head + errPanel("Collaboration status unavailable", LAZY_ROUTES.collab, "collab", "The capability report did not return. Try again or inspect deployment status.");
+  }
+
+  var env = collab.environment || {};
+  var policy = collab.policy || {};
+
+  function capChip(label, value) {
+    return '<span class="chip">' + esc(label) + ": " + (value === true ? "yes" : value === false ? "no" : esc(String(value))) + "</span>";
+  }
+
+  var collaboratorRows = (collab.collaborators || []).map(function (person) {
+    var caps = person.capabilities || {};
+    var chips = [
+      capChip("patches", caps.submit_patch), capChip("review", caps.review),
+      capChip("records tests", caps.record_tests), capChip("applies patches", caps.apply_patch),
+      capChip("writes to GitHub", caps.write_to_github), capChip("typed decisions", caps.typed_decisions),
+      capChip("executes code", caps.execute_code)
+    ].join("");
+    var limits = (person.limitations || []).map(function (line) { return "<li>" + esc(line) + "</li>"; }).join("");
+    return '<div class="panel-bd--flush" style="padding:14px 16px;border-bottom:1px solid var(--line)">' +
+      '<div class="row" style="gap:10px;align-items:baseline;flex-wrap:wrap">' +
+      '<b>' + esc(person.label || person.id) + "</b>" +
+      st(person.status === "available" ? "ok" : "off", person.status === "available" ? "Available" : "Unavailable") +
+      '<span class="hint">' + esc(person.kind || "") + " · execution: " + esc(person.execution || "none") + "</span></div>" +
+      '<p class="hint" style="margin:6px 0 8px">' + esc(person.channel || "") + "</p>" +
+      '<div class="pill-row">' + chips + "</div>" +
+      (limits ? '<ul class="hint" style="margin:10px 0 0 18px">' + limits + "</ul>" : "") +
+      "</div>";
+  }).join("");
+
+  var envRows = [
+    kv("Workspace storage", env.workspaceStorage === "durable-object" ? st("ok", "Durable Object") : st("off", "Unavailable"), "DEMO_ACCOUNTS object · namespaced keys · no extra binding"),
+    kv("Patch application", env.patchApplicationEnabled === false ? st("off", "Disabled by configuration") : st("ok", "Enabled"), "COLLAB_ALLOW_APPLY"),
+    kv("Jev typed decisions", env.jevDecisionProvider ? st("ok", "Configured") : st("off", "Not configured"), "TYPESAFE_API_KEY"),
+    kv("Laya typed decisions", env.layaDecisionProvider ? st("ok", "Configured") : st("off", "Not configured"), "LAYA_BASE_URL + LAYA_API_KEY"),
+    kv("GitHub dispatch", env.githubActionsTokenConfigured ? st("ok", "Token configured") : st("off", "No token"), "GITHUB_ACTIONS_TOKEN (actions: write)"),
+    kv("Workspaces", env.workspaceCount == null ? st("idle", "Unknown") : '<span class="mono">' + esc(String(env.workspaceCount)) + "</span>", "bounded list, oldest evicted")
+  ].join("");
+
+  var policyHtml = [
+    note(esc(policy.execution || "DEMO executes no code.")),
+    note(esc(policy.githubWrites || "")),
+    note(esc(policy.attribution || "")),
+    note(esc(policy.untrustedContent || "")),
+    note("Protected paths: <code class=\"chip-v\">" + esc((policy.protectedPaths || []).join(", ")) + "</code> — a patch to one of these additionally needs <code class=\"chip-v\">approve_protected</code>.")
+  ].join("");
+
+  var spaceRows = "";
+  if (!spaces && !spacesErr) spaceRows = skeletonPanel(2);
+  else if (spacesErr) spaceRows = '<div class="panel-bd"><p class="note">' + esc(spacesErr.message || "The workspace list did not return.") + "</p></div>";
+  else {
+    var list = (spaces && spaces.workspaces) || [];
+    spaceRows = list.length
+      ? '<div class="panel-bd--flush">' + list.map(function (ws) {
+          return '<div class="panel-bd--flush" style="padding:12px 16px;border-bottom:1px solid var(--line)">' +
+            '<div class="row" style="gap:10px;align-items:baseline;flex-wrap:wrap"><b class="mono">' + esc(ws.id) + "</b>" +
+            '<span class="hint">' + esc(ws.repo) + "@" + esc(ws.ref) + "</span></div>" +
+            '<div class="hint" style="margin-top:6px">' + esc(ws.title) + " · " + esc(String(ws.tasks)) + " tasks · " + esc(String(ws.patches)) + " patches · " + esc(String(ws.tests)) + " tests · updated " + esc(fmtTs(ws.updatedAt)) + "</div></div>";
+        }).join("") + "</div>"
+      : '<div class="panel-bd">' + emptyState("users", "No workspaces yet", "Open one over MCP with collab_workspace { action: \"open\", repo, ref } — it needs a collab:write DEMO OAuth grant because workspace content is project code.") + "</div>";
+  }
+
+  var byoxPanel;
+  if (!byox && !byoxErr) byoxPanel = panel("Build Your Own X catalog", "spark", skeletonPanel(3));
+  else if (byoxErr) byoxPanel = errPanel("Catalog unavailable", LAZY_ROUTES.byox, "byox", "The catalog report did not return. An administrator may need to run byox_refresh_index.");
+  else {
+    var cat = byox.catalog || {};
+    var topCats = (byox.categories || []).slice(0, 8).map(function (category) {
+      return '<span class="chip">' + esc(category.title) + ": " + esc(String(category.count)) + "</span>";
+    }).join("");
+    var topLangs = (byox.languages || []).slice(0, 8).map(function (language) {
+      return '<span class="chip">' + esc(language.name) + ": " + esc(String(language.count)) + "</span>";
+    }).join("");
+    byoxPanel = panel("Build Your Own X catalog", "spark",
+      '<div class="row" style="gap:10px;flex-wrap:wrap">' +
+        (byox.indexed ? st("ok", cat.entries + " entries") : st("off", "Not indexed yet")) +
+        (cat.stale ? st("warn", "Stale") : (byox.indexed ? st("ok", "Fresh") : "")) +
+        st("info", "metadata only") +
+      "</div>" +
+      '<div class="hint" style="margin-top:10px">Source: <span class="mono">' + esc((byox.source && byox.source.repo) || "codecrafters-io/build-your-own-x") + "</span> · last checked " + esc(cat.lastCheckedAt ? fmtTs(cat.lastCheckedAt) : "—") + " · storage " + esc((byox.storage && byox.storage.backend) || "—") + "</div>" +
+      (topCats ? '<div class="pill-row" style="margin-top:10px">' + topCats + "</div>" : "") +
+      (topLangs ? '<div class="pill-row" style="margin-top:6px">' + topLangs + "</div>" : "") +
+      note("DEMO stores references — title, languages, category and the original link — and never re-hosts or summarizes a tutorial. Reading one page is an explicit single-page action with access checks.") +
+      '<div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">' +
+        '<a class="btn" href="/byox/search?q=renderer&amp;limit=5" target="_blank" rel="noreferrer noopener">' + ic("external") + "<span>Sample search</span></a>" +
+        '<a class="btn" href="' + esc(LAZY_ROUTES.byox) + '" target="_blank" rel="noreferrer noopener">Raw report</a>' +
+      "</div>", { cls: "panel--wide" });
+  }
+
+  var tools = CAT.filter(function (t) { return t.group === "Collaboration" || t.group === "Build Your Own X"; });
+  var toolRows = tools.length ? tools.map(function (t) { return toolRow(t); }).join("") : "";
+
+  return head +
+    '<div class="grid grid--2">' +
+      panel("Collaborators — real capabilities", "users",
+        collaboratorRows || '<div class="panel-bd">' + emptyState("users", "No collaborator data", "The capability report returned no collaborators.") + "</div>", { flush: true }) +
+      '<div>' + panel("Environment", "key", envRows, { flush: true }) + '<div style="height:16px"></div>' + panel("Policy", "shield", policyHtml) + "</div>" +
+    "</div>" +
+    '<div style="height:16px"></div>' + byoxPanel +
+    '<div style="height:16px"></div>' +
+    '<div class="grid grid--2">' +
+      panel("Workspaces", "database", spaceRows, { flush: true }) +
+      panel("Collaboration tools", "tools", '<div class="panel-bd--flush">' + toolRows + "</div>", { flush: true }) +
+    "</div>";
 }
 
 /* roblox */
@@ -2124,7 +2247,7 @@ function loadLazy(key) {
     S.lazyErr[key] = e;
   }).then(function () {
     S.lazyInflight[key] = false;
-    if (S.route === "video" || S.route === "research") renderView();
+    if (S.route === "video" || S.route === "research" || S.route === "collab") renderView();
   });
 }
 
@@ -2612,6 +2735,7 @@ function enterRoute() {
   if (S.route === "roblox" && !S.roblox && !S.robloxErr) loadRoblox();
   if (S.route === "video") loadLazy("video");
   if (S.route === "research") loadLazy("expanded");
+  if (S.route === "collab") { loadLazy("collab"); loadLazy("byox"); loadLazy("collabWorkspaces"); }
   if (S.route === "account" && signedIn()) { loadSession(); if (!S.sessions && !S.sessionsErr) loadAccountExtras(); if (!S.roblox && !S.robloxErr) loadRoblox(); }
   if (S.route === "reset") S.resetToken = hashParam("token");
   if (S.route === "verify") { S.verifyToken = hashParam("token"); confirmVerifyLink(); }

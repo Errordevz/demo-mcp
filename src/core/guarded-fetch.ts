@@ -99,12 +99,21 @@ export interface GuardedFetchOptions {
   maxRedirects?: number;
   /** Hard cap on how many body bytes are read from the origin. */
   maxBodyBytes?: number;
+  /**
+   * Extra request headers (for example `If-None-Match`). Restricted to safe
+   * validators: authorization/cookie headers are rejected so this option can
+   * never smuggle a credential into a public fetch.
+   */
+  headers?: Record<string, string>;
   fetchImpl?: typeof fetch;
 }
 
 export interface GuardedFetchResult {
   status: number;
   contentType: string | null;
+  /** Strong validator, when the origin sent one (replay as `If-None-Match`). */
+  etag?: string | null;
+  lastModified?: string | null;
   /** Final URL after redirects (validated like every hop). */
   finalUrl: string;
   redirects: number;
@@ -123,12 +132,19 @@ export async function guardedFetchText(rawUrl: string, options: GuardedFetchOpti
   const fetchImpl = options.fetchImpl ?? fetch;
   const maxRedirects = options.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+  const extraHeaders: Record<string, string> = {};
+  for (const [name, value] of Object.entries(options.headers ?? {})) {
+    const key = name.toLowerCase();
+    if (key === "authorization" || key === "cookie" || key === "host" || key.startsWith("cf-")) continue;
+    if (typeof value !== "string" || value.length > 512 || /[\r\n]/.test(value)) continue;
+    extraHeaders[name] = value;
+  }
 
   let currentUrl = await options.guard(rawUrl);
   let redirects = 0;
 
   for (;;) {
-    const response = await fetchImpl(currentUrl, { method: options.method, redirect: "manual" });
+    const response = await fetchImpl(currentUrl, { method: options.method, redirect: "manual", ...(Object.keys(extraHeaders).length ? { headers: extraHeaders } : {}) });
 
     // 3xx: validate the next hop exactly like the first URL, then follow it.
     if (response.status >= 300 && response.status < 400) {
@@ -162,8 +178,9 @@ export async function guardedFetchText(rawUrl: string, options: GuardedFetchOpti
       });
     }
 
+    const validators = { etag: response.headers.get("etag"), lastModified: response.headers.get("last-modified") };
     if (options.method === "HEAD" || response.body === null) {
-      return { status: response.status, contentType, finalUrl: currentUrl, redirects, truncated: false, body: "" };
+      return { status: response.status, contentType, finalUrl: currentUrl, redirects, truncated: false, body: "", ...validators };
     }
 
     // Bounded read: stop pulling from the stream as soon as the cap is hit.
@@ -192,7 +209,7 @@ export async function guardedFetchText(rawUrl: string, options: GuardedFetchOpti
       offset += Math.min(chunk.length, merged.length - offset);
     }
     const body = new TextDecoder("utf-8", { fatal: false }).decode(merged).slice(0, RESULT_BODY_CHARS);
-    return { status: response.status, contentType, finalUrl: currentUrl, redirects, truncated, body };
+    return { status: response.status, contentType, finalUrl: currentUrl, redirects, truncated, body, ...validators };
   }
 }
 
