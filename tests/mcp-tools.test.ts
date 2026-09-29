@@ -96,10 +96,26 @@ describe("MCP surface", () => {
   });
 
   it("returns a structured capability error for browser tools without a binding", async () => {
-    const result = await callTool("browser_open", { url: "https://example.com/" });
+    // The URL guard runs before the provider is acquired, and the DNS half of
+    // the guard is fail-closed. This test runs offline, so the resolver cannot
+    // reach a public name: with DNS checking switched off (the deterministic
+    // path) the missing binding is what the caller is told about.
+    const result = await callTool("browser_open", { url: "https://example.com/" }, { SSRF_DNS_CHECK: "false" } as never);
     expect(result.isError).toBe(true);
     expect(result.parsed?.error).toBe("capability_unavailable");
     expect(String(result.parsed?.hint ?? result.parsed?.message)).toMatch(/Browser Run|binding/i);
+  });
+
+  it("refuses a private address through the tool surface, not just in the guard", async () => {
+    // Deliberately an address literal, so the verdict does not depend on
+    // whether a DNS resolver is reachable from the test runner (the hostname
+    // case is pinned with an injected resolver in tests/url-guard.test.ts).
+    for (const url of ["http://10.1.2.3/admin", "http://192.168.0.1/", "http://[fd00::1]/"]) {
+      const result = await callTool("browser_open", { url });
+      expect(result.isError, url).toBe(true);
+      expect(result.parsed?.error, url).toBe("blocked_url");
+      expect(String(result.parsed?.message), url).toMatch(/private|loopback|link-local|reserved/i);
+    }
   });
 
   it("validates URLs before any navigation happens", async () => {

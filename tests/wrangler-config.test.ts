@@ -69,7 +69,8 @@ const REQUIRED_VARS: Record<string, string> = {
   MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS: "900",
   MCP_AUTH_RATE_LIMIT_PER_MINUTE: "30",
   SSRF_DNS_CHECK: "true",
-  SSRF_DNS_FAIL_OPEN: "true",
+  // Fail closed: the resolver-unreachable case denies instead of trusting.
+  SSRF_DNS_FAIL_OPEN: "false",
   VIDEO_MAX_DOWNLOAD_MB: "50",
   VIDEO_MAX_DURATION_SECONDS: "600",
   VIDEO_ARTIFACT_TTL_SECONDS: "3600",
@@ -172,9 +173,12 @@ describe("wrangler.jsonc", () => {
     for (const name of Object.keys(data.vars as Record<string, unknown>)) {
       expect(consumed, `${name} is declared but never read`).toContain(name);
     }
-    // The two SSRF flags are consumed identically by the browser and the video path.
+    // The SSRF DNS flag is consumed by the browser path, the shared guard used
+    // by every fetch-backed capability, and the Laya client — all with the same
+    // fail-closed default.
     expect((consumed.match(/SSRF_DNS_FAIL_OPEN/g) ?? []).length).toBeGreaterThanOrEqual(2);
-    expect(consumed).toMatch(/dnsFailOpen: String\(env\.SSRF_DNS_FAIL_OPEN \?\? "true"\)/);
+    expect(consumed).toMatch(/dnsFailOpen: String\(env\.SSRF_DNS_FAIL_OPEN \?\? "false"\)/);
+    expect(consumed).toMatch(/SSRF_DNS_FAIL_OPEN \?\? "false"/);
   });
 
   it("declares exactly the Jev policy the code reads, and nothing that costs money by default", async () => {
@@ -197,14 +201,15 @@ describe("wrangler.jsonc", () => {
   });
 
 /**
- * What the requested `SSRF_DNS_FAIL_OPEN=true` actually does, pinned by behavior
- * rather than by a comment. It widens availability when the DNS-over-HTTPS resolver is
- * unreachable; it does not relax any static rule.
+ * What `SSRF_DNS_FAIL_OPEN` actually does, pinned by behavior rather than by a
+ * comment. The shipped default is `false`: an unverifiable hostname is denied.
+ * `true` widens availability when the DNS-over-HTTPS resolver is unreachable and
+ * relaxes no static rule.
  */
 describe("SSRF_DNS_FAIL_OPEN semantics", () => {
   const unreachable = { resolve: async () => { throw new Error("resolver unreachable"); } };
 
-  it("allows an unverified hostname with a warning, and denies it when fail-closed", async () => {
+  it("denies an unverified hostname by default and allows it only with an explicit opt-in", async () => {
     const open = await checkUrl("https://example.test/page", { dns: unreachable, dnsFailOpen: true });
     expect(open.ok).toBe(true);
     if (open.ok) expect(open.warnings).toContain("dns-unverified");

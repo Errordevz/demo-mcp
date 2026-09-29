@@ -12,6 +12,7 @@
  */
 
 import { checkUrl, checkUrlSync, createDohResolver, isPrivateIp, parseTargetUrl } from "../core/url-guard.js";
+import { selfOrigins } from "../core/guarded-fetch.js";
 import { clamp } from "../core/limits.js";
 import { publicToolRateLimiter } from "../core/rate-limit.js";
 
@@ -152,7 +153,10 @@ export async function inspectUrl(
   const report = inspectUrlStatic(input);
   if (report.classification.verdict === "blocked") return report;
   const fetchImpl = options.fetchImpl ?? fetch;
-  const verdict = await checkUrl(input, { allowInsecureHttp: true, dns: createDohResolver() });
+  // DEMO's own origin is reported as blocked rather than "public": the platform
+  // refuses a same-zone Worker-to-Worker fetch (error code 1042), so a report
+  // that called it reachable would be wrong about the only caller that matters.
+  const verdict = await checkUrl(input, { allowInsecureHttp: true, dns: createDohResolver(), blockedOrigins: selfOrigins(env) });
   if (!verdict.ok) {
     return {
       ...report,
@@ -209,7 +213,7 @@ export async function inspectUrl(
       break;
     }
     chain[chain.length - 1].target = next.slice(0, 500);
-    const nextVerdict = await checkUrl(next, { allowInsecureHttp: true, dns: createDohResolver() });
+    const nextVerdict = await checkUrl(next, { allowInsecureHttp: true, dns: createDohResolver(), blockedOrigins: selfOrigins(env) });
     if (!nextVerdict.ok) {
       chain[chain.length - 1].verdict = "blocked";
       chain[chain.length - 1].reason = nextVerdict.reason;

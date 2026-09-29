@@ -105,6 +105,9 @@ function page(serverUrl: string, endpoint: string): string {
 <meta name="color-scheme" content="dark light">
 <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f7f7f8">
 <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0a0b0e">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.ico" sizes="32x32" type="image/png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <meta name="description" content="DEMO — execution infrastructure for AI agents. Public MCP tools need no login; protected Roblox and decision tools use per-tool OAuth.">
 <title>DEMO — Execution infrastructure for AI agents</title>
 <script>(function(){try{var v=localStorage.getItem("demo_theme_v1")||"auto";if(v==="light"||v==="dark")document.documentElement.setAttribute("data-theme",v);}catch(e){}})();</script>

@@ -52,11 +52,11 @@ export function createBrowserDependencies(env: BrowserEnv, screenshotBaseUrl: st
   const options = {
     allowInsecureHttp: String(env.BROWSER_ALLOW_INSECURE_HTTP ?? "true").toLowerCase() === "true",
     dns,
-    // Default is fail-open for the *DNS* step only: the static checks above are
-    // always enforced, and blocking every navigation whenever the resolver is
-    // unreachable would be a self-inflicted outage. Set SSRF_DNS_FAIL_OPEN=false
-    // to deny navigation when a hostname cannot be verified.
-    dnsFailOpen: String(env.SSRF_DNS_FAIL_OPEN ?? "true").toLowerCase() === "true",
+    // The DNS step fails CLOSED by default: a hostname that cannot be verified
+    // against private ranges is denied rather than opened on trust. Every
+    // static check above is enforced either way; SSRF_DNS_FAIL_OPEN=true is the
+    // single explicit opt-out for deployments that prefer availability here.
+    dnsFailOpen: String(env.SSRF_DNS_FAIL_OPEN ?? "false").toLowerCase() === "true",
     blockedHostnames,
     blockIdn: String(env.BROWSER_BLOCK_IDN ?? "false").toLowerCase() === "true",
   };

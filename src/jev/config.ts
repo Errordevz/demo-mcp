@@ -111,6 +111,21 @@ function number(value: string | number | undefined, fallback: number, min: numbe
 }
 
 /**
+ * Fractional sibling of `number()` for the 0–1 confidence thresholds.
+ *
+ * `number()` truncates, which is right for millisecond counts and wrong for a
+ * threshold: the shipped `TYPESAFE_REVIEW_THRESHOLD=0.5` was floored to `0`, so
+ * `confidence < reviewThreshold` was never true and every decision was applied
+ * quietly — the documented review policy was silently off, and the live
+ * capability report advertised thresholds of 0.
+ */
+function fraction(value: string | number | undefined, fallback: number, min: number, max: number): number {
+  const parsed = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : NaN;
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+/**
  * Resolve the deployment's decision-engine settings.
  *
  * Deliberately synchronous and allocation-free: `demo_ping`, `/health` and the
@@ -130,8 +145,8 @@ export function resolveJevConfig(env: Record<string, unknown> | undefined): JevC
     disabledReason = "TYPESAFE_ENABLED is false, so DEMO uses its own deterministic rules.";
   }
 
-  const reviewThreshold = number(values.TYPESAFE_REVIEW_THRESHOLD, JEV_LIMITS.defaultReviewThreshold, JEV_LIMITS.minReviewThreshold, JEV_LIMITS.maxReviewThreshold);
-  const configuredAccept = number(values.TYPESAFE_ACCEPT_THRESHOLD as string | number | undefined, JEV_LIMITS.defaultAcceptThreshold, 0, 0.99);
+  const reviewThreshold = fraction(values.TYPESAFE_REVIEW_THRESHOLD, JEV_LIMITS.defaultReviewThreshold, JEV_LIMITS.minReviewThreshold, JEV_LIMITS.maxReviewThreshold);
+  const configuredAccept = fraction(values.TYPESAFE_ACCEPT_THRESHOLD as string | number | undefined, JEV_LIMITS.defaultAcceptThreshold, 0, 0.99);
 
   return {
     available: enabled,

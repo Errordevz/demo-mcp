@@ -7,7 +7,7 @@ import { registerBrowserTools } from "./src/mcp/browser-tools.js";
 import { errorFrom, errorResult, runTool, textResult, type ToolResult } from "./src/mcp/results.js";
 import { redactValue } from "./src/core/redact.js";
 import { assertNavigableUrl, createDohResolver } from "./src/core/url-guard.js";
-import { guardedFetchText, type UrlGuard } from "./src/core/guarded-fetch.js";
+import { dnsFailOpenFor, guardedFetchText, selfOrigins, type UrlGuard } from "./src/core/guarded-fetch.js";
 import { mcpOAuthReady, MCP_OAUTH_SCOPES } from "./src/auth/oauth-config.js";
 import { oversizedBody, securityHeaders } from "./src/core/headers.js";
 import { LIMITS } from "./src/core/limits.js";
@@ -337,7 +337,7 @@ function server(env: Env, requestUrl: string | null = null, authorization: strin
 
   mcp.registerTool(
     "http_fetch",
-    { title: "HTTP Fetch", description: "Fetch an HTTP(S) URL and return bounded text. Private/internal targets — including redirect hops into them — are blocked unless SSRF_GUARD_HTTP_FETCH=false.", inputSchema: { url: z.string().url(), method: z.enum(["GET", "HEAD"]).default("GET") } },
+    { title: "HTTP Fetch", description: "Fetch an HTTP(S) URL and return bounded text. Private/internal targets — including redirect hops into them — are blocked unless SSRF_GUARD_HTTP_FETCH=false. DEMO's own public origin is refused explicitly: Cloudflare rejects same-zone Worker-to-Worker subrequests with error 1042, so use /health, /tools, /platform/stats or demo_ping instead.", inputSchema: { url: z.string().url(), method: z.enum(["GET", "HEAD"]).default("GET") } },
     async ({ url, method }) => {
       try {
         const guardEnabled = String(env.SSRF_GUARD_HTTP_FETCH ?? "true").toLowerCase() !== "false";
@@ -347,7 +347,8 @@ function server(env: Env, requestUrl: string | null = null, authorization: strin
                 await assertNavigableUrl(candidate, {
                   allowInsecureHttp: true,
                   dns: String(env.SSRF_DNS_CHECK ?? "true").toLowerCase() !== "false" ? createDohResolver() : null,
-                  dnsFailOpen: String(env.SSRF_DNS_FAIL_OPEN ?? "true").toLowerCase() === "true",
+                  dnsFailOpen: dnsFailOpenFor(env as unknown as Record<string, unknown>),
+                  blockedOrigins: selfOrigins(env as unknown as Record<string, unknown>),
                 })
               ).url
           : async (candidate) => candidate;

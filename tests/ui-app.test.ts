@@ -32,7 +32,9 @@ function stubFetchScript(signedIn: boolean) {
       else if (p === "/account/login") { window.__signedIn = true; j = { ok: true, authenticated: true, account: window.__account, emailDelivery: { configured: true }, verificationRequired: !window.__account.emailVerified }; }
       else if (String(path).indexOf("/account/sessions") === 0) j = { ok: true, sessions: [{ id: "abcd1234", label: "Test device", createdAt: "2026-09-01T00:00:00.000Z", expiresAt: "2027-01-01T00:00:00.000Z", current: true }] };
       else if (String(path).indexOf("/platform/stats") === 0) j = { status: "online", version: "9.9.9-test", toolCount: 90, generatedAt: "2026-09-28T00:00:00.000Z", uptimeSeconds: 42, requestCountSinceIsolateStart: 7, endpoints: { mcp: "/mcp" }, capabilities: {}, connections: [] };
-      else if (String(path).indexOf("/health") === 0) j = { ok: true, capabilities: { browserAvailable: false, reason: "no binding in jsdom" } };
+      // The real /health shape: capability flags are top-level (no nested
+      // capabilities object - reading one made the UI render "Unavailable").
+      else if (String(path).indexOf("/health") === 0) j = { ok: true, status: "online", version: "9.9.9-test", browser: false, browserSessions: false, screenshots: false, liveView: false, videoFrames: false, videoBytesRetrieval: false, videoTranscription: false, videoVisionAnalysis: false, videoArtifacts: false, publicVideo: true, videoResolution: true, toolCount: 90 };
       else if (String(path).indexOf("/oauth/roblox/status") === 0) j = { available: true, connected: false, configuration: { enabled: true, clientIdConfigured: true, clientSecretConfigured: true, requestedScopes: ["openid","profile"], storage: "durable-object", tokenEncryption: "aes-256-gcm", pkce: "S256", redirectUri: "https://demo-mcp.amidevz.workers.dev/oauth/roblox/callback" }, security: {}, endpoints: {} };
       else if (String(path).indexOf("/capabilities/") === 0) j = { ok: true, supportedPlatforms: [], providers: [], limits: {} };
       var body = JSON.stringify(j);

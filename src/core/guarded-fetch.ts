@@ -21,6 +21,38 @@ import { assertNavigableUrl, createDohResolver, type DnsResolver } from "./url-g
 export type UrlGuard = (url: string) => Promise<string>;
 
 /**
+ * DEMO's own public origins, derived from configuration only (never from a
+ * request header). All of them are unreachable *from inside this Worker*:
+ * Cloudflare answers a same-zone Worker→Worker subrequest with
+ * `error code: 1042` (verified live — see `selfOriginBlockedReason`).
+ */
+export function selfOrigins(env: Record<string, unknown> | undefined): string[] {
+  const configured = [env?.MCP_PUBLIC_ORIGIN, env?.DEMO_PUBLIC_ORIGIN]
+    .map((value) => String(value ?? "").trim())
+    .filter(Boolean);
+  const origins = new Set<string>();
+  for (const candidate of configured) {
+    try {
+      origins.add(new URL(candidate).origin);
+    } catch {
+      /* an unusable configured origin is ignored, never reflected */
+    }
+  }
+  return [...origins];
+}
+
+/**
+ * Deployment policy for the DNS half of the SSRF guard. Fail **closed** by
+ * default: a hostname that cannot be verified against private ranges is denied
+ * instead of being fetched on trust. `SSRF_DNS_FAIL_OPEN=true` is the single
+ * explicit opt-out (it still enforces every static rule, and it can only widen
+ * the resolver-unreachable case).
+ */
+export function dnsFailOpenFor(env: Record<string, unknown> | undefined): boolean {
+  return String(env?.SSRF_DNS_FAIL_OPEN ?? "false").trim().toLowerCase() === "true";
+}
+
+/**
  * Build the standard DEMO SSRF guard from Worker env.
  *
  * Unlike the legacy `http_fetch` tool (whose guard is operator-switchable for
@@ -38,7 +70,8 @@ export function createSsrfGuard(env: Record<string, unknown> | undefined): UrlGu
       await assertNavigableUrl(candidate, {
         allowInsecureHttp: true,
         dns,
-        dnsFailOpen: String(env?.SSRF_DNS_FAIL_OPEN ?? "true").toLowerCase() === "true",
+        dnsFailOpen: dnsFailOpenFor(env),
+        blockedOrigins: selfOrigins(env),
       })
     ).url;
 }
@@ -51,7 +84,8 @@ export function createHttpsOnlyGuard(env: Record<string, unknown> | undefined): 
     const verdict = await assertNavigableUrl(candidate, {
       allowInsecureHttp: false,
       dns,
-      dnsFailOpen: String(env?.SSRF_DNS_FAIL_OPEN ?? "true").toLowerCase() === "true",
+      dnsFailOpen: dnsFailOpenFor(env),
+      blockedOrigins: selfOrigins(env),
     });
     return verdict.url;
   };

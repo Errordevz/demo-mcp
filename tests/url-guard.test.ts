@@ -89,17 +89,18 @@ describe("url guard — DNS resolution", () => {
     expect(verdict.ok).toBe(false);
   });
 
-  it("fails open with a warning when the resolver is unreachable", async () => {
+  it("fails CLOSED by default when the resolver is unreachable", async () => {
     const failing = { resolve: async () => { throw new Error("DNS lookup failed"); } };
-    const open = await checkUrl("https://example.com/", { dns: failing });
-    expect(open.ok).toBe(true);
-    expect(open.ok && open.warnings).toContain("dns-unverified");
+    const closed = await checkUrl("https://example.com/", { dns: failing });
+    expect(closed.ok).toBe(false);
+    expect(!closed.ok && closed.reason).toContain("DNS lookup failed");
   });
 
-  it("can be configured to fail closed when a hostname cannot be verified", async () => {
+  it("fails open with a warning only when an operator asks for it", async () => {
     const failing = { resolve: async () => { throw new Error("DNS lookup failed"); } };
-    const closed = await checkUrl("https://example.com/", { dns: failing, dnsFailOpen: false });
-    expect(closed.ok).toBe(false);
+    const open = await checkUrl("https://example.com/", { dns: failing, dnsFailOpen: true });
+    expect(open.ok).toBe(true);
+    expect(open.ok && open.warnings).toContain("dns-unverified");
   });
 
   it("names the lookup failure when failing closed so environment limits are diagnosable", async () => {

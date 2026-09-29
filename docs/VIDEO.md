@@ -576,7 +576,7 @@ services required for actual decoded frames/artifacts.
 | `VIDEO_MAX_DURATION_SECONDS` | Optional (`600`) | Hard duration cap, enforced before *and* after streaming. |
 | `VIDEO_ARTIFACT_TTL_SECONDS` | Optional (`3600`) | Artifact lifetime; the route refuses expired references. |
 | `VIDEO_RATE_LIMIT_PER_MINUTE` | Optional (`12`) | Per-session pipeline rate limit. |
-| `SSRF_DNS_CHECK` / `SSRF_DNS_FAIL_OPEN` | Optional (`true`/`true`) | DNS-over-HTTPS verification of every host and redirect hop. |
+| `SSRF_DNS_CHECK` / `SSRF_DNS_FAIL_OPEN` | Optional (`true`/`false`) | DNS-over-HTTPS verification of every host and redirect hop. The video pipeline always fails closed regardless of the flag. |
 | `MCP_AUTH` | Required for OAuth-protected tools | Durable Object for per-user DEMO OAuth grants. Public video tools remain anonymous. See [`MCP-OAUTH.md`](MCP-OAUTH.md). |
 
 There is **no** external ffmpeg/decoder provider and no hidden hard requirement:

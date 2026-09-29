@@ -722,7 +722,7 @@ Variables:
 | `BROWSER_KEEPALIVE_MS` | `300000` | Session keep-alive heartbeat (10 s – 10 min). |
 | `SCREENSHOT_BASE_URL` | request origin + `/screenshots` | Public base URL for screenshot links. |
 | `SSRF_DNS_CHECK` | `true` | Resolve hostnames via DoH and block private/internal answers. |
-| `SSRF_DNS_FAIL_OPEN` | `true` | If the resolver is unreachable, allow navigation with a `dns-unverified` warning. Set to `false` to deny instead. |
+| `SSRF_DNS_FAIL_OPEN` | `false` | What happens when the DoH resolver cannot be reached. `false` (default) denies the request and names the lookup failure; `true` allows it with a `dns-unverified` warning. Every static rule stays enforced either way. |
 | `BROWSER_ALLOWED_DOMAINS` | *(unset)* | Optional comma-separated domain allowlist latched per browser session. |
 | `VIDEO_MAX_DOWNLOAD_MB` | `50` | Maximum public video download size. |
 | `VIDEO_MAX_DURATION_SECONDS` | `600` | Maximum duration accepted for processing/downloads. |
@@ -775,7 +775,16 @@ DEMO reports these limits through `browser_capabilities` and surfaces
   the Cloudflare metadata endpoint (`169.254.169.254`, `metadata.google.internal`,
   `*.internal`, `*.local`), and infra-only ports are blocked. Hostnames are
   resolved over DNS-over-HTTPS and re-checked, so a public name that resolves to
-  a private address is refused too.
+  a private address is refused too. The DNS step **fails closed**: a hostname
+  that cannot be verified is denied and the lookup failure is named, unless the
+  deployment explicitly sets `SSRF_DNS_FAIL_OPEN=true`.
+* **Self-fetch (Cloudflare error 1042)** — DEMO's own public origin is refused by
+  the guard with an explanatory error, because Cloudflare rejects a
+  Worker-to-Worker subrequest inside one zone (`error code: 1042`). A tool call
+  that targets `/health`, `/tools` or `/platform/stats` on DEMO's own host
+  therefore gets a clear pointer to the direct surface (`demo_ping`, the
+  `demo://` resources) instead of an opaque edge error. A custom domain or a
+  non-Worker client is unaffected.
 * **Timeouts and bounds** — navigation, operation and wait timeouts; capped
   screenshots (viewport/full page/element), capped text/HTML/JSON-LD output,
   bounded frame sampling, and per-session tab limits.

@@ -43,7 +43,7 @@ var S = {
   modalOpen: false, paletteOpen: false, lastFocus: null, pSel: 0, pQuery: "", pItems: [],
   connectId: "", connectNote: "",
   menuFocusTrap: null,
-  session: null, sessionLoaded: false,
+  session: null, sessionLoaded: false, robloxDeferred: null,
   authMode: "signin", authErr: "", authBusy: false, authMsg: "",
   resetToken: "", deleteArmed: false, verifyBusy: false, verifyMsg: "", verifyErr: "",
   pwBusy: false, pwMsg: "", pwErr: "", sessions: null, sessionsErr: "",
@@ -254,7 +254,38 @@ function loadSession() {
 
 /* app state helpers */
 function body() { return document.body; }
-function caps() { return (S.health && S.health.capabilities) || {}; }
+/**
+ * Browser/storage capability flags.
+ *
+ * GET /health answers with the flags at the TOP level (browser, screenshots,
+ * videoFrames, ...) - it has no nested capabilities object; GET /platform/stats
+ * is the surface that nests them. Reading S.health.capabilities therefore
+ * always yielded undefined, and the Browser capability rendered "Unavailable"
+ * on a deployment whose own /health and /platform/stats both reported it as
+ * available. Read the flat flags first and fall back to the nested shapes so a
+ * future response change cannot silently invert a status again.
+ */
+function caps() {
+  var h = S.health || {};
+  var nested = h.capabilities || {};
+  var stats = (S.stats && S.stats.capabilities) || {};
+  function flag(flat, alias) {
+    if (typeof h[flat] === "boolean") return h[flat];
+    var name = alias || flat;
+    if (typeof nested[name] === "boolean") return nested[name];
+    if (typeof stats[name] === "boolean") return stats[name];
+    return undefined;
+  }
+  return {
+    browserAvailable: flag("browser", "browserAvailable") === true,
+    screenshots: flag("screenshots") === true,
+    videoFrames: flag("videoFrames") === true,
+    liveView: flag("liveView") === true,
+    handoff: flag("humanHandoff") === true,
+    videoArtifacts: flag("videoArtifacts") === true,
+    reason: typeof h.browserReason === "string" ? h.browserReason : null
+  };
+}
 function statCaps() { return (S.stats && S.stats.capabilities) || {}; }
 function hv(k) { return S.health ? S.health[k] : undefined; }
 
@@ -285,7 +316,7 @@ function robloxState() {
   if (S.robloxErr) {
     var p = S.robloxErr.payload || {};
     if (p.error === "not_configured" || S.robloxErr.status === 503) return { s: "off", l: "Not configured", short: "Not configured" };
-    if (p.error === "unauthenticated" || S.robloxErr.status === 401) return { s: "warn", l: "Cloudflare Access sign-in required", short: "Sign in required" };
+    if (p.error === "unauthenticated" || S.robloxErr.status === 401) return { s: "warn", l: "DEMO sign-in required", short: "Sign in required" };
     return { s: "err", l: "Status unavailable", short: "Error" };
   }
   var r = S.roblox || {};
@@ -1128,7 +1159,7 @@ function robloxView() {
   var r = S.roblox;
   var conf = (r && r.configuration) || {};
   var acc = (r && r.account) || null;
-  var canConnect = (s.l === "Not connected" || s.l === "Authorization required" || s.l === "Insufficient scope" || s.l === "Cloudflare Access sign-in required" || s.l === "Checking");
+  var canConnect = (s.l === "Not connected" || s.l === "Authorization required" || s.l === "Insufficient scope" || s.l === "DEMO sign-in required" || s.l === "Checking");
 
   var head = '<div class="panel"><div class="panel-bd">' +
     '<div class="eyebrow">Separate approvals — no DEMO signup</div>' +
@@ -1138,7 +1169,7 @@ function robloxView() {
     "</div>" +
     (s.s === "err" && S.robloxErr ? note(esc(S.robloxErr.message || "Status could not be read.")) : "") +
     (s.l === "Not configured" && S.robloxErr && S.robloxErr.payload && S.robloxErr.payload.hint ? note("<b>Setup:</b> " + esc(S.robloxErr.payload.hint)) : "") +
-    (s.l === "Cloudflare Access sign-in required" ? note("<b>Sign in required:</b> Open the link-code form and authenticate to Cloudflare Access with the same identity you use for ChatGPT.") : "") +
+    (s.l === "DEMO sign-in required" ? note("<b>Sign in required:</b> Sign in to your DEMO account (Account section) with the same identity you use for ChatGPT, then open the link-code form again. Cloudflare Access is honoured too when a deployment is fronted by it.") : "") +
     (s.l === "Insufficient scope" ? note("<b>Missing scope:</b> " + esc(s.missing || "a requested scope") + " is not on the granted token. Reconnect and approve every scope — account tools report <code class=\"chip-v\">scope_required</code> until then.") : "") +
     (s.l === "Disabled" && conf.disabledReason ? note(esc(conf.disabledReason)) : "") +
     (s.l === "Not configured" && conf.enabled === false && conf.disabledReason ? note(esc(conf.disabledReason)) : "") +
@@ -1150,7 +1181,7 @@ function robloxView() {
 
   var connectNote = "";
   if (canConnect) {
-    connectNote = note("To link Roblox, first connect in ChatGPT using <b>Mixed Authentication</b> and call <code class=\"chip-v\">roblox_account_link_start</code>. Open its <code class=\"chip-v\">linkUrl</code>, paste the one-time <code class=\"chip-v\">linkCode</code>, sign in to Cloudflare Access as the same human identity, then approve only on Roblox's official consent page. DEMO OAuth and Roblox OAuth are separate approvals. No Roblox password or cookie is requested; Roblox tokens stay encrypted server-side.");
+    connectNote = note("To link Roblox, first connect in ChatGPT using <b>Mixed Authentication</b> and call <code class=\"chip-v\">roblox_account_link_start</code>. Open its <code class=\"chip-v\">linkUrl</code>, paste the one-time <code class=\"chip-v\">linkCode</code>, sign in to DEMO (or Cloudflare Access where configured) as the same human identity, then approve only on Roblox's official consent page. DEMO OAuth and Roblox OAuth are separate approvals. No Roblox password or cookie is requested; Roblox tokens stay encrypted server-side.");
   } else if (s.l === "Connected") {
     connectNote = note("Linked through Roblox's official OAuth. The encrypted grant is owned by the verified Cloudflare Access identity used to link it; the stored Roblox identity comes from Roblox's verified userinfo (<code class=\"chip-v\">sub</code> claim). Public lookups (<code class=\"chip-v\">roblox_user</code>, <code class=\"chip-v\">roblox_game</code>) remain login-free.");
   }
@@ -2046,6 +2077,26 @@ function loadCore(force) {
 function loadRoblox(force) {
   if (S.roblox && !force) return Promise.resolve();
   if (S.robloxInflight) return Promise.resolve();
+  // The Roblox status route is private: an anonymous caller gets 401 by design
+  // (verified live). Ask the session first, and for a visitor who is not signed
+  // in report the local fact instead of firing a request that can only fail and
+  // would log a console error on every page load.
+  if (!S.sessionLoaded) {
+    if (!S.robloxDeferred) {
+      S.robloxDeferred = loadSession().then(function () {
+        S.robloxDeferred = null;
+        return loadRoblox(force);
+      });
+    }
+    return S.robloxDeferred;
+  }
+  if (!signedIn()) {
+    S.roblox = null;
+    S.robloxErr = { status: 401, payload: { error: "unauthenticated", message: "Sign in to your DEMO account to connect a Roblox account." } };
+    S.robloxLoading = false;
+    if (S.route === "roblox" || S.route === "account") renderView();
+    return Promise.resolve();
+  }
   S.robloxInflight = true;
   S.robloxLoading = true;
   return jfetch("/oauth/roblox/status").then(function (d) {
