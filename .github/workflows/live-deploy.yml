@@ -40,6 +40,10 @@ jobs:
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      # Optional: the Worker's DEMO_API_KEY, used only to seed the Build Your Own
+      # X catalog through the administrator route below. When the secret is not
+      # configured the step is skipped with a notice instead of failing.
+      DEMO_API_KEY: ${{ secrets.DEMO_API_KEY }}
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -83,6 +87,28 @@ jobs:
       # (values are never printed by wrangler and never logged here) and the live
       # emailDelivery report, so "the secret is set but the Worker says it is not"
       # is visible in the run log instead of only on the sign-up page.
+      # Seed or refresh the Build Your Own X catalog. The index is
+      # administrator-only by design (the key travels in a header, never a query
+      # string), incremental (ETag/If-None-Match, then a SHA-256 comparison) and
+      # debounced by BYOX_REFRESH_MIN_INTERVAL_SECONDS, so a second deploy within
+      # the interval reports "unchanged" instead of re-fetching the README.
+      - name: Seed the Build Your Own X catalog
+        if: env.DEMO_API_KEY != ''
+        run: |
+          set -euo pipefail
+          URL='${{ steps.deploy.outputs.worker_url }}'
+          CODE=$(curl -sS -o refresh.json -w '%{http_code}' -X POST "$URL/byox/refresh" \
+            -H "x-demo-admin-key: $DEMO_API_KEY" -H 'accept: application/json')
+          echo "POST /byox/refresh -> HTTP $CODE"
+          node -e 'const r=require("./refresh.json");console.log(JSON.stringify({refreshed:r.refresh?.refreshed??null,unchanged:r.refresh?.unchanged??null,entries:r.refresh?.counts?.tutorials??null,stale:r.refresh?.stale??null,reason:r.refresh?.reason??null,error:r.error??null}))'
+          if [ "$CODE" != "200" ]; then echo "Catalog refresh was refused (HTTP $CODE)"; exit 1; fi
+          rm -f refresh.json
+
+      - name: Catalog seeding skipped (no DEMO_API_KEY secret)
+        if: env.DEMO_API_KEY == ''
+        run: |
+          echo "::notice ::DEMO_API_KEY is not configured as a repository secret, so the Build Your Own X catalog was not seeded. An operator can seed it with: curl -X POST <worker-url>/byox/refresh -H \"x-demo-admin-key: \$DEMO_API_KEY\""
+
       - name: Report account-email delivery status (names only, never values)
         run: |
           echo "Secrets bound to this Worker (names only):"

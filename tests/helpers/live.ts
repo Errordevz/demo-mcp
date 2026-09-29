@@ -67,6 +67,41 @@ export function isEgressError(error: unknown): boolean {
 }
 
 /**
+ * Upstream services (Cloudflare Browser Rendering in particular) answer with a
+ * capacity refusal rather than a bug: `429 Rate limit exceeded`, or a 503-style
+ * "temporarily unavailable". A live suite that treats those as a product failure
+ * reports a red run for someone else's throttling, so the client retries them a
+ * bounded number of times and still asserts the final result.
+ */
+const TRANSIENT_HINTS =
+  /(?:\b429\b|\b503\b|rate ?limit|too many requests|temporarily unavailable|service unavailable|try again later|capacity|overloaded)/i;
+
+export interface TransientSignals {
+  text: string;
+  parsed: unknown;
+  isError?: boolean;
+}
+
+/** True when a tool result is an upstream rate-limit/capacity refusal worth retrying. */
+export function isTransientRateLimit({ text, parsed, isError }: TransientSignals): boolean {
+  const payload = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+  const failed = isError === true || payload?.success === false;
+  if (!failed) return false;
+  const detail = [text.slice(0, 2_000), String(payload?.message ?? ""), String(payload?.error ?? "")].join(" ");
+  return TRANSIENT_HINTS.test(detail);
+}
+
+/** Retry policy for transient upstream refusals (`LIVE_RETRY_ATTEMPTS`, `LIVE_RETRY_DELAY_MS`). */
+export function transientRetry(): { attempts: number; delayMs: number } {
+  const attempts = Number.parseInt(process.env.LIVE_RETRY_ATTEMPTS ?? "3", 10);
+  const delayMs = Number.parseInt(process.env.LIVE_RETRY_DELAY_MS ?? "20000", 10);
+  return {
+    attempts: Number.isFinite(attempts) && attempts > 0 && attempts <= 10 ? attempts : 3,
+    delayMs: Number.isFinite(delayMs) && delayMs >= 0 && delayMs <= 120_000 ? delayMs : 20_000,
+  };
+}
+
+/**
  * Preflight: the worker must answer /health. If the test host cannot reach it
  * (typical in a restricted sandbox), fail fast with an unambiguous message
  * instead of producing misleading per-test failures.
@@ -186,37 +221,50 @@ export function connectLive(baseUrl?: string): LiveClient {
 
   return {
     async call(name: string, args: Record<string, unknown>): Promise<CallResult> {
-      const response = await fetch(`${origin}/mcp`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ jsonrpc: "2.0", id: ++id, method: "tools/call", params: { name, arguments: args } }),
-      });
-      if (!response.ok) throw new Error(`HTTP ${response.status} from ${origin}/mcp: ${await response.text()}`);
-      const body = await response.text();
-      const message = parseSse(body);
-      if (!message) throw new Error(`Unparseable MCP response: ${body.slice(0, 400)}`);
-      if (message.error) throw new Error(`MCP error ${message.error.code}: ${message.error.message}`);
-      const result = message.result ?? {};
-      const content = Array.isArray(result.content) ? result.content : [];
-      const text = content.map((entry: { text?: string }) => entry.text ?? "").join("\n");
-      const imageEntries = content.filter((entry: { type?: string }) => entry.type === "image");
-      let parsed: unknown = null;
-      try {
-        parsed = JSON.parse(text);
-      } catch {
-        parsed = null;
-      }
-      return {
-        isError: Boolean(result.isError),
-        text,
-        parsed,
-        imageCount: imageEntries.length,
-        imageMimeTypes: imageEntries.map((entry: { mimeType?: string }) => String(entry.mimeType ?? "")),
-        imageBlocks: imageEntries.map((entry: { data?: string; mimeType?: string }) => ({
-          data: String(entry.data ?? ""),
-          mimeType: String(entry.mimeType ?? ""),
-        })),
+      const callOnce = async (): Promise<CallResult> => {
+        const response = await fetch(`${origin}/mcp`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ jsonrpc: "2.0", id: ++id, method: "tools/call", params: { name, arguments: args } }),
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status} from ${origin}/mcp: ${await response.text()}`);
+        const body = await response.text();
+        const message = parseSse(body);
+        if (!message) throw new Error(`Unparseable MCP response: ${body.slice(0, 400)}`);
+        if (message.error) throw new Error(`MCP error ${message.error.code}: ${message.error.message}`);
+        const result = message.result ?? {};
+        const content = Array.isArray(result.content) ? result.content : [];
+        const text = content.map((entry: { text?: string }) => entry.text ?? "").join("\n");
+        const imageEntries = content.filter((entry: { type?: string }) => entry.type === "image");
+        let parsed: unknown = null;
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          parsed = null;
+        }
+        return {
+          isError: Boolean(result.isError),
+          text,
+          parsed,
+          imageCount: imageEntries.length,
+          imageMimeTypes: imageEntries.map((entry: { mimeType?: string }) => String(entry.mimeType ?? "")),
+          imageBlocks: imageEntries.map((entry: { data?: string; mimeType?: string }) => ({
+            data: String(entry.data ?? ""),
+            mimeType: String(entry.mimeType ?? ""),
+          })),
+        };
       };
+
+      const { attempts, delayMs } = transientRetry();
+      let last = await callOnce();
+      for (let attempt = 2; attempt <= attempts && isTransientRateLimit(last); attempt += 1) {
+        console.warn(
+          `[live] ${name} was refused by an upstream rate limit; retry ${attempt}/${attempts} in ${delayMs} ms`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        last = await callOnce();
+      }
+      return last;
     },
     async rpc(method: string, params: Record<string, unknown>): Promise<any> {
       const response = await fetch(`${origin}/mcp`, {

@@ -74,6 +74,11 @@ POST /collab/workspaces/:id/operations    apply an operation (collab:write)
 5. Every refresh is rate-limited; `BYOX_REFRESH_MIN_INTERVAL_SECONDS` (default
    3600) debounces it unless `force` is set by an administrator.
 
+The `Deploy + live video tests` workflow seeds the catalog after each deploy
+when `DEMO_API_KEY` is configured as a repository secret (step "Seed the Build
+Your Own X catalog"): the key is sent in the `x-demo-admin-key` header, never a
+query string, and the step is skipped with a notice when the secret is absent.
+
 Environment knobs (`wrangler.jsonc` / secrets): `BYOX_README_URL`,
 `BYOX_REFRESH_MIN_INTERVAL_SECONDS`, `BYOX_STALE_AFTER_SECONDS`, `BYOX_MAX_BYTES`,
 `BYOX_RATE_LIMIT_PER_MINUTE`, `DEMO_API_KEY` (administrator key, ≥16 chars),
