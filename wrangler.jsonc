@@ -69,7 +69,12 @@
   // inspect_video). Everything else — resolution, verified byte retrieval,
   // frame decoding, artifacts — works without it, and every AI-dependent step
   // degrades to an explicit structured "unavailable" when the binding is absent.
-  "ai": { "binding": "AI" },
+  //
+  // `remote: true` states what is already true: Workers AI has no local
+  // emulation, so a `wrangler dev` run calls the real, billable service. Wrangler
+  // warns about this on every local start; declaring it removes the warning and
+  // records the cost decision in review instead of leaving it to a runtime log.
+  "ai": { "binding": "AI", "remote": true },
   "vars": {
     // ── Secrets are deliberately NOT declared here ─────────────────────────────
     // Set them in the dashboard (Workers → Settings → Variables and secrets →
@@ -134,8 +139,17 @@
     "ACCOUNT_EMAIL_TIMEOUT_MS": "8000",
     "BROWSER_PROVIDER": "cloudflare",
     "BROWSER_KEEPALIVE_MS": "300000",
+    // DNS half of the SSRF guard. The static rules (scheme allow-list, private
+    // / loopback / link-local / metadata ranges, internal DNS suffixes, blocked
+    // ports) are always enforced. This flag only controls what happens when the
+    // DNS-over-HTTPS resolver cannot be reached: "false" = fail closed (deny an
+    // unverifiable hostname), "true" = allow it with a `dns-unverified` warning.
+    // Fail-closed is the default everywhere in the code; this file used to set
+    // fail-open, which meant a resolver outage silently disabled the
+    // DNS-rebinding half of the guard. Set to "true" only if a deployment
+    // prefers availability here, understanding exactly that trade.
     "SSRF_DNS_CHECK": "true",
-    "SSRF_DNS_FAIL_OPEN": "true",
+    "SSRF_DNS_FAIL_OPEN": "false",
 
     // ── Video pipeline policy ────────────────────────────────────────────────
     // Hard limits. A tool argument can only ever LOWER these, never raise them.

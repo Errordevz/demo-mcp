@@ -138,7 +138,7 @@ describe("DEMO OAuth 2.1 authorization code + PKCE", () => {
       resource: ORIGIN,
       authorization_servers: [ORIGIN],
       bearer_methods_supported: ["header"],
-      scopes_supported: ["roblox:read", "roblox:link", "roblox:disconnect", "decision:use"],
+      scopes_supported: ["roblox:read", "roblox:link", "roblox:disconnect", "decision:use", "collab:write", "collab:admin"],
     });
     const server = await route(`${ORIGIN}/.well-known/oauth-authorization-server`, { method: "GET" }, envValue, routeDeps);
     expect(await server.json()).toMatchObject({

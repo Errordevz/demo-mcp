@@ -189,6 +189,21 @@ export function accountStoreAvailable(env: Record<string, unknown>): boolean {
  * are single-use/atomic across isolates.
  */
 import { DurableObject } from "cloudflare:workers";
+import { encodeForRpc } from "../core/errors.js";
+// Aliased: the Durable Object methods below are the RPC surface and share these
+// names, and inside a method body a matching identifier resolves to the method
+// itself, not to the imported helper.
+import {
+  collabApply as applyWorkspaceOperation,
+  collabGet as readWorkspace,
+  collabList as listWorkspaces,
+  collabOpen as openWorkspace,
+  collabSummary as summarizeStoredWorkspace,
+  type CollabStorageLike,
+  type OpenWorkspaceInput,
+  type WorkspaceIndexEntry,
+} from "../collab/store.js";
+import type { ApplyContext, CollabOperation, CollabWorkspace, OperationResult, WorkspaceSummary } from "../collab/model.js";
 
 export class DemoAccounts extends DurableObject<Record<string, unknown>> {
   private alarmPending = false;
@@ -533,6 +548,52 @@ export class DemoAccounts extends DurableObject<Record<string, unknown>> {
     this.alarmPending = false;
     const remaining = await this.storage.list({ limit: 1 });
     if (remaining.size > 0) this.ensureAlarm(now + 15 * 60 * 1000);
+  }
+
+  /* ----------------------- shared coding workspace (see src/collab/store.ts) */
+  /*
+   * The workspace lives in this object because it is already the deployment's
+   * strongly-consistent store: reusing it needs no new binding and no new
+   * Durable Object migration, so shipping collaboration cannot disturb the
+   * account data that shares the class. Keys are namespaced with "collab:".
+   */
+
+  private get collabStorage(): CollabStorageLike {
+    return this.ctx.storage as unknown as CollabStorageLike;
+  }
+
+  async collabOpen(input: OpenWorkspaceInput, now = Date.now()): Promise<{ summary: WorkspaceSummary; index: WorkspaceIndexEntry[] }> {
+    let outcome: { summary: WorkspaceSummary; index: WorkspaceIndexEntry[] } | null = null;
+    await this.serial(async () => {
+      outcome = await openWorkspace(this.collabStorage, input, now);
+    });
+    if (!outcome) throw encodeForRpc(new Error("Workspace open produced no result."));
+    return outcome;
+  }
+
+  async collabList(): Promise<{ workspaces: WorkspaceIndexEntry[]; total: number }> {
+    return listWorkspaces(this.collabStorage);
+  }
+
+  async collabGet(id: string): Promise<CollabWorkspace | null> {
+    return readWorkspace(this.collabStorage, id);
+  }
+
+  async collabSummary(id: string): Promise<WorkspaceSummary | null> {
+    return summarizeStoredWorkspace(this.collabStorage, id);
+  }
+
+  async collabApply(id: string, operation: CollabOperation, context: ApplyContext = {}): Promise<OperationResult> {
+    let outcome: OperationResult | null = null;
+    try {
+      await this.serial(async () => {
+        outcome = await applyWorkspaceOperation(this.collabStorage, id, operation, context);
+      });
+    } catch (error) {
+      throw encodeForRpc(error);
+    }
+    if (!outcome) throw encodeForRpc(new Error("Workspace operation produced no result."));
+    return outcome;
   }
 
   private async serial(operation: () => Promise<void>): Promise<void> {

@@ -291,7 +291,7 @@ Discoverability, honestly scoped:
 * configuration: all eleven browser/video vars plus the five `TYPESAFE_*` policy vars present
   exactly once with exact string values, no credential-shaped key in `vars`, no `env.*`
   section that could drift, bindings/migrations intact, every declared var actually read by
-  the code — plus behavioural proof that `SSRF_DNS_FAIL_OPEN=true` only widens the
+  the code — plus behavioural proof that `SSRF_DNS_FAIL_OPEN` only widens the
   resolver-unreachable case while localhost, private literals, metadata endpoints and
   DNS-rebinding answers stay blocked.
 

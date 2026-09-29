@@ -24,7 +24,7 @@ checked so the audit is reviewable.
 | `ROBLOX_RATE_LIMIT_PER_MINUTE` | `20` | once |
 | `ROBLOX_SESSION_TTL_SECONDS` | `1209600` | once |
 | `SSRF_DNS_CHECK` | `true` | once |
-| `SSRF_DNS_FAIL_OPEN` | `true` | once |
+| `SSRF_DNS_FAIL_OPEN` | `false` (was `true`) | once |
 | `TYPESAFE_ACCEPT_THRESHOLD` | `0.7` | once |
 | `TYPESAFE_DECISION_TIMEOUT_MS` | `2500` | once |
 | `TYPESAFE_ENABLED` | `true` | once |

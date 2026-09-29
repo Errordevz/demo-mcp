@@ -16,6 +16,11 @@
  * The DNS step is best effort: the resolver result can be stale (DNS rebinding
  * / short TTL records), so it is a mitigation, not a proof. It never widens
  * access — it can only deny.
+ *
+ * The DNS step fails **closed**: when the resolver cannot be reached, the
+ * request is denied with the reason why. `dnsFailOpen: true` (deployment
+ * variable `SSRF_DNS_FAIL_OPEN=true`) is the only way to accept an unverified
+ * hostname, it still enforces every static rule, and it is off by default.
  */
 
 import { BrowserError, capabilityUnavailable } from "./errors.js";
@@ -33,6 +38,13 @@ export interface UrlGuardOptions {
   dnsFailOpen?: boolean;
   /** Extra hostnames to deny (exact match, lower case). */
   blockedHostnames?: string[];
+  /**
+   * Origins that cannot be reached *from this Worker* even though they are
+   * public: DEMO's own public origin. Cloudflare refuses Worker→Worker fetches
+   * on the same zone with `error code: 1042`, so a self-fetch can only ever
+   * return an opaque edge error — see `selfOriginBlockedReason`.
+   */
+  blockedOrigins?: string[];
   /** Ports that are always denied regardless of the URL. */
   blockedPorts?: number[];
   /** When true, punycode/IDN hostnames are rejected. Defaults to false (flagged as a warning). */
@@ -251,6 +263,15 @@ function hostnameFromUrl(url: URL): string {
   return url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
 }
 
+/** Lower-cased `scheme://host[:port]` for a URL or an `origin` string; `null` when unusable. */
+function normalizedOrigin(value: URL | string): string | null {
+  try {
+    return new URL(value instanceof URL ? value.origin : value).origin.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
 export interface ParsedUrl {
   url: URL;
   hostname: string;
@@ -277,6 +298,25 @@ function isIpLiteralHostname(hostname: string): boolean {
 
 function deny(reason: string, code: BrowserError["code"] = "blocked_url", hostname?: string): UrlGuardVerdict {
   return { ok: false, reason, code, ...(hostname ? { hostname } : {}) };
+}
+
+/**
+ * Why DEMO refuses to fetch its own public origin, in user-facing terms.
+ *
+ * Verified against the deployed Worker on 2026-09-29: `http_fetch` /
+ * `web_extract` / `url_inspect` against `https://demo-mcp.amidevz.workers.dev/
+ * {,health,tools}` answer `HTTP 404` with the body `error code: 1042`. The route
+ * itself is healthy (the same URLs answer 200 for any other client); Cloudflare
+ * refuses Worker→Worker subrequests inside one zone unless the Worker opts into
+ * the `global_fetch_strictly_public` compatibility flag. A DEMO tool therefore
+ * cannot reach DEMO's own routes, and pretending otherwise only surfaces an
+ * opaque platform error — so say exactly what happened instead.
+ *
+ * This denies nothing that previously worked: the platform already refused it.
+ * It also never widens access (the check runs after every static rule).
+ */
+export function selfOriginBlockedReason(origin: string): string {
+  return `"${origin}" is this Worker's own public origin. Cloudflare refuses Worker-to-Worker subrequests inside one zone (the edge answers "error code: 1042"), so a DEMO tool cannot fetch DEMO's own routes over the network. Use the surface directly instead: GET /health, GET /tools, GET /platform/stats, the /capabilities/* reports, the demo_ping tool or the demo:// MCP resources — they answer without an outbound request. An external Worker in the same Cloudflare zone sees the same 1042; a custom domain or a non-Worker client does not.`;
 }
 
 /**
@@ -310,6 +350,11 @@ export function checkUrlSync(input: string, options: UrlGuardOptions = {}): UrlG
   for (const extra of options.blockedHostnames ?? []) {
     if (hostname === extra.toLowerCase() || hostname.endsWith(`.${extra.toLowerCase()}`)) {
       return deny(`Hostname "${hostname}" is denylisted.`, "blocked_url", hostname);
+    }
+  }
+  for (const blocked of options.blockedOrigins ?? []) {
+    if (normalizedOrigin(url) === normalizedOrigin(blocked)) {
+      return deny(selfOriginBlockedReason(url.origin), "blocked_url", hostname);
     }
   }
 
@@ -346,7 +391,10 @@ export async function checkUrl(input: string, options: UrlGuardOptions = {}): Pr
   try {
     ips = await options.dns.resolve(hostname);
   } catch (error) {
-    if (options.dnsFailOpen ?? true) {
+    // Fail CLOSED by default: an unverifiable hostname is denied. Fail-open is
+    // only reachable through an explicit `dnsFailOpen: true` (or the
+    // SSRF_DNS_FAIL_OPEN=true deployment variable), never by omission.
+    if (options.dnsFailOpen ?? false) {
       return { ...sync, warnings: [...sync.warnings, "dns-unverified"] };
     }
     // Fail closed, but say why the lookup failed (HTTP status from the DoH

@@ -168,6 +168,31 @@ Worker only accepts `type: "app"`. Failure output is byte-bounded (8 KiB read,
 600 chars printed) and redacted by `scripts/safe-diagnostics.mjs`. See
 [`docs/TESTING.md`](docs/TESTING.md) §Post-deploy smoke check.
 
+## Build Your Own X and collaboration
+
+DEMO indexes the public
+[`codecrafters-io/build-your-own-x`](https://github.com/codecrafters-io/build-your-own-x)
+catalog and exposes it as reference metadata (`byox_search`, `byox_get_tutorial`,
+`byox_read_tutorial`, `byox_categories`, `byox_refresh_index`,
+`byox_learning_plan`). The index is incremental — ETag/`If-None-Match` first, then
+a SHA-256 comparison — and a truncated or implausibly small README never replaces
+a good index. Only an administrator (the `DEMO_API_KEY` secret, or the
+`collab:admin` OAuth scope) can refresh it; tutorial text is never re-hosted,
+never summarized in place of the source, and a page that refuses anonymous
+readers is reported as such.
+
+Alongside it, `collab_*` tools give ChatGPT, Jev and Laya a shared workspace:
+dependency-checked tasks, isolated patches with a base hash, conflict detection
+at submit *and* apply, review (never by a patch's own author), recorded test
+results, and typed Jev/Laya delegation. DEMO executes no code and writes nothing
+to GitHub by itself: with no `GITHUB_ACTIONS_TOKEN` configured, patches stay in
+DEMO's workspace copy and the tools say so instead of implying a deployment
+happened. Workspace content lives in the already-bound `DEMO_ACCOUNTS` Durable
+Object (`collab:` keys) — no new binding, no new migration — and reads require the
+`collab:write` OAuth scope because workspace content is project code.
+
+Full detail, routes and environment knobs: [`docs/BYOX-COLLABORATION.md`](docs/BYOX-COLLABORATION.md).
+
 ## Browser tools (persistent sessions)
 
 | Tool | What it does |
@@ -722,7 +747,7 @@ Variables:
 | `BROWSER_KEEPALIVE_MS` | `300000` | Session keep-alive heartbeat (10 s – 10 min). |
 | `SCREENSHOT_BASE_URL` | request origin + `/screenshots` | Public base URL for screenshot links. |
 | `SSRF_DNS_CHECK` | `true` | Resolve hostnames via DoH and block private/internal answers. |
-| `SSRF_DNS_FAIL_OPEN` | `true` | If the resolver is unreachable, allow navigation with a `dns-unverified` warning. Set to `false` to deny instead. |
+| `SSRF_DNS_FAIL_OPEN` | `false` | What happens when the DoH resolver cannot be reached. `false` (default) denies the request and names the lookup failure; `true` allows it with a `dns-unverified` warning. Every static rule stays enforced either way. |
 | `BROWSER_ALLOWED_DOMAINS` | *(unset)* | Optional comma-separated domain allowlist latched per browser session. |
 | `VIDEO_MAX_DOWNLOAD_MB` | `50` | Maximum public video download size. |
 | `VIDEO_MAX_DURATION_SECONDS` | `600` | Maximum duration accepted for processing/downloads. |
@@ -775,7 +800,16 @@ DEMO reports these limits through `browser_capabilities` and surfaces
   the Cloudflare metadata endpoint (`169.254.169.254`, `metadata.google.internal`,
   `*.internal`, `*.local`), and infra-only ports are blocked. Hostnames are
   resolved over DNS-over-HTTPS and re-checked, so a public name that resolves to
-  a private address is refused too.
+  a private address is refused too. The DNS step **fails closed**: a hostname
+  that cannot be verified is denied and the lookup failure is named, unless the
+  deployment explicitly sets `SSRF_DNS_FAIL_OPEN=true`.
+* **Self-fetch (Cloudflare error 1042)** — DEMO's own public origin is refused by
+  the guard with an explanatory error, because Cloudflare rejects a
+  Worker-to-Worker subrequest inside one zone (`error code: 1042`). A tool call
+  that targets `/health`, `/tools` or `/platform/stats` on DEMO's own host
+  therefore gets a clear pointer to the direct surface (`demo_ping`, the
+  `demo://` resources) instead of an opaque edge error. A custom domain or a
+  non-Worker client is unaffected.
 * **Timeouts and bounds** — navigation, operation and wait timeouts; capped
   screenshots (viewport/full page/element), capped text/HTML/JSON-LD output,
   bounded frame sampling, and per-session tab limits.

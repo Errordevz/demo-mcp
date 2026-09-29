@@ -6,6 +6,8 @@ import { demoUi } from "./ui";
 import { handleRobloxOAuthRoute, isRobloxOAuthPath } from "./src/roblox/routes.js";
 import { handleMcpOAuthRoute, isMcpOAuthPath } from "./src/auth/oauth-routes.js";
 import { handleAccountRoute, isAccountPath } from "./src/account/routes.js";
+import { handleCollabRoute, isCollabPath } from "./src/collab/routes.js";
+import { handleByoxRoute, isByoxPath } from "./src/byox/routes.js";
 import { accountStoreAvailable } from "./src/account/store.js";
 import { resolveAccountEmailConfig } from "./src/account/email.js";
 import { MCP_OAUTH_SCOPES, mcpOAuthReady, resolveMcpOAuthConfig } from "./src/auth/oauth-config.js";
@@ -13,6 +15,7 @@ import { SessionManager } from "./src/session/manager.js";
 import { VideoArtifactStore, artifactBaseUrl, parseRangeHeader } from "./src/video/store.js";
 import { LIMITS } from "./src/core/limits.js";
 import { oversizedBody, securityHeaders } from "./src/core/headers.js";
+import { iconRoute } from "./src/ui/icons.js";
 
 // Re-exported so Wrangler can bind the Durable Object classes
 // (`durable_objects.bindings[].class_name`). `RobloxAuth` holds the OAuth state
@@ -86,8 +89,29 @@ const VERSION = "1.0.0";
 const DEFAULT_PLATFORM_ORIGIN = "https://demo-platform.pages.dev";
 const LOCAL_ORIGINS = new Set(["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:3000", "http://127.0.0.1:5173"]);
 const CHATGPT_ORIGINS = new Set(["https://chatgpt.com"]);
-const startedAt = Date.now();
+/**
+ * Isolate start time for `/platform/stats`.
+ *
+ * `Date.now()` at module scope is NOT a usable timestamp: workerd evaluates the
+ * module graph while the runtime clock is still zero, so the deployed Worker
+ * reported `uptimeSeconds` around 1_790_703_000 (~57 years) and the UI printed
+ * it as the isolate age. Verified locally against `wrangler dev` — the first
+ * request of a fresh isolate already reported the same epoch-based value.
+ *
+ * The clock is therefore only trusted when it looks like a real wall-clock
+ * reading; otherwise it is anchored on the first request this isolate serves.
+ */
+const MODULE_STARTED_AT = Date.now();
+/** Below this, the timestamp cannot be a real reading (DEMO 1.0 shipped in 2026). */
+const PLAUSIBLE_START_MS = Date.UTC(2025, 0, 1);
+let anchoredStartedAt: number | null = MODULE_STARTED_AT >= PLAUSIBLE_START_MS ? MODULE_STARTED_AT : null;
 let requestCount = 0;
+
+/** Start time of this isolate, anchored on its first request when the clock was unusable at load. */
+function isolateStartedAt(now: number): number {
+  if (anchoredStartedAt === null) anchoredStartedAt = now;
+  return anchoredStartedAt;
+}
 
 function configuredOrigins(env: Env) {
   return (env.DEMO_PLATFORM_ORIGIN || DEFAULT_PLATFORM_ORIGIN)
@@ -247,7 +271,7 @@ function telemetry(env: Env) {
     version: VERSION,
     status: "online",
     generatedAt: new Date().toISOString(),
-    uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
+    uptimeSeconds: Math.max(0, Math.floor((Date.now() - isolateStartedAt(Date.now())) / 1000)),
     requestCountSinceIsolateStart: requestCount,
     toolCount: TOOL_COUNT,
     skillCount: 9,
@@ -276,6 +300,8 @@ function telemetry(env: Env) {
       layaDecisionProvider: layaSurface(env),
       typedDecisions: jevSurface(env).available || layaSurface(env).available,
       youtube: youtubeSurface(env),
+      byox: { available: true, source: "codecrafters-io/build-your-own-x", refreshRequiresAdmin: true },
+      collaboration: { workspaceStorage: accountSurface(env).available, applyEnabled: String((env as unknown as Record<string, unknown>).COLLAB_ALLOW_APPLY ?? "true").toLowerCase() !== "false", scopes: ["collab:write", "collab:admin"] },
       expanded: {
         git: true,
         gitPublicOnly: true,
@@ -307,6 +333,8 @@ function telemetry(env: Env) {
       { name: "Laya", type: "External typed-decision provider (HTTP API)", connected: layaSurface(env).available },
       { name: "YouTube Data API", type: "Public metadata (Data API v3)", connected: youtubeSurface(env).available },
       { name: "Git (smart HTTP)", type: "Public repositories, no API key", connected: true },
+      { name: "Build Your Own X catalog", type: "R2-backed reference index (metadata only)", connected: true },
+      { name: "Collaboration workspace", type: "Durable Object (DemoAccounts, collab: keys)", connected: accountSurface(env).available },
       { name: "Internet Archive", type: "Wayback + archive.org public APIs", connected: true },
       { name: "Workers AI vision", type: "Image/PDF OCR + description", connected: Boolean(env.AI && typeof (env.AI as { run?: unknown }).run === "function") },
       { name: "Web snapshots", type: "R2 (expiring objects)", connected: Boolean(env.SCREENSHOTS || env.WEB_SNAPSHOTS) },
@@ -324,9 +352,30 @@ function telemetry(env: Env) {
       layaCapabilities: "/capabilities/laya",
       youtubeCapabilities: "/capabilities/youtube",
       expandedCapabilities: "/capabilities/expanded",
+      byoxCapabilities: "/capabilities/byox",
+      collabCapabilities: "/capabilities/collab",
+      collab: "/collab",
+      byox: "/byox",
+      byoxSearch: "/byox/search?q=",
     },
     telemetry: { scope: "worker-isolate", containsSecrets: false, containsUserContent: false },
   };
+}
+
+/**
+ * Brand/asset routes the browser requests on its own.
+ *
+ * Verified live: `GET /favicon.ico` and `GET /apple-touch-icon.png` answered
+ * `404 Not Found`, so every page view logged a failed request. The page now
+ * declares the icons and these routes serve them; `/favicon.ico` is a real PNG
+ * (clients that ask for the conventional path get an image, not HTML).
+ */
+function iconResponse(pathname: string): Response | null {
+  const icon = iconRoute(pathname);
+  if (!icon) return null;
+  const headers = new Headers(icon.headers);
+  for (const [key, value] of Object.entries(securityHeaders())) headers.set(key, value);
+  return new Response(icon.body, { status: icon.status, headers });
 }
 
 async function screenshotObject(request: Request, env: Env, id: string): Promise<Response> {
@@ -436,6 +485,12 @@ export default {
 
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     requestCount++;
+    // Anchor the isolate clock on the FIRST request, not on the first request
+    // that happens to read /platform/stats. Without this, an isolate that had
+    // already served requests reported `uptimeSeconds: 0` until something asked
+    // for stats — under-reporting its own age (observed on the deployment after
+    // the first fix: 10 requests served, age still 0).
+    isolateStartedAt(Date.now());
     const url = new URL(request.url);
     const origin = request.headers.get("Origin");
 
@@ -458,6 +513,22 @@ export default {
     if (origin && !allowedOrigin(origin, env)) return new Response("Forbidden origin", { status: 403, headers: { "Vary": "Origin" } });
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders(origin, env) });
 
+    if (isByoxPath(url.pathname)) {
+      // Public, metadata-only catalog API. The refresh sub-route is
+      // administrator-gated inside the handler, not here.
+      const byox = await handleByoxRoute(request, env as unknown as Record<string, unknown>);
+      if (byox) return withCors(byox, request, env);
+      return new Response("Not Found", { status: 404, headers: { Vary: "Origin" } });
+    }
+
+    if (isCollabPath(url.pathname)) {
+      // The workspace JSON API. Same origin policy as /mcp: the dashboard is
+      // same-origin, and every write additionally needs a collab:write grant.
+      const collab = await handleCollabRoute(request, env as unknown as Record<string, unknown>);
+      if (collab) return withCors(collab, request, env);
+      return new Response("Not Found", { status: 404, headers: { Vary: "Origin" } });
+    }
+
     if (url.pathname === "/") return demoUi(request.url, env);
 
     if (url.pathname === "/platform/stats") {
@@ -465,7 +536,10 @@ export default {
       return withCors(Response.json(telemetry(env), { headers: { "Cache-Control": "no-store" } }), request, env);
     }
 
-    if (url.pathname.startsWith("/video-assets/")) {
+    const icon = iconResponse(url.pathname);
+  if (icon) return withCors(icon, request, env);
+
+  if (url.pathname.startsWith("/video-assets/")) {
       return withCors(await videoObject(request, env), request, env);
     }
 

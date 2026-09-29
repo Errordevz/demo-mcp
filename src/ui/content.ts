@@ -31,6 +31,7 @@ export const SECTIONS = [
   { id: "routing", label: "Routing", icon: "branch", blurb: "Jev / Laya typed decision providers", nav: "primary" },
   { id: "roblox", label: "Roblox", icon: "game", blurb: "OAuth connection — one per DEMO identity", nav: "primary" },
   { id: "skills", label: "Skills", icon: "puzzle", blurb: "Built-ins and the live skills.sh surface", nav: "primary" },
+  { id: "collab", label: "Collaboration", icon: "users", blurb: "Shared workspace, patch review, typed delegation", nav: "primary" },
   { id: "about", label: "About", icon: "info", blurb: "Open source, architecture, security, privacy", nav: "primary" },
   { id: "account", label: "Account", icon: "user", blurb: "DEMO session, verification, sessions, Roblox link", nav: "hidden" },
   { id: "auth", label: "Sign in", icon: "key", blurb: "DEMO account sign in and registration", nav: "hidden" },
@@ -83,6 +84,15 @@ export const CAPABILITY_CATEGORIES = [
     description: "Typed Jev and Laya decisions, result review, and skills — advisory only, never authoritative, always auditable.",
     highlights: ["Jev decisions", "Laya routing", "Skills"],
     groups: ["JEV", "Laya", "Skills"],
+  },
+  {
+    id: "collaboration",
+    title: "Collaboration",
+    icon: "users",
+    route: "collab",
+    description: "A shared coding workspace with per-collaborator attribution: task planning, isolated patches, conflict detection, review, recorded test runs and typed Jev/Laya delegation. DEMO executes no code and writes nothing to GitHub on its own.",
+    highlights: ["Shared workspace", "Patch review", "Recorded tests", "Build Your Own X catalog"],
+    groups: ["Collaboration", "Build Your Own X"],
   },
   {
     id: "infrastructure",

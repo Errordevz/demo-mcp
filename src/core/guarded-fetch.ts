@@ -21,6 +21,38 @@ import { assertNavigableUrl, createDohResolver, type DnsResolver } from "./url-g
 export type UrlGuard = (url: string) => Promise<string>;
 
 /**
+ * DEMO's own public origins, derived from configuration only (never from a
+ * request header). All of them are unreachable *from inside this Worker*:
+ * Cloudflare answers a same-zone Worker→Worker subrequest with
+ * `error code: 1042` (verified live — see `selfOriginBlockedReason`).
+ */
+export function selfOrigins(env: Record<string, unknown> | undefined): string[] {
+  const configured = [env?.MCP_PUBLIC_ORIGIN, env?.DEMO_PUBLIC_ORIGIN]
+    .map((value) => String(value ?? "").trim())
+    .filter(Boolean);
+  const origins = new Set<string>();
+  for (const candidate of configured) {
+    try {
+      origins.add(new URL(candidate).origin);
+    } catch {
+      /* an unusable configured origin is ignored, never reflected */
+    }
+  }
+  return [...origins];
+}
+
+/**
+ * Deployment policy for the DNS half of the SSRF guard. Fail **closed** by
+ * default: a hostname that cannot be verified against private ranges is denied
+ * instead of being fetched on trust. `SSRF_DNS_FAIL_OPEN=true` is the single
+ * explicit opt-out (it still enforces every static rule, and it can only widen
+ * the resolver-unreachable case).
+ */
+export function dnsFailOpenFor(env: Record<string, unknown> | undefined): boolean {
+  return String(env?.SSRF_DNS_FAIL_OPEN ?? "false").trim().toLowerCase() === "true";
+}
+
+/**
  * Build the standard DEMO SSRF guard from Worker env.
  *
  * Unlike the legacy `http_fetch` tool (whose guard is operator-switchable for
@@ -38,7 +70,8 @@ export function createSsrfGuard(env: Record<string, unknown> | undefined): UrlGu
       await assertNavigableUrl(candidate, {
         allowInsecureHttp: true,
         dns,
-        dnsFailOpen: String(env?.SSRF_DNS_FAIL_OPEN ?? "true").toLowerCase() === "true",
+        dnsFailOpen: dnsFailOpenFor(env),
+        blockedOrigins: selfOrigins(env),
       })
     ).url;
 }
@@ -51,7 +84,8 @@ export function createHttpsOnlyGuard(env: Record<string, unknown> | undefined): 
     const verdict = await assertNavigableUrl(candidate, {
       allowInsecureHttp: false,
       dns,
-      dnsFailOpen: String(env?.SSRF_DNS_FAIL_OPEN ?? "true").toLowerCase() === "true",
+      dnsFailOpen: dnsFailOpenFor(env),
+      blockedOrigins: selfOrigins(env),
     });
     return verdict.url;
   };
@@ -65,12 +99,21 @@ export interface GuardedFetchOptions {
   maxRedirects?: number;
   /** Hard cap on how many body bytes are read from the origin. */
   maxBodyBytes?: number;
+  /**
+   * Extra request headers (for example `If-None-Match`). Restricted to safe
+   * validators: authorization/cookie headers are rejected so this option can
+   * never smuggle a credential into a public fetch.
+   */
+  headers?: Record<string, string>;
   fetchImpl?: typeof fetch;
 }
 
 export interface GuardedFetchResult {
   status: number;
   contentType: string | null;
+  /** Strong validator, when the origin sent one (replay as `If-None-Match`). */
+  etag?: string | null;
+  lastModified?: string | null;
   /** Final URL after redirects (validated like every hop). */
   finalUrl: string;
   redirects: number;
@@ -89,12 +132,19 @@ export async function guardedFetchText(rawUrl: string, options: GuardedFetchOpti
   const fetchImpl = options.fetchImpl ?? fetch;
   const maxRedirects = options.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+  const extraHeaders: Record<string, string> = {};
+  for (const [name, value] of Object.entries(options.headers ?? {})) {
+    const key = name.toLowerCase();
+    if (key === "authorization" || key === "cookie" || key === "host" || key.startsWith("cf-")) continue;
+    if (typeof value !== "string" || value.length > 512 || /[\r\n]/.test(value)) continue;
+    extraHeaders[name] = value;
+  }
 
   let currentUrl = await options.guard(rawUrl);
   let redirects = 0;
 
   for (;;) {
-    const response = await fetchImpl(currentUrl, { method: options.method, redirect: "manual" });
+    const response = await fetchImpl(currentUrl, { method: options.method, redirect: "manual", ...(Object.keys(extraHeaders).length ? { headers: extraHeaders } : {}) });
 
     // 3xx: validate the next hop exactly like the first URL, then follow it.
     if (response.status >= 300 && response.status < 400) {
@@ -128,8 +178,9 @@ export async function guardedFetchText(rawUrl: string, options: GuardedFetchOpti
       });
     }
 
+    const validators = { etag: response.headers.get("etag"), lastModified: response.headers.get("last-modified") };
     if (options.method === "HEAD" || response.body === null) {
-      return { status: response.status, contentType, finalUrl: currentUrl, redirects, truncated: false, body: "" };
+      return { status: response.status, contentType, finalUrl: currentUrl, redirects, truncated: false, body: "", ...validators };
     }
 
     // Bounded read: stop pulling from the stream as soon as the cap is hit.
@@ -158,7 +209,7 @@ export async function guardedFetchText(rawUrl: string, options: GuardedFetchOpti
       offset += Math.min(chunk.length, merged.length - offset);
     }
     const body = new TextDecoder("utf-8", { fatal: false }).decode(merged).slice(0, RESULT_BODY_CHARS);
-    return { status: response.status, contentType, finalUrl: currentUrl, redirects, truncated, body };
+    return { status: response.status, contentType, finalUrl: currentUrl, redirects, truncated, body, ...validators };
   }
 }
 

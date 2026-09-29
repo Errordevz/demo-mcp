@@ -71,6 +71,8 @@ function groupTools(toolNames: readonly string[]): Record<string, string[]> {
     "Web Intelligence": [],
     Research: [],
     Network: [],
+    "Build Your Own X": [],
+    Collaboration: [],
     Utilities: [],
   };
 
@@ -105,6 +107,10 @@ function groupTools(toolNames: readonly string[]): Record<string, string[]> {
       groups.Research.push(name);
     } else if (name === "openapi_inspect" || name === "net_diagnose" || name === "url_inspect") {
       groups.Network.push(name);
+    } else if (name.startsWith("byox_")) {
+      groups["Build Your Own X"].push(name);
+    } else if (name.startsWith("collab_")) {
+      groups.Collaboration.push(name);
     } else if (name === "schema_validate" || name === "jwt_inspect" || name === "cron_explain" || name === "text_diff") {
       groups.Utilities.push(name);
     } else {

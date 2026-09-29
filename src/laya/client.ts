@@ -164,7 +164,7 @@ export async function askLaya(input: LayaAskInput): Promise<LayaAskResult> {
     await assertNavigableUrl(config.endpoint, {
       allowInsecureHttp: false,
       dns,
-      dnsFailOpen: String(input.env?.SSRF_DNS_FAIL_OPEN ?? "true").toLowerCase() === "true",
+      dnsFailOpen: String(input.env?.SSRF_DNS_FAIL_OPEN ?? "false").toLowerCase() === "true",
     });
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);

@@ -34,27 +34,16 @@ const HEALTH = {
   videoResolution: true,
   videoBytesRetrieval: true,
   videoFrames: true,
-  videoAudioExtraction: false,
-  videoTranscription: false,
-  videoVisionAnalysis: false,
   videoArtifacts: true,
   decisionRoutingMode: "auto",
-  capabilities: {
-    provider: "cloudflare",
-    browserAvailable: true,
-    reason: null,
-    sessionStorage: "durable-object",
-    screenshots: true,
-    screenshotReason: null,
-    liveView: true,
-    handoff: true,
-    videoFrames: true,
-    guardrails: true,
-    accessibilitySnapshot: true,
-    fullPageScreenshot: true,
-    ssrfDnsCheck: true,
-    keepAliveMs: 300000,
-  },
+  // Deliberately the shape the Worker really sends: the flags are TOP-level.
+  // (A nested `capabilities` object here is what let the UI render "Unavailable"
+  // for a browser that /platform/stats reported as connected; see the
+  // regression test in tests/audit-regressions.test.ts.)
+  videoAudioExtraction: true,
+  videoTranscription: true,
+  videoVisionAnalysis: true,
+  robloxOAuthConfigured: true,
 };
 
 const STATS = {
@@ -331,17 +320,23 @@ describe("inspector UI — rendered against stub routes", () => {
     expect(missing).toContain("That route doesn't exist.");
     expect(missing).toContain("Back to DEMO");
 
-    // Roblox state degrades safely and never shows a login form.
+    // Roblox state degrades safely and never shows a login form. An anonymous
+    // visitor is told to sign in: the Roblox status route is private and answers
+    // 401 by design, so the page reports the local fact instead of firing a
+    // request that can only fail (and logging a console error).
     dom.window.location.hash = "#/roblox";
     await flush();
     const robloxText = doc.getElementById("view")?.textContent ?? "";
-    expect(robloxText).toContain("Not configured");
+    expect(robloxText).toContain("DEMO sign-in required");
     expect(robloxText).toContain("Separate approvals");
-    expect(robloxText).toContain("Add ROBLOX_CLIENT_ID and the ROBLOX_CLIENT_SECRET secret.");
+    expect(robloxText).toContain("Sign in to your DEMO account (Account section)");
     expect(doc.querySelector("#view form")).toBeNull();
 
     // Enabled-but-unlinked: the connect affordance appears as a button.
-    const linked = { ...routes(), "/oauth/roblox/status": () => jsonRoute({
+    const linked = { ...routes(), "/account/session": () => jsonRoute({
+      ok: true, signedIn: true, accountsAvailable: true,
+      account: { id: "usr_test", email: "stub@demo.test", displayName: "Stub", emailVerified: true, createdAt: "2026-01-01T00:00:00.000Z" },
+    }), "/oauth/roblox/status": () => jsonRoute({
       connected: false,
       configuration: { enabled: true, clientIdConfigured: true, clientSecretConfigured: true, redirectUri: "https://demo.test/oauth/roblox/callback", requestedScopes: ["openid", "profile"], storage: "durable-object", tokenEncryption: "aes-gcm-256", pkce: "S256" },
       endpoints: { start: "/oauth/roblox/start", callback: "/oauth/roblox/callback", logout: "/oauth/roblox/logout" },
