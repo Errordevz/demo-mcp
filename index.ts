@@ -49,8 +49,11 @@ import { registerCommand, routeCommand, listCommands } from "./src/commands/rout
 import { createMcpCommand } from "./src/commands/mcp-command.js";
 import { createJevCommand } from "./src/commands/jev-command.js";
 import { createLayaCommand } from "./src/commands/laya-command.js";
+import { registerDevTools, DEV_TOOL_NAMES } from "./src/mcp/dev-tools.js";
 
 type Env = SessionManagerEnv & VideoEnv & RobloxAuthEnv & JevEnv & LayaEnv & YouTubeEnv & {
+  /** Public base URL of the Dev coding agent service. */
+  DEV_BASE_URL?: string;
   /** Typed-decision routing mode: auto | laya | jev (default auto). */
   DECISION_PROVIDER_MODE?: string;
   SSRF_GUARD_HTTP_FETCH?: string;
@@ -596,6 +599,10 @@ function server(env: Env, requestUrl: string | null = null, authorization: strin
 
   registerLayaTools(mcp, { env: env as unknown as Record<string, unknown>, requestUrl });
 
+  /* ------------------------------------------- Dev coding agent */
+
+  registerDevTools(mcp, { env: env as unknown as Record<string, unknown> });
+
   /* ----------------------- Build Your Own X catalog (metadata, read-only) */
 
   registerByoxTools(mcp, {
@@ -859,6 +866,8 @@ export const DEMO_TOOL_NAMES = [
   ...JEV_TOOL_NAMES,
   // Laya decision provider (external System One server)
   ...LAYA_TOOL_NAMES,
+  // Dev coding agent
+  ...DEV_TOOL_NAMES,
   // Public YouTube Data API v3
   ...YOUTUBE_TOOL_NAMES,
   // Build Your Own X catalog (metadata only; refresh is administrator-only)
