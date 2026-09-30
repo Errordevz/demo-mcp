@@ -168,7 +168,7 @@ Worker only accepts `type: "app"`. Failure output is byte-bounded (8 KiB read,
 600 chars printed) and redacted by `scripts/safe-diagnostics.mjs`. See
 [`docs/TESTING.md`](docs/TESTING.md) §Post-deploy smoke check.
 
-## Build Your Own X and collaboration
+## Dev coding agent\n\nDEMO MCP now includes **Dev** as its coding-focused third agent alongside Jev and Laya. Dev is independently open source in [`Errordevz/Dev`](https://github.com/Errordevz/Dev) and is exposed through `dev_capabilities` and `dev_chat` when the server-side `DEV_BASE_URL` is configured. See [`docs/DEV.md`](docs/DEV.md).\n\n## Build Your Own X and collaboration
 
 DEMO indexes the public
 [`codecrafters-io/build-your-own-x`](https://github.com/codecrafters-io/build-your-own-x)
