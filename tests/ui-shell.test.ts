@@ -139,20 +139,16 @@ const flush = async () => {
 describe("inspector UI — served document contract", () => {
   const html = demoUiHtml();
 
-  it("keeps the pinned Roblox affordances and user-credential guarantees", () => {
-    expect(html).toContain("Connect Roblox account");
-    expect(html).toContain("/oauth/roblox/link");
-    expect(html).toContain("/oauth/roblox/status");
-    expect(html).toContain("/oauth/roblox/logout");
-    expect(html).toContain("Disconnect");
-    // No OAuth/OIDC token material is ever rendered into the page.
+  it("keeps the UI free of account/OAuth login forms and token material", () => {
+    expect(html).not.toContain("Connect Roblox account");
+    expect(html).not.toContain("/oauth/roblox/link");
+    expect(html).not.toContain("/oauth/roblox/status");
+    expect(html).not.toContain("/oauth/roblox/logout");
+    expect(html).not.toContain("/account/login");
+    expect(html).not.toContain("/account/register");
+    // No OAuth/OIDC token material or password inputs are rendered into the page.
     expect(html).not.toMatch(/(access|refresh)[_-]?token\s*[:=]/i);
-    // DEMO account password inputs exist (account system) but always carry
-    // hardened autocomplete semantics — never a bare password autofill.
-    expect(html).not.toMatch(/autocomplete=["']?password/i);
-    for (const input of html.match(/<input[^>]*type="password"[^>]*>/g) ?? []) {
-      expect(input).toMatch(/autocomplete="(current|new)-password"/);
-    }
+    expect(html).not.toMatch(/type="password"/i);
   });
 
   it("surfaces the Connect MCP dialog with the exact public endpoint and no login", () => {
@@ -319,37 +315,6 @@ describe("inspector UI — rendered against stub routes", () => {
     expect(missing).toContain("Page not found");
     expect(missing).toContain("That route doesn't exist.");
     expect(missing).toContain("Back to DEMO");
-
-    // Roblox state degrades safely and never shows a login form. An anonymous
-    // visitor is told to sign in: the Roblox status route is private and answers
-    // 401 by design, so the page reports the local fact instead of firing a
-    // request that can only fail (and logging a console error).
-    dom.window.location.hash = "#/roblox";
-    await flush();
-    const robloxText = doc.getElementById("view")?.textContent ?? "";
-    expect(robloxText).toContain("DEMO sign-in required");
-    expect(robloxText).toContain("Separate approvals");
-    expect(robloxText).toContain("Sign in to your DEMO account (Account section)");
-    expect(doc.querySelector("#view form")).toBeNull();
-
-    // Enabled-but-unlinked: the connect affordance appears as a button.
-    const linked = { ...routes(), "/account/session": () => jsonRoute({
-      ok: true, signedIn: true, accountsAvailable: true,
-      account: { id: "usr_test", email: "stub@demo.test", displayName: "Stub", emailVerified: true, createdAt: "2026-01-01T00:00:00.000Z" },
-    }), "/oauth/roblox/status": () => jsonRoute({
-      connected: false,
-      configuration: { enabled: true, clientIdConfigured: true, clientSecretConfigured: true, redirectUri: "https://demo.test/oauth/roblox/callback", requestedScopes: ["openid", "profile"], storage: "durable-object", tokenEncryption: "aes-gcm-256", pkce: "S256" },
-      endpoints: { start: "/oauth/roblox/start", callback: "/oauth/roblox/callback", logout: "/oauth/roblox/logout" },
-      security: { stateValidation: "single-use, expiring, browser-bound", cookieFlags: "HttpOnly; Secure; SameSite=Lax" },
-    }) };
-    const dom2 = bootDom(linked);
-    await flush();
-    dom2.window.location.hash = "#/roblox";
-    await flush();
-    const robloxText2 = dom2.window.document.getElementById("view")?.textContent ?? "";
-    expect(robloxText2).toContain("Not connected");
-    expect(robloxText2).toContain("Connect Roblox account");
-    dom2.window.close();
 
     // Routing page reports presence-only configuration.
     dom.window.location.hash = "#/routing";

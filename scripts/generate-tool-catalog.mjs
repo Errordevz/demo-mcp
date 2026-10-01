@@ -50,7 +50,6 @@ function groupFor(name) {
  * providers. "oauth" means the tool is protected by DEMO per-tool OAuth.
  */
 function availabilityFor(name) {
-  if (name.startsWith("roblox_account_")) return "oauth";
   if (name === "jev_decide") return "oauth";
   if (name.startsWith("browser_")) return "browser";
   if (name === "screenshot_diff") return "browser";

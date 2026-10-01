@@ -23,23 +23,13 @@
         "name": "BROWSER_SESSIONS",
         "class_name": "BrowserSession"
       },
-      // Roblox OAuth state + encrypted token envelope. A Durable Object rather
-      // than KV because Roblox link submission and the callback may land seconds
-      // apart on different isolates (KV is eventually consistent) and because
-      // Roblox refresh tokens are single-use, so a lost race is unrecoverable.
-      {
-        "name": "ROBLOX_AUTH",
-        "class_name": "RobloxAuth"
-      },
-      // Stores ChatGPT OAuth grants and short-lived Roblox link codes. Values are
-      // token/code hashes; atomic consumption prevents replay across isolates.
+      // Stores ChatGPT OAuth grants. Values are token/code hashes; atomic
+      // consumption prevents replay across isolates.
       {
         "name": "MCP_AUTH",
         "class_name": "McpAuth"
       },
-      // DEMO user accounts: password hashes, revocable session hashes,
-      // verification/reset token hashes, rate-limit counters. Session-cookie
-      // identity for the MCP OAuth consent screen and the website Account page.
+      // Shared coding workspace persistence (`collab:*` keys).
       {
         "name": "DEMO_ACCOUNTS",
         "class_name": "DemoAccounts"
@@ -62,6 +52,10 @@
     {
       "tag": "v4",
       "new_sqlite_classes": ["DemoAccounts"]
+    },
+    {
+      "tag": "v5",
+      "deleted_classes": ["RobloxAuth"]
     }
   ],
   // Workers AI binding. Enables server-side speech-to-text (video_transcribe)
@@ -79,15 +73,13 @@
     // ── Secrets are deliberately NOT declared here ─────────────────────────────
     // Set them in the dashboard (Workers → Settings → Variables and secrets →
     // Encrypt) or with `wrangler secret put <NAME>`, per environment:
-    //   ROBLOX_CLIENT_SECRET  — Roblox OAuth app secret (ROBLOX_CLIENT_ID may be a var)
-    //   ROBLOX_TOKEN_KEY      — 32+ random bytes; encrypts Roblox tokens at rest
-    // MCP OAuth uses the MCP_AUTH Durable Object and verified Cloudflare Access
-    // identity to issue per-user, short-lived grants.
     //   TYPESAFE_API_KEY      — TypeSafe/Jev decision API key
     //   LAYA_API_KEY          — optional Laya decision-server credential (only when
     //                           the configured Laya server requires a bearer)
     //   YOUTUBE_API_KEY       — YouTube Data API v3 key for public YouTube operations
     //   TRANSCRIPTION_API_KEY — optional external speech-to-text provider
+    // MCP OAuth uses the MCP_AUTH Durable Object and verified Cloudflare Access
+    // identity to issue per-user, short-lived grants.
     "DEMO_PLATFORM_ORIGIN": "https://demo-platform.pages.dev",
     // Canonical HTTPS origin is used for OAuth issuer/resource metadata and links.
     // Change it to the deployed custom domain if one is in use; never derive it from Host.
@@ -96,47 +88,6 @@
     "MCP_AUTH_ACCESS_AUD": "<your-cloudflare-access-application-aud-tag>",
     "MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS": "900",
     "MCP_AUTH_RATE_LIMIT_PER_MINUTE": "30",
-    // ── DEMO account system (non-secret policy only) ────────────────────────
-    // Sessions are opaque and revocable server-side; passwords are PBKDF2;
-    // email verification and password reset use single-use hashed tokens.
-    //
-    // Email delivery. The DEMO authentication sender identity is the mailbox
-    // demomcp7@gmail.com, and the only way to send *as* it is SMTP submission
-    // against Gmail's own servers with a Google App Password — an HTTP email API
-    // (Resend) can only send from a domain you own and have verified, and
-    // gmail.com is not verifiable by anyone but Google. So:
-    //   EMAIL_PROVIDER=gmail   → SMTP smtp.gmail.com:465, implicit TLS,
-    //                            SMTP_USERNAME must equal EMAIL_FROM's address.
-    //                            Requires the secret SMTP_PASSWORD, which is a
-    //                            Google App Password for that mailbox:
-    //                              wrangler secret put SMTP_PASSWORD
-    //                            The name is matched case-insensitively, and
-    //                            GMAIL_APP_PASSWORD / SMTP_PASS /
-    //                            EMAIL_PASSWORD / APP_PASSWORD are accepted too
-    //                            (src/account/email.ts), because a secret saved
-    //                            under a near-miss name is otherwise invisible
-    //                            to the Worker while looking perfectly set in
-    //                            the dashboard.
-    //   EMAIL_PROVIDER=resend  → https://api.resend.com, requires the secret
-    //                            RESEND_API_KEY (`wrangler secret put RESEND_API_KEY`)
-    //                            and a From domain verified in Resend. Keeping
-    //                            demomcp7@gmail.com as EMAIL_REPLY_TO is supported.
-    //   EMAIL_PROVIDER=smtp    → any relay: SMTP_HOST/SMTP_PORT/SMTP_USERNAME +
-    //                            the secret SMTP_PASSWORD (465 implicit TLS or
-    //                            587 STARTTLS; port 25 is rejected by the runtime).
-    // With no secret set the account system still works end to end — it simply
-    // reports email as unconfigured and says so on the sign-up page instead of
-    // promising a verification email that can never arrive. Secrets deliberately
-    // do NOT appear here: a committed credential is a leaked one.
-    "ACCOUNT_SESSION_TTL_SECONDS": "2592000",
-    "ACCOUNT_RATE_LIMIT_PER_MINUTE": "20",
-    // Verify an email address before account-only features (Roblox linking) unlock.
-    // Set to "false" to let unverified accounts link, at the cost of weaker
-    // account-recovery guarantees.
-    "ACCOUNT_REQUIRE_VERIFIED_FOR_LINKING": "true",
-    "EMAIL_PROVIDER": "gmail",
-    "EMAIL_FROM": "DEMO MCP <demomcp7@gmail.com>",
-    "ACCOUNT_EMAIL_TIMEOUT_MS": "8000",
     "BROWSER_PROVIDER": "cloudflare",
     "BROWSER_KEEPALIVE_MS": "300000",
     // DNS half of the SSRF guard. The static rules (scheme allow-list, private
@@ -157,16 +108,6 @@
     "VIDEO_MAX_DURATION_SECONDS": "600",
     "VIDEO_ARTIFACT_TTL_SECONDS": "3600",
     "VIDEO_RATE_LIMIT_PER_MINUTE": "12",
-    // ── Roblox OAuth 2.0 (account linking) ─────────────────────────────────
-    // Non-secret policy only. Set ROBLOX_CLIENT_ID as a var and store
-    // ROBLOX_CLIENT_SECRET / ROBLOX_TOKEN_KEY as encrypted Worker secrets
-    // (see docs/ROBLOX.md); never commit secret values.
-    "ROBLOX_OAUTH_SCOPES": "openid profile",
-    "OAUTH_STATE_TTL_SECONDS": "600",
-    "ROBLOX_RATE_LIMIT_PER_MINUTE": "20",
-    "ROBLOX_OPEN_CLOUD_RATE_PER_MINUTE": "10",
-    // Set this to the Worker's own hostname to reject poisoned Host headers:
-    // "ROBLOX_ALLOWED_HOSTS": "demo-mcp.<your-subdomain>.workers.dev",
 
     // ── Jev Decision Engine (TypeSafe) ───────────────────────────────────────
     // Policy only. TYPESAFE_API_KEY must be a *secret*

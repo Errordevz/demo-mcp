@@ -200,7 +200,6 @@ export const MCP_CLIENTS: readonly McpClientIntegration[] = [
       "Select the plus button. Name it DEMO and paste the endpoint as the MCP server URL, including /mcp. Choose Mixed Authentication for the expected noauth public tools plus OAuth-protected tools setup, if that option is offered.",
       "This mixed flow has not been live-tested yet. If ChatGPT does not offer Mixed Authentication or does not start DEMO OAuth on a protected call, use only public tools until compatibility is verified.",
       "With mixed auth working, public tools need no sign-in. A protected tool should start DEMO OAuth; sign in through Cloudflare Access and review the requested scopes.",
-      "Roblox is a separate approval: call roblox_account_link_start, then open its linkUrl, paste the one-time linkCode, and approve only on Roblox's official consent page. This does not happen during DEMO OAuth.",
     ],
     limitations: [
       "No verified prefilled install URL, and no verified website-to-app confirmation dialog.",
@@ -249,7 +248,7 @@ export const MCP_CLIENTS: readonly McpClientIntegration[] = [
     limitations: [
       "Free plans can add one custom connector. Team and Enterprise members usually need an Owner.",
       "After you confirm, Anthropic reaches the server from its cloud for claude.ai, Claude Desktop, Cowork, and the mobile apps. This page cannot see that confirmation.",
-      "This connector setup is no-auth for public tools; protected Roblox and jev_decide calls need per-tool OAuth, and Claude compatibility is not verified here.",
+      "This connector setup is no-auth for public tools; protected jev_decide and collaboration calls need per-tool OAuth, and Claude compatibility is not verified here.",
       "No separate native-app install scheme was documented. The web dialog is the official path.",
     ],
     fallback: "Open Customize, then Connectors, and paste the endpoint into Add custom connector.",
@@ -294,7 +293,7 @@ export const MCP_CLIENTS: readonly McpClientIntegration[] = [
       "If Cursor does not open, copy the configuration below into ~/.cursor/mcp.json for every project, or .cursor/mcp.json for one project.",
     ],
     limitations: [
-      "This no-auth setup exposes public tools; protected Roblox and jev_decide calls require per-tool OAuth, which is not verified for Cursor here.",
+      "This no-auth setup exposes public tools; protected jev_decide and collaboration calls require per-tool OAuth, which is not verified for Cursor here.",
       "Desktop only. There is no verified iPhone or mobile install link.",
       "The link needs Cursor installed, with the cursor:// handler registered.",
     ],
@@ -333,7 +332,7 @@ export const MCP_CLIENTS: readonly McpClientIntegration[] = [
       "If VS Code does not open, copy the configuration below into .vscode/mcp.json, or run MCP: Open User Configuration and paste the server entry.",
     ],
     limitations: [
-      "This no-auth setup exposes public tools; protected Roblox and jev_decide calls require per-tool OAuth, which is not verified for VS Code here.",
+      "This no-auth setup exposes public tools; protected jev_decide and collaboration calls require per-tool OAuth, which is not verified for VS Code here.",
       "Desktop only. There is no verified mobile install link.",
       "VS Code Insiders uses the separate documented vscode-insiders: scheme.",
     ],

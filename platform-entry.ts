@@ -3,13 +3,10 @@ import { resolveJevConfig } from "./src/jev/config.js";
 import { resolveLayaConfig } from "./src/laya/config.js";
 import { resolveDecisionRoutingMode } from "./src/decisions/provider.js";
 import { demoUi } from "./ui";
-import { handleRobloxOAuthRoute, isRobloxOAuthPath } from "./src/roblox/routes.js";
 import { handleMcpOAuthRoute, isMcpOAuthPath } from "./src/auth/oauth-routes.js";
-import { handleAccountRoute, isAccountPath } from "./src/account/routes.js";
 import { handleCollabRoute, isCollabPath } from "./src/collab/routes.js";
 import { handleByoxRoute, isByoxPath } from "./src/byox/routes.js";
-import { accountStoreAvailable } from "./src/account/store.js";
-import { resolveAccountEmailConfig } from "./src/account/email.js";
+import { resolveCollabStore } from "./src/collab/store.js";
 import { MCP_OAUTH_SCOPES, mcpOAuthReady, resolveMcpOAuthConfig } from "./src/auth/oauth-config.js";
 import { SessionManager } from "./src/session/manager.js";
 import { VideoArtifactStore, artifactBaseUrl, parseRangeHeader } from "./src/video/store.js";
@@ -18,12 +15,10 @@ import { oversizedBody, securityHeaders } from "./src/core/headers.js";
 import { iconRoute } from "./src/ui/icons.js";
 
 // Re-exported so Wrangler can bind the Durable Object classes
-// (`durable_objects.bindings[].class_name`). `RobloxAuth` holds the OAuth state
-// and the encrypted token envelope for a linked Roblox account.
+// (`durable_objects.bindings[].class_name`).
 export { BrowserSession } from "./src/session/durable-object.js";
-export { RobloxAuth } from "./src/roblox/do.js";
 export { McpAuth } from "./src/auth/oauth-store.js";
-export { DemoAccounts } from "./src/account/store.js";
+export { DemoAccounts } from "./src/collab/store.js";
 
 type Env = {
   DEMO_PLATFORM_ORIGIN?: string;
@@ -33,6 +28,7 @@ type Env = {
   MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS?: string | number;
   MCP_AUTH_RATE_LIMIT_PER_MINUTE?: string | number;
   MCP_AUTH?: unknown;
+  DEMO_ACCOUNTS?: unknown;
   BROWSER?: unknown;
   SCREENSHOTS?: R2Bucket;
   VIDEO_ARTIFACTS?: R2Bucket;
@@ -42,19 +38,6 @@ type Env = {
   AI?: { run?: unknown };
   BROWSER_SESSIONS?: unknown;
   VIDEO_ARTIFACT_TTL_SECONDS?: string | number;
-  /** Roblox OAuth: ids/secrets are Worker env + secrets only, never client-side. */
-  ROBLOX_CLIENT_ID?: string;
-  ROBLOX_CLIENT_SECRET?: string;
-  ROBLOX_TOKEN_KEY?: string;
-  ROBLOX_REDIRECT_URI?: string;
-  ROBLOX_ALLOWED_HOSTS?: string;
-  ROBLOX_OAUTH_SCOPES?: string;
-  ROBLOX_ACCOUNT_KEY?: string;
-  OAUTH_STATE_TTL_SECONDS?: string | number;
-  ROBLOX_SESSION_TTL_SECONDS?: string | number;
-  ROBLOX_RATE_LIMIT_PER_MINUTE?: string | number;
-  ROBLOX_OPEN_CLOUD_RATE_PER_MINUTE?: string | number;
-  ROBLOX_AUTH?: unknown;
   /** TypeSafe / Jev decision engine: the credential is a secret, never a var. */
   TYPESAFE_API_KEY?: string;
   YOUTUBE_API_KEY?: string;
@@ -197,58 +180,16 @@ function layaSurface(env: Env) {
 
 function mcpOAuthSurface(env: Env) {
   const config = resolveMcpOAuthConfig(env);
-  const accounts = accountStoreAvailable(env as unknown as Record<string, unknown>);
   return {
     configured: mcpOAuthReady(env),
-    identityProvider: accounts
-      ? "DEMO account session (Cloudflare Access also honoured when configured); principal is a server-derived subject hash"
-      : "Cloudflare Access; signed user subject verified by the Worker",
-    identityOptions: { demoAccounts: accounts, cloudflareAccess: Boolean(config?.accessConfigured) },
+    identityProvider: "Cloudflare Access; signed user subject verified by the Worker",
+    identityOptions: { cloudflareAccess: Boolean(config?.accessConfigured) },
     publicToolsUnauthenticated: true,
     protectedScopes: [...MCP_OAUTH_SCOPES],
     accessTokenTtlSeconds: config?.accessTokenTtlSeconds ?? null,
     refreshTokensIssued: false,
     authorizationCodePkce: "S256",
     clientRegistration: "ChatGPT CIMD allowlist; dynamic client registration disabled",
-  };
-}
-
-function accountSurface(env: Env) {
-  const available = accountStoreAvailable(env as unknown as Record<string, unknown>);
-  // Ask the email module itself. The old check read `RESEND_API_KEY` directly,
-  // which meant a deployment sending through Gmail SMTP — the shipped sender —
-  // reported email as unconfigured even with a working App Password secret.
-  const email = resolveAccountEmailConfig(env as unknown as Record<string, unknown>);
-  return {
-    available,
-    storage: available ? "durable-object" : "unavailable",
-    passwordHashing: "pbkdf2-hmac-sha256",
-    sessions: available ? "opaque token, stored as hash, httpOnly cookie, server-side revocation" : "unavailable",
-    // Presence only: the provider id and a boolean, never an address, a
-    // credential name or a value.
-    emailDelivery: email.configured,
-    emailProvider: email.provider,
-    registrationOpen: available,
-  };
-}
-
-function robloxSurface(env: Env) {
-  const clientId = String(env.ROBLOX_CLIENT_ID ?? "").trim();
-  const secret = String(env.ROBLOX_CLIENT_SECRET ?? "").trim();
-  const tokenKey = String(env.ROBLOX_TOKEN_KEY ?? "").trim();
-  const hasRobloxBinding = Boolean(env.ROBLOX_AUTH && typeof (env.ROBLOX_AUTH as { idFromName?: unknown }).idFromName === "function" && typeof (env.ROBLOX_AUTH as { get?: unknown }).get === "function");
-  const secureStorageReady = hasRobloxBinding && tokenKey.length > 0;
-  return {
-    configured: Boolean(clientId && secret && secureStorageReady && env.MCP_PUBLIC_ORIGIN),
-    credentialsConfigured: Boolean(clientId && secret),
-    secureStorageReady,
-    reason: !clientId ? "ROBLOX_CLIENT_ID is not set" : !secret ? "ROBLOX_CLIENT_SECRET is not set" : !hasRobloxBinding ? "ROBLOX_AUTH Durable Object is not bound" : !tokenKey ? "ROBLOX_TOKEN_KEY is not set" : !env.MCP_PUBLIC_ORIGIN ? "MCP_PUBLIC_ORIGIN is not pinned" : null,
-    storage: secureStorageReady ? "durable-object" : "unavailable",
-    tokenEncryption: secureStorageReady ? "aes-gcm-256" : "unavailable",
-    identityBinding: "verified Cloudflare Access subject hash",
-    flows: ["GET /oauth/roblox/link", "POST /oauth/roblox/start", "GET /oauth/roblox/callback", "POST /oauth/roblox/logout", "GET /oauth/roblox/status"],
-    passwordOrCookieFlow: false,
-    tokensExposedToClients: false,
   };
 }
 
@@ -265,6 +206,7 @@ function youtubeSurface(env: Env) {
 
 function telemetry(env: Env) {
   const capabilities = new SessionManager(env as never).capabilities();
+  const collabAvailable = Boolean(resolveCollabStore(env as unknown as Record<string, unknown>));
   return {
     ok: true,
     name: "DEMO",
@@ -294,14 +236,12 @@ function telemetry(env: Env) {
       skillsSh: true,
       composio: false,
       mcpOAuth: mcpOAuthSurface(env),
-      accounts: accountSurface(env),
-      robloxOAuth: robloxSurface(env),
       jevDecisionEngine: jevSurface(env),
       layaDecisionProvider: layaSurface(env),
       typedDecisions: jevSurface(env).available || layaSurface(env).available,
       youtube: youtubeSurface(env),
       byox: { available: true, source: "codecrafters-io/build-your-own-x", refreshRequiresAdmin: true },
-      collaboration: { workspaceStorage: accountSurface(env).available, applyEnabled: String((env as unknown as Record<string, unknown>).COLLAB_ALLOW_APPLY ?? "true").toLowerCase() !== "false", scopes: ["collab:write", "collab:admin"] },
+      collaboration: { workspaceStorage: collabAvailable, applyEnabled: String((env as unknown as Record<string, unknown>).COLLAB_ALLOW_APPLY ?? "true").toLowerCase() !== "false", scopes: ["collab:write", "collab:admin"] },
       expanded: {
         git: true,
         gitPublicOnly: true,
@@ -325,16 +265,13 @@ function telemetry(env: Env) {
       { name: "Browser", type: "Cloudflare Browser Run", connected: capabilities.browserAvailable },
       { name: "Browser sessions", type: "Durable Object", connected: capabilities.sessionStorage === "durable-object" },
       { name: "Screenshot storage", type: "Cloudflare R2", connected: capabilities.screenshots },
-      { name: "DEMO OAuth", type: "OAuth 2.1 + PKCE (DEMO account / Cloudflare Access identity, per-tool grants)", connected: mcpOAuthSurface(env).configured },
-      { name: "DEMO accounts", type: "Durable Object (DemoAccounts, PBKDF2 + revocable sessions)", connected: accountSurface(env).available },
-      { name: "Roblox OAuth", type: "Roblox Open Cloud (official OAuth 2.0)", connected: robloxSurface(env).configured },
-      { name: "Roblox session store", type: "Durable Object (RobloxAuth)", connected: robloxSurface(env).storage === "durable-object" },
+      { name: "DEMO OAuth", type: "OAuth 2.1 + PKCE (Cloudflare Access identity, per-tool grants)", connected: mcpOAuthSurface(env).configured },
       { name: "TypeSafe Jev", type: "Structured decision engine (HTTP API)", connected: jevSurface(env).available },
       { name: "Laya", type: "External typed-decision provider (HTTP API)", connected: layaSurface(env).available },
       { name: "YouTube Data API", type: "Public metadata (Data API v3)", connected: youtubeSurface(env).available },
       { name: "Git (smart HTTP)", type: "Public repositories, no API key", connected: true },
       { name: "Build Your Own X catalog", type: "R2-backed reference index (metadata only)", connected: true },
-      { name: "Collaboration workspace", type: "Durable Object (DemoAccounts, collab: keys)", connected: accountSurface(env).available },
+      { name: "Collaboration workspace", type: "Durable Object (DemoAccounts, collab: keys)", connected: collabAvailable },
       { name: "Internet Archive", type: "Wayback + archive.org public APIs", connected: true },
       { name: "Workers AI vision", type: "Image/PDF OCR + description", connected: Boolean(env.AI && typeof (env.AI as { run?: unknown }).run === "function") },
       { name: "Web snapshots", type: "R2 (expiring objects)", connected: Boolean(env.SCREENSHOTS || env.WEB_SNAPSHOTS) },
@@ -347,7 +284,6 @@ function telemetry(env: Env) {
       telemetry: "/platform/stats",
       screenshots: "/screenshots/:id",
       mcpOAuth: "/.well-known/oauth-protected-resource, /.well-known/oauth-authorization-server, /oauth/{authorize,token,revoke}",
-      robloxOAuth: "/oauth/roblox/{link,start,callback,logout,status}",
       jevCapabilities: "/capabilities/jev",
       layaCapabilities: "/capabilities/laya",
       youtubeCapabilities: "/capabilities/youtube",
@@ -498,16 +434,6 @@ export default {
     // dispatched before the generic origin allowlist and never reach /mcp.
     if (isMcpOAuthPath(url.pathname)) {
       return (await handleMcpOAuthRoute(request, env as unknown as Record<string, unknown>)) ?? new Response("Not Found", { status: 404 });
-    }
-    // Roblox redirects are top-level navigations with their own browser-bound
-    // state. The actual start requires a matching Cloudflare Access identity.
-    if (isRobloxOAuthPath(url.pathname)) {
-      return (await handleRobloxOAuthRoute(request, env as unknown as Record<string, any>, ctx)) ?? new Response("Not Found", { status: 404 });
-    }
-    // DEMO account JSON API. Same-origin-only mutations with their own CSRF
-    // and origin policy; dispatched before the generic origin allowlist.
-    if (isAccountPath(url.pathname)) {
-      return (await handleAccountRoute(request, env as unknown as Record<string, unknown>, ctx)) ?? new Response("Not Found", { status: 404 });
     }
 
     if (origin && !allowedOrigin(origin, env)) return new Response("Forbidden origin", { status: 403, headers: { "Vary": "Origin" } });

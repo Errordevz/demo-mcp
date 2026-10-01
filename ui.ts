@@ -3,7 +3,7 @@
  *
  * One self-contained HTML document: no external requests, no cookies, no
  * telemetry, no login. The page fetches only same-origin Worker routes
- * (/health, /platform/stats, /capabilities/*, /oauth/roblox/*) and renders
+ * (/health, /platform/stats, /capabilities/*) and renders
  * what is genuinely available. The tool catalog inlined below is generated
  * from the real MCP tool registrations (scripts/generate-tool-catalog.mjs)
  * and pinned against DEMO_TOOL_NAMES by tests/tool-catalog.test.ts.
@@ -110,7 +110,7 @@ function page(serverUrl: string, endpoint: string): string {
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="icon" href="/favicon.ico" sizes="32x32" type="image/png">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
-<meta name="description" content="DEMO — execution infrastructure for AI agents. Public MCP tools need no login; protected Roblox and decision tools use per-tool OAuth.">
+<meta name="description" content="DEMO — execution infrastructure for AI agents. Public MCP tools need no login; protected decision and collaboration tools use per-tool OAuth.">
 <title>DEMO — Execution infrastructure for AI agents</title>
 <script>(function(){try{var v=localStorage.getItem("demo_theme_v1")||"auto";if(v==="light"||v==="dark")document.documentElement.setAttribute("data-theme",v);}catch(e){}})();</script>
 <style>${UI_CSS}</style>

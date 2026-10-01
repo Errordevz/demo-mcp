@@ -53,10 +53,11 @@ for (const [name, entry] of [["MCP worker", worker], ["deployed platform entry",
         expect(tools.map((tool: { name: string }) => tool.name).sort()).toEqual([...DEMO_TOOL_NAMES].sort());
         expect(tools.find((tool: { name: string }) => tool.name === "demo_ping").securitySchemes).toEqual([{ type: "noauth" }]);
         expect(tools.find((tool: { name: string }) => tool.name === "jev_capabilities").securitySchemes).toEqual([{ type: "noauth" }]);
-        expect(tools.find((tool: { name: string }) => tool.name === "roblox_account_profile").securitySchemes).toEqual([{ type: "oauth2", scopes: ["roblox:read"] }]);
-        expect(tools.find((tool: { name: string }) => tool.name === "roblox_account_link_start").securitySchemes).toEqual([{ type: "oauth2", scopes: ["roblox:link"] }]);
-        expect(tools.find((tool: { name: string }) => tool.name === "roblox_account_unlink").securitySchemes).toEqual([{ type: "oauth2", scopes: ["roblox:disconnect"] }]);
+        expect(tools.find((tool: { name: string }) => tool.name === "roblox_user").securitySchemes).toEqual([{ type: "noauth" }]);
+        expect(tools.find((tool: { name: string }) => tool.name === "roblox_game").securitySchemes).toEqual([{ type: "noauth" }]);
         expect(tools.find((tool: { name: string }) => tool.name === "jev_decide").securitySchemes).toEqual([{ type: "oauth2", scopes: ["decision:use"] }]);
+        expect(tools.find((tool: { name: string }) => tool.name === "collab_workspace").securitySchemes).toEqual([{ type: "oauth2", scopes: ["collab:write"] }]);
+        expect(tools.find((tool: { name: string }) => tool.name === "byox_refresh_index").securitySchemes).toEqual([{ type: "oauth2", scopes: ["collab:admin"] }]);
 
         const ping = await rpc(entry, "tools/call", { name: "demo_ping", arguments: {} }, authorization);
         expect(ping.response.status).toBe(200);
@@ -67,23 +68,13 @@ for (const [name, entry] of [["MCP worker", worker], ["deployed platform entry",
       });
     }
 
-    it("does not inspect any user's account from the public Roblox capabilities resource", async () => {
-      const { AccountVault } = await import("../src/roblox/store.js");
-      const readAccount = vi.spyOn(AccountVault.prototype, "getAccount");
-      const result = await rpc(entry, "resources/read", { uri: "demo://capabilities/roblox" });
-      expect(result.response.status).toBe(200);
-      expect(result.body.result.contents[0].mimeType).toBe("application/json");
-      const report = JSON.parse(result.body.result.contents[0].text);
-      expect(report.separation.accountTools.authenticated).toBe(true);
-      expect(report.separation.accountTools.note).toMatch(/user-bound DEMO OAuth/i);
-      expect(readAccount).not.toHaveBeenCalled();
-    });
-
-    for (const tool of [...DEMO_TOOL_NAMES.filter((toolName) => toolName.startsWith("roblox_account_")), "jev_decide"]) {
+    for (const tool of ["jev_decide", "collab_workspace"] as const) {
       it(`returns a scoped OAuth challenge for ${tool} without contacting an upstream`, async () => {
         const upstream = vi.fn(() => { throw new Error("Protected operation must not reach upstream"); });
         vi.stubGlobal("fetch", upstream);
-        const args = tool === "jev_decide" ? { decision: "tool_route", request: "test" } : {};
+        const args = tool === "jev_decide"
+          ? { decision: "tool_route", request: "test" }
+          : { action: "list" };
         const result = await rpc(entry, "tools/call", { name: tool, arguments: args });
         expect(result.response.status).toBe(200);
         expect(result.body.result.isError).toBe(true);

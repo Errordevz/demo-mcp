@@ -114,7 +114,7 @@ describe("official MCP client integrations", () => {
     expect(chatgpt?.confirmBody).toBe("You're about to connect DEMO as a remote MCP server in ChatGPT.");
     expect(chatgpt?.authentication).toBe("mixed");
     expect(chatgpt?.steps.join(" ")).toMatch(/Mixed Authentication/i);
-    expect(chatgpt?.steps.join(" ")).toMatch(/roblox_account_link_start/i);
+    expect(chatgpt?.steps.join(" ")).toMatch(/Cloudflare Access/i);
     expect(chatgpt?.limitations.join(" ")).toMatch(/No live ChatGPT connection was exercised/i);
     expect(chatgpt?.steps.join(" ")).toMatch(/does not document a link/i);
   });

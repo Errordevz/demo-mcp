@@ -26,7 +26,7 @@ import { registerCommand, routeCommand } from "../src/commands/router.js";
 import worker, { DEMO_TOOL_NAMES, TOOL_COUNT } from "../index.js";
 import platform from "../platform-entry.js";
 import { InMemoryMcpAuthStore } from "../src/auth/oauth-store.js";
-import { sha256Hex } from "../src/roblox/crypto.js";
+import { sha256Hex } from "../src/auth/crypto.js";
 
 const CTX = { waitUntil: (promise: Promise<unknown>) => void promise.catch(() => undefined), passThroughOnException: () => undefined } as unknown as ExecutionContext;
 const LAYA_KEY = "laya_secret_test_key_00112233445566778899aabbccddeeff";

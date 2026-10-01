@@ -31,8 +31,6 @@ const expected = {
   MCP_AUTH_ACCESS_AUD: "<your-cloudflare-access-application-aud-tag>",
   MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS: "900",
   MCP_AUTH_RATE_LIMIT_PER_MINUTE: "30",
-  OAUTH_STATE_TTL_SECONDS: "600",
-  ROBLOX_OAUTH_SCOPES: "openid profile",
 };
 const report = {
   worker: "demo-mcp",
@@ -46,8 +44,6 @@ const report = {
     securitySchemes: content.includes("securitySchemes"),
     protectedResourceMetadata: content.includes("oauth-protected-resource"),
     accessIdentityVerifier: content.includes("CF-Access-Jwt-Assertion"),
-    robloxOAuthCallback: content.includes("/oauth/roblox/callback"),
-    robloxTokenEncryption: content.includes("ROBLOX_TOKEN_KEY"),
   },
   downloadedContentSha256: createHash("sha256").update(content).digest("hex"),
 };

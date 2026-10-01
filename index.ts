@@ -15,8 +15,6 @@ import { LIMITS } from "./src/core/limits.js";
 import { ScreenshotManager } from "./src/browser/screenshot.js";
 import { resolveScreenshotBase } from "./src/session/factory.js";
 import { registerVideoTools } from "./src/mcp/video-tools.js";
-import { registerRobloxAccountTools, ROBLOX_TOOL_NAMES } from "./src/mcp/roblox-tools.js";
-import { ROBLOX_CAPABILITIES_URI } from "./src/roblox/capabilities.js";
 import { registerJevTools, JEV_TOOL_NAMES, jevCapabilitiesReport } from "./src/mcp/jev-tools.js";
 import { JEV_CAPABILITIES_URI } from "./src/jev/capabilities.js";
 import { jevFlags, type JevEnv } from "./src/jev/config.js";
@@ -24,12 +22,11 @@ import { registerLayaTools, LAYA_TOOL_NAMES, layaCapabilitiesReport } from "./sr
 import { registerByoxTools, BYOX_TOOL_NAMES, byoxCapabilitiesReport, BYOX_CAPABILITIES_URI } from "./src/mcp/byox-tools.js";
 import { loadByoxIndex } from "./src/byox/store.js";
 import { BYOX_SOURCE_REPO } from "./src/mcp/byox-tools.js";
-import { accountStoreAvailable } from "./src/account/store.js";
+import { resolveCollabStore } from "./src/collab/store.js";
 import { registerCollabTools, COLLAB_TOOL_NAMES, collabCapabilitiesReport, COLLAB_CAPABILITIES_URI } from "./src/mcp/collab-tools.js";
 import { LAYA_CAPABILITIES_URI } from "./src/laya/capabilities.js";
 import { layaFlags, type LayaEnv } from "./src/laya/config.js";
 import { resolveDecisionRoutingMode } from "./src/decisions/provider.js";
-import type { RobloxAuthEnv } from "./src/roblox/types.js";
 import { VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI, registerVideoResources, videoStatusFlags } from "./src/mcp/video-resources.js";
 import { describeVideoCapabilities } from "./src/video/capabilities.js";
 import type { VideoEnv } from "./src/video/types.js";
@@ -53,12 +50,18 @@ import { createJevCommand } from "./src/commands/jev-command.js";
 import { createLayaCommand } from "./src/commands/laya-command.js";
 import { registerDevTools, DEV_TOOL_NAMES } from "./src/mcp/dev-tools.js";
 
-type Env = SessionManagerEnv & VideoEnv & RobloxAuthEnv & JevEnv & LayaEnv & YouTubeEnv & {
+type Env = SessionManagerEnv & VideoEnv & JevEnv & LayaEnv & YouTubeEnv & {
   /** Public base URL of the Dev coding agent service. */
   DEV_BASE_URL?: string;
   /** Typed-decision routing mode: auto | laya | jev (default auto). */
   DECISION_PROVIDER_MODE?: string;
   SSRF_GUARD_HTTP_FETCH?: string;
+  MCP_PUBLIC_ORIGIN?: string;
+  MCP_AUTH_ACCESS_TEAM_DOMAIN?: string;
+  MCP_AUTH_ACCESS_AUD?: string;
+  MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS?: string | number;
+  MCP_AUTH_RATE_LIMIT_PER_MINUTE?: string | number;
+  MCP_AUTH?: unknown;
   /** DEMO 0.9 expanded capability policy (non-secret). */
   GIT_MAX_PACK_MB?: string;
   GIT_REQUEST_TIMEOUT_MS?: string;
@@ -98,9 +101,7 @@ USING THE RESULT — inspect_video returns the actual decoded video frames as MC
 
 HONESTY — Never claim to have seen or watched the video unless a tool actually returned image content blocks (visualEvidenceDelivered=true) or a real transcript, and you examined them. The frames are samples: do not claim to have watched continuous playback, never invent audio, dialogue, or events the frames do not show, and state uncertainty explicitly. If audioStatus is not "available", say the audio could not be verified. A successful video_fetch proves retrieval only, not understanding. A post caption is NOT a transcript and a thumbnail is NOT a frame. When access_status is anything other than "public", say why the video could not be retrieved (deleted, private, region-restricted, login wall, CAPTCHA, expired link, rate limit) instead of describing content. If inspection failed or only metadata/a thumbnail is available, say visual inspection was not completed and report the error instead of describing content.
 
-AUTHENTICATION — DEMO's MCP endpoint and public tools require no login. Roblox account tools and jev_decide are protected per tool by short-lived DEMO OAuth 2.1 access tokens using authorization code + PKCE. If a protected call returns an OAuth challenge, let ChatGPT start the authorization flow; the user signs in through Cloudflare Access and explicitly approves the DEMO scopes. Do not ask for, invent, or accept user/account IDs or bearer tokens.
-
-ROBLOX ACCOUNT — DEMO's ChatGPT OAuth grant is separate from Roblox authorization. To connect a Roblox account, call roblox_account_link_start; give the user its one-time linkCode and linkUrl, ask them to open that URL in a browser signed in with the same Cloudflare Access identity, paste the code, then sign in and approve on Roblox's official consent page. The code expires quickly and is single-use. Roblox's verified userinfo sub is stored against a server-derived hash of the verified Access subject; no tool argument can choose another account. Never build or link a Roblox login form, ask for a password, .ROBLOSECURITY cookie or token, or accept a username/user id from chat. Roblox tokens remain encrypted on the Worker and never reach the client. roblox_account_status and the other protected account tools describe only the identity represented by this MCP token. Disconnect with roblox_account_unlink; DEMO deletes its encrypted grant and best-effort revokes the Roblox refresh token. A missing Roblox scope reports the exact scope; actions without an official OAuth/Open Cloud endpoint report not_supported. Read demo://capabilities/roblox before promising account behavior.
+AUTHENTICATION — DEMO's MCP endpoint and public tools require no login. Protected tools (jev_decide, shared workspace collab_* tools, and byox_refresh_index) are protected per tool by short-lived DEMO OAuth 2.1 access tokens using authorization code + PKCE. If a protected call returns an OAuth challenge, let ChatGPT start the authorization flow; the user signs in through Cloudflare Access and explicitly approves the DEMO scopes. Do not ask for, invent, or accept user/account IDs or bearer tokens.
 
 DEMO 0.9 EXPANDED CAPABILITIES — Read demo://capabilities/expanded (or GET /capabilities/expanded) for the live report. git_repository inspects PUBLIC Git repositories (GitHub, GitLab, Codeberg, Gitea, any smart-HTTP host) with NO API key — private repositories are a hard auth_required refusal and DEMO never accepts or asks for Git credentials. archive_search/archive_item/wayback cover the Internet Archive and Wayback Machine (if no snapshot exists, the result says so — never invent an archived copy). feed_read parses RSS/Atom. pdf_document extracts PDF text with page references and OCRs scanned pages through Workers AI when configured. image_analyze describes/OCRs images on the same binding. web_extract returns clean text/Markdown/JSON; web_diff compares pages against stored snapshots (normalized for timestamps/counters); web_monitor tracks changes on demand only; screenshot_diff compares two screenshots pixel-wise in the browser. openapi_inspect READS API documents but never calls discovered APIs. net_diagnose and url_inspect give safe public-network and URL-safety reports. schema_validate, jwt_inspect, cron_explain and text_diff are fully local. web_research returns evidence-backed findings with source URLs and timestamps — cite them and never fabricate citations. jwt_inspect DECODES only: decoding is not verification and a decoded token is never proof of anything. All of these fetch untrusted public content through DEMO's SSRF guard with size/time/rate limits.
 
@@ -127,38 +128,13 @@ function browserCapabilitiesFor(env: unknown, requestUrl: string | null) {
   };
 }
 
-/** Presence-only auth/storage flags surfaced in public status; never include values or account state. */
-function robloxFlags(env: Env) {
-  const clientId = String(env.ROBLOX_CLIENT_ID ?? "").trim();
-  const secret = String(env.ROBLOX_CLIENT_SECRET ?? "").trim();
-  const tokenKey = String(env.ROBLOX_TOKEN_KEY ?? "").trim();
-  const storageReady = Boolean(env.ROBLOX_AUTH && tokenKey);
-  const effectiveStorage = storageReady ? ("durable-object" as const) : ("memory" as const);
-  const effectiveEncryption = tokenKey ? ("aes-gcm-256" as const) : ("none" as const);
+/** Presence-only OAuth flags surfaced in public status; never include values or account state. */
+function oauthFlags(env: Env) {
   const protectedOAuthReady = mcpOAuthReady(env);
-  const robloxReady = Boolean(clientId && secret && storageReady && protectedOAuthReady);
-  const robloxOAuthReason = !clientId
-    ? "ROBLOX_CLIENT_ID is not set on this Worker."
-    : !secret
-      ? "ROBLOX_CLIENT_SECRET is not set on this Worker."
-      : !env.ROBLOX_AUTH
-        ? "ROBLOX_AUTH Durable Object is not bound."
-        : !tokenKey
-          ? "ROBLOX_TOKEN_KEY is not set."
-          : !protectedOAuthReady
-            ? "MCP OAuth, its Access identity configuration, or MCP_AUTH storage is not ready."
-            : null;
   return {
-    robloxOAuthConfigured: robloxReady,
-    robloxOAuthReason,
-    robloxTokenStorage: effectiveStorage,
-    robloxTokenEncryption: effectiveEncryption,
-    robloxAccountToolsRequireOAuth: true,
     jevDecisionRequiresOAuth: true,
     protectedToolOAuthConfigured: protectedOAuthReady,
     protectedToolOAuthScopes: [...MCP_OAUTH_SCOPES],
-    robloxOAuthRoutes: ["/oauth/roblox/link", "/oauth/roblox/start", "/oauth/roblox/callback", "/oauth/roblox/logout", "/oauth/roblox/status"],
-    robloxCapabilitiesResource: ROBLOX_CAPABILITIES_URI,
   };
 }
 
@@ -318,7 +294,7 @@ function server(env: Env, requestUrl: string | null = null, authorization: strin
         humanHandoff: capabilities.handoff,
         accessibilitySnapshot: capabilities.accessibilitySnapshot,
         provider: capabilities.provider,
-        ...robloxFlags(env),
+        ...oauthFlags(env),
         ...jevFlags(env as unknown as Record<string, unknown>),
         ...layaFlags(env as unknown as Record<string, unknown>),
         decisionRoutingMode: resolveDecisionRoutingMode(env as unknown as Record<string, unknown>),
@@ -592,10 +568,6 @@ function server(env: Env, requestUrl: string | null = null, authorization: strin
 
   registerVideoTools(mcp, { env: env as Env & Record<string, unknown>, requestUrl });
 
-  /* -------------------------------------------- authenticated Roblox account */
-
-  registerRobloxAccountTools(mcp, { env: env as unknown as Record<string, unknown>, requestUrl, authorization });
-
   /* -------------------------------------- Jev decision engine (TypeSafe) */
 
   registerJevTools(mcp, { env: env as unknown as Record<string, unknown>, requestUrl, authorization });
@@ -845,8 +817,6 @@ export const DEMO_TOOL_NAMES = [
   "browser_session",
   "browser_close",
   "browser_capabilities",
-  // Authenticated Roblox account (OAuth 2.0 + PKCE, server-side tokens only)
-  ...ROBLOX_TOOL_NAMES,
   // Public video understanding
   "inspect_video",
   "video_resolve",
@@ -915,7 +885,7 @@ export default {
       screenshotLinks: capabilities.screenshots,
       liveView: capabilities.liveView,
       ...video,
-      ...robloxFlags(env),
+      ...oauthFlags(env),
       ...jevFlags(env as unknown as Record<string, unknown>),
       ...layaFlags(env as unknown as Record<string, unknown>),
       decisionRoutingMode: resolveDecisionRoutingMode(env as unknown as Record<string, unknown>),
@@ -927,13 +897,11 @@ export default {
       // presence flag — read /capabilities/byox for freshness and counts.
       byoxCatalog: true,
       byoxSource: BYOX_SOURCE_REPO,
-      // Collaboration state reuses the DEMO_ACCOUNTS object, so this is exactly
-      // "the account store is bound"; no separate binding or migration exists.
-      collabWorkspace: accountStoreAvailable(env as unknown as Record<string, unknown>),
+      collabWorkspace: Boolean(resolveCollabStore(env as unknown as Record<string, unknown>)),
       collabApplyEnabled: String((env as unknown as Record<string, unknown>).COLLAB_ALLOW_APPLY ?? "true").toLowerCase() !== "false",
       composio: false,
       toolCount: TOOL_COUNT,
-      resources: [VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI, ROBLOX_CAPABILITIES_URI, JEV_CAPABILITIES_URI, LAYA_CAPABILITIES_URI, YOUTUBE_CAPABILITIES_URI, EXPANDED_CAPABILITIES_URI, BYOX_CAPABILITIES_URI, COLLAB_CAPABILITIES_URI],
+      resources: [VIDEO_CAPABILITIES_URI, VIDEO_HONESTY_URI, JEV_CAPABILITIES_URI, LAYA_CAPABILITIES_URI, YOUTUBE_CAPABILITIES_URI, EXPANDED_CAPABILITIES_URI, BYOX_CAPABILITIES_URI, COLLAB_CAPABILITIES_URI],
     };
     // Register commands for the /mcp, /jev and /laya command system
     registerCommand(createMcpCommand({ version: VERSION, toolNames: DEMO_TOOL_NAMES, commands: listCommands() }));

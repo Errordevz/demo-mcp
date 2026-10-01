@@ -20,7 +20,7 @@ import { applyIntentHook } from "../src/video/intent-hook.js";
 import { analysisHintFor, type DetectedIntent } from "../src/video/intent.js";
 import worker, { DEMO_TOOL_NAMES, TOOL_COUNT } from "../index.js";
 import { InMemoryMcpAuthStore } from "../src/auth/oauth-store.js";
-import { sha256Hex } from "../src/roblox/crypto.js";
+import { sha256Hex } from "../src/auth/crypto.js";
 
 const CTX = { waitUntil: (promise: Promise<unknown>) => void promise.catch(() => undefined), passThroughOnException: () => undefined } as unknown as ExecutionContext;
 const CREDENTIAL = "tsk_live_9f2b7c1d8e4a5566f0ab34cd78ef0123";

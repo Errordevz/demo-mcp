@@ -76,7 +76,7 @@ describe("BYOX and collaboration tool registration", () => {
     expect(TOOL_COUNT).toBe(DEMO_TOOL_NAMES.length);
     // The pre-existing tool names were not renamed or duplicated.
     expect(new Set(DEMO_TOOL_NAMES).size).toBe(DEMO_TOOL_NAMES.length);
-    for (const legacy of ["browser_inspect", "video_analyze", "jev_decide", "laya_capabilities", "roblox_account_profile", "git_repository"]) {
+    for (const legacy of ["browser_inspect", "video_analyze", "jev_decide", "laya_capabilities", "roblox_user", "roblox_game", "git_repository"]) {
       expect(DEMO_TOOL_NAMES).toContain(legacy);
     }
   });

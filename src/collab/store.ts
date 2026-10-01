@@ -1,18 +1,17 @@
 /**
  * Shared-workspace persistence.
  *
- * Storage lives in the **existing** `DEMO_ACCOUNTS` Durable Object (`DemoAccounts`),
- * which already owns the deployment's strongly-consistent KV area. Reusing it
- * means the collaboration feature needs no new binding and no new Durable Object
- * migration — a deploy of this change cannot disturb the account objects.
+ * Storage lives in the `DEMO_ACCOUNTS` Durable Object (`DemoAccounts`),
+ * which owns the deployment's strongly-consistent KV area for shared workspaces.
  *
  * `src/collab/model.ts` owns the policy; this module owns storage layout, the
- * bounded workspace index, and the client that talks to the object. The object's
- * RPC methods (see `DemoAccounts`) are thin: they serialise with the same
- * `blockConcurrencyWhile` mutex the account operations use, so a read-modify-write
- * of a workspace can never interleave with another request.
+ * bounded workspace index, the `DemoAccounts` Durable Object class, and the
+ * client that talks to the object. The object's RPC methods serialize with
+ * `blockConcurrencyWhile` so a read-modify-write of a workspace can never
+ * interleave with another request.
  */
 
+import { DurableObject } from "cloudflare:workers";
 import { decodeRpcError, encodeForRpc } from "../core/errors.js";
 import { applyOperation, createWorkspace, newId, summarizeWorkspace, type ApplyContext, type CollabOperation, type CollabWorkspace, type OperationResult, type WorkspaceSummary } from "./model.js";
 
@@ -23,7 +22,7 @@ export interface CollabStorageLike {
   delete(key: string): Promise<boolean>;
 }
 
-/** All collab keys are namespaced so the account object's own keys never collide. */
+/** All collab keys are namespaced under `collab:`. */
 const PREFIX = "collab:";
 const INDEX_KEY = `${PREFIX}index`;
 const WORKSPACE_KEY = (id: string) => `${PREFIX}ws:${id}`;
@@ -135,6 +134,52 @@ export async function collabApply(storage: CollabStorageLike, id: string, operat
   return result;
 }
 
+/* ----------------------------------------------------------- Durable Object */
+
+export class DemoAccounts extends DurableObject<Record<string, unknown>> {
+  private get collabStorage(): CollabStorageLike {
+    return this.ctx.storage as unknown as CollabStorageLike;
+  }
+
+  async collabOpen(input: OpenWorkspaceInput, now = Date.now()): Promise<{ summary: WorkspaceSummary; index: WorkspaceIndexEntry[] }> {
+    let outcome: { summary: WorkspaceSummary; index: WorkspaceIndexEntry[] } | null = null;
+    await this.serial(async () => {
+      outcome = await collabOpen(this.collabStorage, input, now);
+    });
+    if (!outcome) throw encodeForRpc(new Error("Workspace open produced no result."));
+    return outcome;
+  }
+
+  async collabList(): Promise<{ workspaces: WorkspaceIndexEntry[]; total: number }> {
+    return collabList(this.collabStorage);
+  }
+
+  async collabGet(id: string): Promise<CollabWorkspace | null> {
+    return collabGet(this.collabStorage, id);
+  }
+
+  async collabSummary(id: string): Promise<WorkspaceSummary | null> {
+    return collabSummary(this.collabStorage, id);
+  }
+
+  async collabApply(id: string, operation: CollabOperation, context: ApplyContext = {}): Promise<OperationResult> {
+    let outcome: OperationResult | null = null;
+    try {
+      await this.serial(async () => {
+        outcome = await collabApply(this.collabStorage, id, operation, context);
+      });
+    } catch (error) {
+      throw encodeForRpc(error);
+    }
+    if (!outcome) throw encodeForRpc(new Error("Workspace operation produced no result."));
+    return outcome;
+  }
+
+  private async serial(operation: () => Promise<void>): Promise<void> {
+    await this.ctx.blockConcurrencyWhile(operation);
+  }
+}
+
 /* ------------------------------------------------------------------- client */
 
 /** RPC surface `DemoAccounts` exposes for the workspace. */
@@ -156,9 +201,7 @@ interface CollabNamespaceLike {
 }
 
 /**
- * Resolve the shared workspace through the bound `DEMO_ACCOUNTS` object. The
- * object name must match `ACCOUNTS_DO_NAME`; an id that does not exist is
- * created by Cloudflare on first use, exactly like the account object.
+ * Resolve the shared workspace through the bound `DEMO_ACCOUNTS` object.
  */
 export function resolveCollabStore(env: Record<string, unknown>): CollabStore | null {
   const namespace = env.DEMO_ACCOUNTS as CollabNamespaceLike | undefined;

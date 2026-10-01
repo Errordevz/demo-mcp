@@ -19,11 +19,10 @@ import {
   type CollabOperation,
   type CollabWorkspace,
 } from "../src/collab/model.js";
-import { collabApply, collabGet, collabList, collabOpen, collabSummary, resolveCollabStore, type CollabStorageLike } from "../src/collab/store.js";
+import { collabApply, collabGet, collabList, collabOpen, collabSummary, DemoAccounts, resolveCollabStore, type CollabStorageLike } from "../src/collab/store.js";
 import { handleCollabRoute } from "../src/collab/routes.js";
-import { DemoAccounts } from "../src/account/store.js";
 import { InMemoryMcpAuthStore } from "../src/auth/oauth-store.js";
-import { sha256Hex } from "../src/roblox/crypto.js";
+import { sha256Hex } from "../src/auth/crypto.js";
 import { decodeRpcError } from "../src/core/errors.js";
 
 const ORIGIN = "https://demo.test";

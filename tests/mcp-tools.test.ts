@@ -175,13 +175,6 @@ describe("worker routes", () => {
       const declared = [...source.matchAll(/const VERSION = "([^"]+)"/g)].map((match) => match[1]);
       expect(declared, `${file} declares exactly one version`).toEqual([pkg.version]);
     }
-    // The outbound User-Agent is a version string too; a stale one is a silent lie to
-    // whoever is being called. The User-Agent uses a URL-safe form (hyphen instead of space).
-    const oauth = readFileSync(path.resolve(__dirname, "../src/roblox/oauth.ts"), "utf8");
-    const agents = [...oauth.matchAll(/DEMO-MCP\/([^\s(]+)/g)].map((match) => match[1]);
-    expect(agents.length, "the User-Agent must carry a version").toBeGreaterThan(0);
-    // Normalize: "0.8.4-beta" in User-Agent matches "0.8.4 beta" in package.json
-    for (const declared of agents) expect(declared.replace(/-/g, " ")).toBe(pkg.version);
   });
 
   it("serves telemetry without secrets", async () => {
@@ -201,54 +194,20 @@ describe("worker routes", () => {
     expect(serialized).not.toMatch(/\"(?:authorization|access_token|refresh_token|client_secret|api_key)\"\s*:/i);
   });
 
-  it("reports email delivery from the email configuration, not from one provider's key", async () => {
-    // Regression: /platform/stats used to read RESEND_API_KEY directly, so a
-    // deployment sending through Gmail SMTP — the shipped sender — reported
-    // email as unconfigured even with a working App Password secret.
-    const gmail = await platform.fetch(
-      new Request("https://demo.test/platform/stats"),
-      {
-        EMAIL_PROVIDER: "gmail",
-        EMAIL_FROM: "DEMO MCP <demomcp7@gmail.com>",
-        SMTP_PASSWORD: "app-password-sentinel",
-      } as never,
-      CTX,
-    );
-    const gmailBody = (await gmail.json()) as Record<string, any>;
-    expect(gmailBody.capabilities.accounts.emailDelivery).toBe(true);
-    expect(gmailBody.capabilities.accounts.emailProvider).toBe("gmail");
-    expect(JSON.stringify(gmailBody)).not.toContain("app-password-sentinel");
-
-    const none = await platform.fetch(new Request("https://demo.test/platform/stats"), {} as never, CTX);
-    const noneBody = (await none.json()) as Record<string, any>;
-    expect(noneBody.capabilities.accounts.emailDelivery).toBe(false);
-  });
-
-  it("offers an obvious Connect Roblox entry point in the UI and the server instructions", async () => {
+  it("serves the inspector UI with no login or password forms and clear server instructions", async () => {
     const root = await platform.fetch(new Request("https://demo.test/"), ENV as never, CTX);
     expect(root.status).toBe(200);
     const html = await root.text();
-    // The affordance a human looks for, wired to the real route.
-    expect(html).toContain("Connect Roblox account");
-    expect(html).toContain("/oauth/roblox/link");
-    expect(html).toContain("/oauth/roblox/status");
-    expect(html).toContain("/oauth/roblox/logout"); // disconnect/revoke is reachable too
-    expect(html).toContain("Disconnect");
-    // The dashboard only carries credentials in the dedicated DEMO-account
-    // forms (all server-side /account/*); password autofill is hardened and no
-    // OAuth token material is ever rendered.
+    expect(html).not.toContain("/oauth/roblox/link");
+    expect(html).not.toContain("/oauth/roblox/status");
+    expect(html).not.toContain("/account/login");
     expect(html).not.toMatch(/autocomplete=["']?password/i);
     expect(html).not.toMatch(/(access|refresh)[_-]?token\s*[:=]/i);
 
     const init = await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test-client", version: "1" } });
     const instructions = String(init.result?.instructions ?? "");
-    expect(instructions).toMatch(/ROBLOX ACCOUNT/i);
-    expect(instructions).toMatch(/roblox_account_link_start/);
-    expect(instructions).toMatch(/linkCode/);
-    expect(instructions).toMatch(/same Cloudflare Access identity/i);
-    expect(instructions).toMatch(/official consent page/i);
-    expect(instructions).toMatch(/never build or link a Roblox login form/i);
-    expect(instructions).toMatch(/not_supported/i);
+    expect(instructions).toMatch(/AUTHENTICATION — DEMO's MCP endpoint and public tools require no login/i);
+    expect(instructions).not.toMatch(/roblox_account_link_start/);
   });
 
   it("returns 404 for unknown routes", async () => {
