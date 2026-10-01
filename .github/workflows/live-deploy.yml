@@ -83,11 +83,15 @@ jobs:
           DEPLOY_STATUS=${PIPESTATUS[0]}
           set -e
           if [ "$DEPLOY_STATUS" -ne 0 ]; then
-            # GitHub annotations truncate multi-line messages, so the cause has to
-            # fit on one line: otherwise the run UI says only "deploy failed" and
-            # the reason stays buried in a log the API may not even serve.
-            EXCERPT=$(grep -aiE 'error|denied|unauthor|not authorized|permission|authentication|forbidden|invalid|10000' deploy.log | tail -n 4 | tr '\n' '|' | sed -E 's/[[:space:]]+/ /g' | cut -c1-700)
-            echo "::error title=Deploy failed::wrangler deploy exited ${DEPLOY_STATUS}: ${EXCERPT:-no matching error line, see the step log}"
+            # Annotations are single-line and truncate, so the cause has to be
+            # flattened here: without it the run UI says only "deploy failed" and
+            # the reason stays buried in a log the API may not serve to a client.
+            # wrangler colourises even through a pipe, so strip ANSI and \r first.
+            STRIP='s/\x1b\[[0-9;]*[A-Za-z]//g;s/\r//g'
+            BLOCK=$(sed -E "$STRIP" deploy.log | awk '/\[ERROR\]/{found=1} found' | grep -v '^[[:space:]]*$' | head -n 4 | tr '\n' '|' | tr -s ' ' | cut -c1-500)
+            TAIL=$(sed -E "$STRIP" deploy.log | grep -v '^[[:space:]]*$' | tail -n 3 | tr '\n' '|' | tr -s ' ' | cut -c1-300)
+            EXCERPT=$(printf '[error] %s [tail] %s' "${BLOCK:-none}" "${TAIL:-none}")
+            echo "::error title=Deploy failed::wrangler deploy exited ${DEPLOY_STATUS}: ${EXCERPT//%/%25}"
             tail -n 25 deploy.log
             exit 1
           fi
