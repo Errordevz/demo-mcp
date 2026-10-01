@@ -78,7 +78,7 @@ function buildContext(ctx: ReverseToolContext): ReverseContext {
         timeoutMs: Math.min(config.analyzerTimeoutMs, 30_000),
         maxBytes,
         acceptContentTypes: null,
-        headers: { accept: "application/octet-stream, */*;q=0.1", "user-agent": "DEMO-MCP/1.0.0 (+reverse engineering)" },
+        headers: { accept: "application/octet-stream, */*;q=0.1", "user-agent": "DEMO-MCP/1.1.0 (+reverse engineering)" },
       });
       return { bytes: result.bytes, contentType: result.contentType ?? null, finalUrl: result.finalUrl };
     },

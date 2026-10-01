@@ -131,7 +131,7 @@ function startMockWorker(options: MockOptions = {}) {
           send(200, {
             jsonrpc: "2.0",
             id: message.id,
-            result: { protocolVersion: "2025-03-26", capabilities: {}, serverInfo: { name: "DEMO", version: "1.0.0" } },
+            result: { protocolVersion: "2025-03-26", capabilities: {}, serverInfo: { name: "DEMO", version: "1.1.0" } },
           }, { "mcp-session-id": "fake-session-id" });
           return;
         }
@@ -164,7 +164,7 @@ function startMockWorker(options: MockOptions = {}) {
         const filler = "x".repeat(4 * 1024 * 1024);
         return send(503, `${filler}${FAKE.clientSecret}`);
       }
-      return send(200, { ok: true, name: "DEMO", version: "1.0.0" });
+      return send(200, { ok: true, name: "DEMO", version: "1.1.0" });
     }
     if (url.pathname === "/tools") return send(200, { count: TOOL_NAMES.length, tools: TOOL_NAMES });
 

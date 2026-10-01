@@ -39,7 +39,7 @@ export async function fetchPublicImage(env: Record<string, unknown> | undefined,
     timeoutMs: clamp(options.timeoutMs ?? LIMITS.publicFetchTimeoutDefaultMs, 1_000, LIMITS.publicFetchTimeoutMaxMs),
     maxBytes: LIMITS.imageMaxBytes,
     acceptContentTypes: IMAGE_TYPES,
-    headers: { accept: "image/*;q=0.9,*/*;q=0.1", "user-agent": "DEMO-MCP/1.0.0 (+image analysis; public read-only)" },
+    headers: { accept: "image/*;q=0.9,*/*;q=0.1", "user-agent": "DEMO-MCP/1.1.0 (+image analysis; public read-only)" },
   });
   const signature = detectMediaSignature(result.bytes, result.contentType);
   const dimensions = imageDimensions(result.bytes);

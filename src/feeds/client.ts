@@ -31,7 +31,7 @@ export async function fetchFeed(env: Record<string, unknown> | undefined, url: s
     timeoutMs: clamp(options.timeoutMs ?? LIMITS.publicFetchTimeoutDefaultMs, 1_000, LIMITS.publicFetchTimeoutMaxMs),
     maxBytes: LIMITS.feedMaxBytes,
     acceptContentTypes: null,
-    headers: { accept: FEED_ACCEPT, "user-agent": "DEMO-MCP/1.0.0 (+feed reader; public read-only)" },
+    headers: { accept: FEED_ACCEPT, "user-agent": "DEMO-MCP/1.1.0 (+feed reader; public read-only)" },
   });
   const text = new TextDecoder("utf-8", { fatal: false }).decode(result.bytes);
   const looksLikeFeed = /<(?:rss|feed|rdf:RDF)\b/i.test(text.slice(0, 4_000));

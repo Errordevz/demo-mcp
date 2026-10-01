@@ -113,7 +113,7 @@ export async function discoverSources(env: Record<string, unknown> | undefined, 
     timeoutMs: 12_000,
     maxBytes: 1_500_000,
     acceptContentTypes: ["text/html", "text/plain"],
-    headers: { accept: "text/html", "user-agent": "DEMO-MCP/1.0.0 (+research; public read-only)" },
+    headers: { accept: "text/html", "user-agent": "DEMO-MCP/1.1.0 (+research; public read-only)" },
   });
   const html = new TextDecoder("utf-8", { fatal: false }).decode(result.bytes);
   const root = parseHtml(html, { maxNodes: 12_000 });
