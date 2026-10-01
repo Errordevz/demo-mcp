@@ -40,6 +40,7 @@ function groupFor(name) {
   if (name === "openapi_inspect" || name === "net_diagnose" || name === "url_inspect") return "Network";
   if (name.startsWith("byox_")) return "Build Your Own X";
   if (name.startsWith("collab_")) return "Collaboration";
+  if (name.startsWith("reverse_")) return "Reverse Engineering";
   return "Utilities";
 }
 

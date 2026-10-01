@@ -230,7 +230,29 @@
     "WEB_MONITOR_SCHEDULED_CHECKS": "false",
     // Per-call download ceilings (a tool argument may only lower these).
     "PDF_MAX_MB": "25",
-    "IMAGE_MAX_MB": "8"
+    "IMAGE_MAX_MB": "8",
+    // ── Reverse engineering (policy only; no secrets, no endpoints) ─────────
+    // Static analysis only by default. DEMO parses bytes and reports evidence;
+    // it never executes a target and exposes no arbitrary command execution.
+    // A tool argument may only LOWER these caps, never raise them.
+    "RE_ENABLED": "true",
+    "RE_MAX_TARGET_MB": "16",
+    "RE_MAX_ANALYSIS_MS": "20000",
+    // Dynamic (instrumented) analysis is OFF by default and additionally
+    // requires an external analysis service AND an explicit per-request
+    // authorization. Turning it on here does not make it run.
+    "RE_DYNAMIC_ENABLED": "false",
+    "RE_ARTIFACT_TTL_SECONDS": "3600",
+    "RE_RATE_LIMIT_PER_MINUTE": "12"
+    // The external analysis service (headless Ghidra / binutils / radare2 /
+    // Frida / Jadx …) is per-deployment infrastructure and is deliberately NOT
+    // declared here — set RE_ANALYZER_URL in the dashboard or your own
+    // wrangler overrides, and its credential as an encrypted Worker secret
+    // (`wrangler secret put RE_ANALYZER_KEY`). Both are intentionally absent:
+    // a committed endpoint or credential is a leaked one. Without them the
+    // capability stays static and reports the missing engines instead of
+    // faking them.
+
     // Optional external speech-to-text provider (alternative to Workers AI).
     // Set both as secrets: wrangler secret put TRANSCRIPTION_ENDPOINT
     //                           wrangler secret put TRANSCRIPTION_API_KEY

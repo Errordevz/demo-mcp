@@ -31,6 +31,7 @@ DEMO MCP Worker  ─────────────────────
         │        └── RobloxAuth Durable Object (encrypted grants, single-use state)
         ├── /capabilities/jev  Jev decision-engine report (presence + policy only)
         ├── /capabilities/laya Laya decision-provider report (presence + policy only)
+        ├── /capabilities/reverse  reverse-engineering policy (presence + caps only)
         ├── /                    inspector UI (demoUi asset)   │
         └── skills.sh (remote)                                 │
                                                               │
@@ -47,6 +48,23 @@ DEMO MCP Worker  ─────────────────────
         ├── LayaDecisionProvider  external Laya typed-decision server (advisory, opt-in)
         │        └── DecisionRouter  auto: Laya → Jev → deterministic fallback
         └── UrlGuard             SSRF protection (applies to LAYA_BASE_URL too)
+
+   Reverse-engineering subsystem (static by default; never executes a target)
+        ├── src/mcp/reverse-tools.ts   7 MCP tools → one router
+        ├── src/reverse-engineering/router.ts   capabilities · triage · analyze ·
+        │                        protocol · deobfuscate · cleanroom · evidence ·
+        │                        report · compare · dynamic (refused by default)
+        ├── triage.ts            container / arch / sections / symbols / entropy / packing
+        ├── elf · pe · macho · wasm · managed · pcap   deterministic parsers
+        ├── modern-binaries.ts   Go pclntab, Rust/Swift symbols
+        ├── protocol-analysis.ts column alignment, checksum recomputation
+        ├── deobfuscation.ts     packing, string encryption, anti-analysis
+        ├── cleanroom.ts         spec freeze, golden tests, byte-exact compare
+        ├── compare.ts           artifact comparison
+        ├── evidence.ts          observed / inferred / proposed / web / unknown
+        ├── sandbox.ts           authorization + resource policy (refuse-first)
+        ├── tool-discovery.ts    engine inventory + recommended workflow
+        └── store.ts             R2 expiring artifacts (SCREENSHOTS bucket)
 ```
 
 Two independent browser layers live side by side:
@@ -717,6 +735,51 @@ timeouts and artifact storage. Full details and the implementation report:
 | Utilities | `schema_validate`, `jwt_inspect`, `cron_explain`, `text_diff` | Fully local: JSON Schema validation, JWT **decoding only** (DECODING ≠ VERIFICATION), cron explanation/schedule, text/JSON diff. |
 | Research | `web_research` | Evidence-backed research with preserved provenance; conflicts reported, never resolved by guessing. |
 
+## Reverse Engineering
+
+DEMO analyses binaries, containers, captures and archives through ordinary MCP
+tools: `reverse_engineer` (the orchestrator) plus `reverse_capabilities`,
+`reverse_triage`, `reverse_analyze`, `reverse_evidence`, `reverse_report` and
+`reverse_compare`.
+
+The methodology is adapted from
+[`PyModel/reverse-engineering-skill`](https://github.com/PyModel/reverse-engineering-skill)
+(MIT), and its two central rules are enforced by code rather than by convention:
+**scripts do the math and the model does the semantics**, and **every claim is
+labelled** `observed` / `inferred` / `proposed` / `web` / `unknown`. Entropy,
+container identification, section/symbol/import parsing, Go `pclntab` recovery,
+checksum recomputation and struct-layout validation are computed — nothing
+numeric is left to a model.
+
+```bash
+# what can this deployment actually do?
+reverse_capabilities { objective: "triage" }
+
+# the deterministic first pass
+reverse_triage { target: { inlineBase64: "<base64>" } }
+
+# the full evidence-driven pass
+reverse_analyze { target: { inlineBase64: "<base64>" }, objective: "architecture" }
+```
+
+A target may be inline base64, a public URL (fetched through DEMO's SSRF guard), a
+stored artifact or a workspace path — exactly one, and always size-capped.
+
+**Static by default.** DEMO reads bytes as data: no code path here executes a
+target, spawns a process or accepts a command line, and uploading a file produces
+evidence rather than a process. **Dynamic analysis is opt-in and refused by
+default**: it needs `dynamic: true`, an explicit authorization,
+`RE_DYNAMIC_ENABLED`, a configured analysis service and an enforceable sandbox —
+and a public-source target can never be authorized to run. A refusal names
+exactly which requirement is missing instead of simulating the capability.
+
+Heavy engines (Ghidra, binutils, radare2, Frida, Jadx, z3, tshark) run only in a
+separate service **you** operate, reached over HTTPS through the SSRF guard with a
+closed allow-list of operations and enforced CPU / memory / wall-clock / process
+limits. With no service configured DEMO reports those engines as missing rather
+than faking them. Full contract:
+[`docs/REVERSE_ENGINEERING.md`](docs/REVERSE_ENGINEERING.md).
+
 ## Configuration
 
 See `.env.example` for a copyable template covering both the live test suite
@@ -774,6 +837,18 @@ Variables:
 | `LAYA_TIMEOUT_MS` | `2500` | Laya per-request budget (250–15 000 ms). Past it the decision is abandoned and the chain continues, never queued. |
 | `LAYA_MODEL` | `laya-latest` | The `model` id sent to the Laya server. |
 | `DECISION_PROVIDER_MODE` | `auto` | Typed-decision routing: `auto` (Laya → Jev → deterministic fallback) / `laya` / `jev`. Overridable per call via `jev_decide`'s `provider`. |
+| `RE_ENABLED` | `true` | Reverse-engineering master switch. Off → every `reverse_*` tool reports `capability_unavailable`. |
+| `RE_MAX_TARGET_MB` | `16` | Maximum accepted analysis target (hard ceiling 64 MiB; a tool argument may only lower it). |
+| `RE_MAX_ANALYSIS_MS` | `20000` | Wall-clock budget for one analysis. |
+| `RE_DYNAMIC_ENABLED` | `false` | Opt-in for sandboxed dynamic analysis — still also needs a configured service and a per-request authorization. |
+| `RE_ARTIFACT_TTL_SECONDS` | `3600` | TTL for stored reverse-engineering artifacts. |
+| `RE_RATE_LIMIT_PER_MINUTE` | `12` | Per-minute budget for the whole reverse-engineering capability. |
+
+`RE_ANALYZER_URL` (the optional external analysis service) and `RE_ANALYZER_KEY`
+(its credential, a Worker secret) are deliberately **not** listed as vars: an
+endpoint and a credential are per-deployment infrastructure, and a committed one
+is a leaked one. See
+[`docs/REVERSE_ENGINEERING.md`](docs/REVERSE_ENGINEERING.md).
 
 `AI` and `VIDEO_ARTIFACTS` are optional bindings. The current deployment reuses
 `SCREENSHOTS` for temporary video artifacts so adding these bindings is not
@@ -876,6 +951,13 @@ DEMO_MCP_LIVE=1 LIVE_WORKER_URL=https://demo-mcp.<sub>.workers.dev npm run test:
   verifies real frames (validated image bytes), R2 upload **and** retrieval
   (SHA-256 checked) and distinguishes sandbox egress restrictions from real
   failures (`tests/video-live.test.ts`).
+
+Reverse engineering has its own behavioural suite
+(`tests/reverse-engineering.test.ts`, 78 assertions) covering container
+identification, evidence labels and the no-promotion rule, workspace path
+isolation, operation allow-listing, size caps, sandbox refusal at every gate, the
+clean-room and protocol workflows, the MCP schemas over the real transport, and
+the UI catalog wiring.
 
 See [`docs/BROWSER.md`](docs/BROWSER.md) for the subsystem design,
 [`docs/ROBLOX.md`](docs/ROBLOX.md) for the Roblox setup and verification walkthrough, and

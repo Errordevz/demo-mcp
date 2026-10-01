@@ -73,6 +73,7 @@ function groupTools(toolNames: readonly string[]): Record<string, string[]> {
     Network: [],
     "Build Your Own X": [],
     Collaboration: [],
+    "Reverse Engineering": [],
     Utilities: [],
   };
 
@@ -111,6 +112,8 @@ function groupTools(toolNames: readonly string[]): Record<string, string[]> {
       groups["Build Your Own X"].push(name);
     } else if (name.startsWith("collab_")) {
       groups.Collaboration.push(name);
+    } else if (name.startsWith("reverse_")) {
+      groups["Reverse Engineering"].push(name);
     } else if (name === "schema_validate" || name === "jwt_inspect" || name === "cron_explain" || name === "text_diff") {
       groups.Utilities.push(name);
     } else {

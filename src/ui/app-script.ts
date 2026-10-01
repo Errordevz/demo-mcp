@@ -67,6 +67,7 @@ var EXPLORER_FILTERS = [
   { id: "roblox", label: "Roblox", groups: ["Roblox"] },
   { id: "skills", label: "Skills", groups: ["Skills"] },
   { id: "intel", label: "Intelligence", groups: ["JEV", "Laya"] },
+  { id: "reverse", label: "Reverse Engineering", groups: ["Reverse Engineering"] },
   { id: "storage", label: "Storage", availability: ["artifacts", "snapshots"] }
 ];
 
@@ -369,6 +370,11 @@ function catStatus(id) {
     var jev = sc.jevDecisionEngine || {}, laya = sc.layaDecisionProvider || {};
     if (jev.available || laya.available) return { s: "ok", l: "Operational" };
     return { s: "warn", l: "Limited" };
+  }
+  if (id === "reverse") {
+    if (!S.health) return S.healthErr ? { s: "err", l: "Unreachable" } : { s: "idle", l: "Checking" };
+    if (hv("reverseEngineering")) return hv("reverseEngineeringAnalyzer") ? { s: "ok", l: "Operational" } : { s: "warn", l: "Static only" };
+    return { s: "off", l: "Disabled" };
   }
   if (id === "infrastructure") {
     if (!S.stats) {
@@ -821,8 +827,21 @@ function capabilitiesView() {
     for (var i = 0; i < CATS.length; i++) cards += catCard(CATS[i]);
     cats = '<div class="cat-grid" style="margin-bottom:20px">' + cards + "</div>";
   }
+  var rePanel = "";
+  if (showCats) {
+    var reTools = CAT.filter(function (t) { return t.group === "Reverse Engineering"; });
+    var reRules = '<ul class="list">' + (DATA.REVERSE_ENGINEERING_RULES || []).map(function (r) {
+      return '<li><span class="li-k">' + esc(r) + "</span></li>";
+    }).join("") + "</ul>";
+    rePanel = '<div class="grid grid--2" style="margin-bottom:20px">' +
+      panel("Reverse Engineering — evidence contract", "info", reRules, { right: '<span class="hint">evidence rules</span>' }) +
+      panel("Reverse Engineering tools — " + reTools.length, "cpu", '<div class="panel-bd--flush">' +
+        (reTools.length ? reTools.map(function (t) { return toolRow(t); }).join("") : emptyState("cpu", "No reverse-engineering tools", "This deployment has no reverse-engineering tools registered.")) +
+        "</div>", { flush: true }) +
+      "</div>";
+  }
   return pageHead("Capabilities", "Capability explorer", "Every MCP tool DEMO exposes, with live availability. Select a tool for its inputs and usage.") +
-    '<div style="height:20px"></div>' + cats + explorerPanel();
+    '<div style="height:20px"></div>' + cats + rePanel + explorerPanel();
 }
 
 function toolsView() {
@@ -864,7 +883,9 @@ function capabilityRows() {
     kv("YouTube", sc.youtube ? (sc.youtube.available ? st("ok", "Configured") : st("off", "No API key")) : (S.statsErr ? st("err", "Unreachable") : st("idle", "…"))),
     kv("Jev engine", S.stats ? (jev.available ? st("ok", "Operational") : st("off", "Not configured")) : st("idle", "…"), jev.model ? '<span class="hint mono">' + esc(jev.model) + "</span>" : ""),
     kv("Laya provider", S.stats ? (laya.available ? st("ok", "Operational") : st("off", "Not configured")) : st("idle", "…"), laya.endpointHost ? '<span class="hint mono">' + esc(laya.endpointHost) + "</span>" : ""),
-    kv("Roblox (optional)", st(robloxState().s, robloxState().l), "external authorization — not a DEMO login")
+    kv("Roblox (optional)", st(robloxState().s, robloxState().l), "external authorization — not a DEMO login"),
+    kv("Reverse engineering", live ? (hv("reverseEngineering") ? (hv("reverseEngineeringAnalyzer") ? st("ok", "Static + service") : st("warn", "Static only")) : st("off", "Disabled")) : st("idle", "…"),
+      hv("reverseEngineeringDynamic") ? '<span class="hint">dynamic analysis enabled</span>' : '<span class="hint">static analysis only</span>')
   ];
 }
 
