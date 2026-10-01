@@ -72,13 +72,52 @@ jobs:
       - name: Deploy to Cloudflare
         id: deploy
         run: |
-          npx wrangler deploy --keep-vars 2>&1 | tee deploy.log
+          # `pipefail` is load-bearing. GitHub's default shell for `run:` steps is
+          # `bash -e` WITHOUT pipefail, so `wrangler deploy | tee` used to swallow a
+          # failed deploy: on 2026-10-01 (run 36906701794) this step reported success
+          # while no version ID was printed and the Worker kept answering the
+          # previous release. A deploy that did not happen must fail the job.
+          set -o pipefail
+          if ! npx wrangler deploy --keep-vars 2>&1 | tee deploy.log; then
+            echo "::error title=Deploy failed::wrangler deploy exited non-zero; the Worker was not updated. Last lines:"
+            tail -n 20 deploy.log
+            exit 1
+          fi
           URL=$(grep -oE 'https://[a-z0-9-]+\.[a-z0-9-]+\.workers\.dev' deploy.log | head -n 1)
-          if [ -z "$URL" ]; then echo "Could not find the workers.dev URL in deploy output"; exit 1; fi
+          if [ -z "$URL" ]; then
+            echo "::error title=Deploy output unreadable::No workers.dev URL in the deploy output."
+            tail -n 20 deploy.log
+            exit 1
+          fi
           echo "worker_url=$URL" >> "$GITHUB_OUTPUT"
-          echo "Deployed to $URL"
           VERSION=$(sed -n 's/.*Current Version ID: //p' deploy.log | head -n 1)
+          if [ -z "$VERSION" ]; then
+            echo "::error title=Deploy did not report a version::wrangler printed no 'Current Version ID', so the upload did not land. Last lines:"
+            tail -n 20 deploy.log
+            exit 1
+          fi
+          echo "Deployed to $URL (version $VERSION)"
           echo "::notice title=Worker deployment::URL=$URL version=$VERSION"
+
+      # A green deploy step is not proof of a release: it only means wrangler exited
+      # 0. This asks the deployment itself, the same way tests/mcp-tools.test.ts asks
+      # the code, so "the new version is live" is an observed fact rather than an
+      # inference from a log line.
+      - name: Verify the deployed version matches package.json
+        run: |
+          EXPECTED=$(node -p 'require("./package.json").version')
+          URL='${{ steps.deploy.outputs.worker_url }}'
+          for attempt in $(seq 1 6); do
+            ACTUAL=$(node -e 'fetch(process.argv[1]).then((r) => r.json()).then((j) => process.stdout.write(String(j.version ?? ""))).catch(() => process.stdout.write(""))' "$URL/health?expect=$EXPECTED-$RANDOM")
+            if [ "$ACTUAL" = "$EXPECTED" ]; then
+              echo "::notice title=Live version::/health reports $ACTUAL, matching package.json"
+              exit 0
+            fi
+            echo "attempt $attempt/6: /health reports '${ACTUAL:-<none>}', expected $EXPECTED — retrying in 5s"
+            sleep 5
+          done
+          echo "::error title=Stale deployment::the Worker still does not report $EXPECTED after the deploy. The deploy did not take effect."
+          exit 1
 
       - name: Verify unauthenticated MCP handshake and ping
         run: node scripts/verify-mcp.mjs '${{ steps.deploy.outputs.worker_url }}'
