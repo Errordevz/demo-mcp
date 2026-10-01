@@ -24,7 +24,7 @@ export function registerDevTools(mcp: any, { env }: { env: DevEnv }) {
       if (!url) return textResult({ enabled: false, reason: "DEV_BASE_URL is not configured." });
       try {
         const r = await fetch(url + "/api/status", { headers: { accept: "application/json" }, signal: AbortSignal.timeout(5000) });
-        const data = await r.json().catch(() => ({}));
+        const data = (await r.json().catch(() => ({}))) as Record<string, unknown>;
         return textResult({ enabled: r.ok, ...data, endpointConfigured: true });
       } catch (e) {
         return textResult({ enabled: false, endpointConfigured: true, reason: String(e) });
@@ -42,7 +42,7 @@ export function registerDevTools(mcp: any, { env }: { env: DevEnv }) {
         repo: z.string().url().optional(),
       },
     },
-    async ({ message, repo }) => {
+    async ({ message, repo }: { message: string; repo?: string }) => {
       const url = baseUrl(env);
       if (!url) return errorResult("Dev is not configured on this DEMO deployment. Set the server-side DEV_BASE_URL.");
       try {

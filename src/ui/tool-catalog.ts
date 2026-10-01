@@ -20,7 +20,7 @@ export interface DemoToolCatalogEntry {
   inputs?: string[];
 }
 
-export const TOOL_CATALOG_VERSION = "1.0.0";
+export const TOOL_CATALOG_VERSION = "1.1.0";
 
 export const TOOL_CATALOG: DemoToolCatalogEntry[] = [
   { name: "archive_item", title: "Internet Archive Item", group: "Internet Archive", availability: "always", description: "Retrieve metadata and the available file listing for an archive.org item by identifier (structured item layout). Reports restricted/unavailable items explicitly (access_restricted) instead of pretending they can be fetched. No API key required.", inputs: ["identifier", "max_files"] },

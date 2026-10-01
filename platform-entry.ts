@@ -85,7 +85,7 @@ type Env = {
 };
 
 /** Kept equal to the Worker's own version in index.ts so both surfaces agree. */
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";
 const DEFAULT_PLATFORM_ORIGIN = "https://demo-platform.pages.dev";
 const LOCAL_ORIGINS = new Set(["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:3000", "http://127.0.0.1:5173"]);
 const CHATGPT_ORIGINS = new Set(["https://chatgpt.com"]);

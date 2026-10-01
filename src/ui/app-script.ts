@@ -629,7 +629,7 @@ function heroBlock() {
     dot = "live-dot--warn"; t = "Partial telemetry"; sub = "Some deployment signals did not answer"; icon = "alert";
   }
   return '<div class="hero">' +
-    '<div class="eyebrow"><span>' + esc(proj.name || "DEMO") + ' — v' + esc((S.stats && S.stats.version) || VERSION || "1.0.0") + "</span></div>" +
+    '<div class="eyebrow"><span>' + esc(proj.name || "DEMO") + ' — v' + esc((S.stats && S.stats.version) || VERSION || "1.1.0") + "</span></div>" +
     "<h1>Execution infrastructure for AI agents.</h1>" +
     '<p class="lede">' + esc(proj.blurb || "") + "</p>" +
     '<div class="hero-cta">' +
