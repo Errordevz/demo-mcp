@@ -5,15 +5,13 @@
  * Inlined into one HTML document (CSP locks to inline script + same-origin
  * fetches, hence String.raw and no framework).
  *
- * Live data from same-origin /health, /platform/stats, /capabilities/*,
- * /oauth/roblox/status; static facts from generated catalog. No mocking,
- * no secrets, public tools need no login; protected tools use per-tool OAuth.
+ * Live data from same-origin /health, /platform/stats, /capabilities/*;
+ * static facts from generated catalog. No mocking, no secrets, public tools
+ * need no login; protected tools use per-tool OAuth.
  *
  * Style constraints:
  *  - embedded via String.raw, so body must not contain backticks or
- *    dollar-brace sequences;
- *  - Roblox connect control opens the Access-protected one-time-code form at
- *    /oauth/roblox/link, and labels "Connect Roblox account" / "Disconnect".
+ *    dollar-brace sequences.
  */
 export const APP_SCRIPT = String.raw`(function () {
 "use strict";
@@ -34,7 +32,6 @@ var S = {
   route: "",
   health: null, healthErr: null,
   stats: null, statsErr: null,
-  roblox: null, robloxErr: null, robloxLoading: true, robloxInflight: false,
   lazy: {}, lazyErr: {}, lazyInflight: {},
   openTool: null,
   tf: { q: "", group: "", avail: "" },
@@ -42,13 +39,7 @@ var S = {
   core: null,
   modalOpen: false, paletteOpen: false, lastFocus: null, pSel: 0, pQuery: "", pItems: [],
   connectId: "", connectNote: "",
-  menuFocusTrap: null,
-  session: null, sessionLoaded: false, robloxDeferred: null,
-  authMode: "signin", authErr: "", authBusy: false, authMsg: "",
-  resetToken: "", deleteArmed: false, verifyBusy: false, verifyMsg: "", verifyErr: "",
-  pwBusy: false, pwMsg: "", pwErr: "", sessions: null, sessionsErr: "",
-  verifyToken: "", verifyBusyLink: false, verifyDone: false,
-  pwShow: {}, nameBusy: false, nameMsg: "", nameErr: "", nameValue: "", nameLoaded: false
+  menuFocusTrap: null
 };
 
 var LAZY_ROUTES = {
@@ -63,8 +54,7 @@ var EXPLORER_FILTERS = [
   { id: "", label: "All" },
   { id: "browser", label: "Browser", groups: ["Browser"] },
   { id: "video", label: "Video", groups: ["Video", "YouTube"] },
-  { id: "web", label: "Web", groups: ["Core", "Web Intelligence", "Research", "Internet Archive", "Feeds", "Documents", "Git", "Network", "Utilities"] },
-  { id: "roblox", label: "Roblox", groups: ["Roblox"] },
+  { id: "web", label: "Web", groups: ["Core", "Web Intelligence", "Research", "Internet Archive", "Feeds", "Documents", "Git", "Network", "Utilities", "Roblox"] },
   { id: "skills", label: "Skills", groups: ["Skills"] },
   { id: "intel", label: "Intelligence", groups: ["JEV", "Laya"] },
   { id: "reverse", label: "Reverse Engineering", groups: ["Reverse Engineering"] },
@@ -238,24 +228,6 @@ function cycleTheme() {
   toast("Theme: " + (next === "auto" ? "system" : next));
 }
 
-/* session — DEMO account cookie state (HttpOnly; probed via /account/*). */
-function signedIn() { return !!(S.session && S.session.signedIn && S.session.account); }
-function accountEmail() { return signedIn() ? String(S.session.account.email || "") : ""; }
-function accountVerified() { return signedIn() ? !!S.session.account.emailVerified : false; }
-function loadSession() {
-  return jfetch("/account/session").then(function (d) {
-    S.session = (d && typeof d === "object") ? Object.assign({ accountsAvailable: true }, d) : { signedIn: false, accountsAvailable: true };
-    S.sessionLoaded = true;
-  }, function () {
-    // 503 when the account store is not bound, or the route is unreachable.
-    S.session = { signedIn: false, accountsAvailable: false };
-    S.sessionLoaded = true;
-  }).then(function () {
-    renderHeaderState();
-    if (S.route === "account" || S.route === "auth" || S.route === "roblox") renderView();
-  });
-}
-
 /* app state helpers */
 function body() { return document.body; }
 /**
@@ -315,32 +287,6 @@ function toolAvail(key) {
   }
 }
 
-function robloxState() {
-  if (S.robloxLoading && !S.roblox && !S.robloxErr) return { s: "idle", l: "Checking", short: "Checking" };
-  if (S.robloxErr) {
-    var p = S.robloxErr.payload || {};
-    if (p.error === "not_configured" || S.robloxErr.status === 503) return { s: "off", l: "Not configured", short: "Not configured" };
-    if (p.error === "unauthenticated" || S.robloxErr.status === 401) return { s: "warn", l: "DEMO sign-in required", short: "Sign in required" };
-    return { s: "err", l: "Status unavailable", short: "Error" };
-  }
-  var r = S.roblox || {};
-  var conf = r.configuration || {};
-  if (conf.enabled === false) {
-    var missing = !conf.clientIdConfigured || !conf.clientSecretConfigured;
-    return missing ? { s: "off", l: "Not configured", short: "Not configured" } : { s: "off", l: "Disabled", short: "Disabled" };
-  }
-  if (r.connected && r.account) {
-    var granted = r.account.grantedScopes || [];
-    var requested = (r.configuration && r.configuration.requestedScopes) || [];
-    for (var g2 = 0; g2 < requested.length; g2++) {
-      if (granted.indexOf(requested[g2]) === -1) return { s: "warn", l: "Insufficient scope", short: "Scope gap", missing: requested[g2] };
-    }
-    return { s: "ok", l: "Connected", short: "Connected" };
-  }
-  if (r.account && r.account.reauthorizationRequired) return { s: "warn", l: "Authorization required", short: "Re-auth required" };
-  return { s: "idle", l: "Not connected", short: "Not connected" };
-}
-
 function catStatus(id) {
   var c = caps(), sc = statCaps();
   if (id === "browser") {
@@ -356,14 +302,6 @@ function catStatus(id) {
   if (id === "web") {
     if (!S.stats) return S.statsErr ? { s: "err", l: "Unreachable" } : { s: "idle", l: "Checking" };
     return { s: "ok", l: "Operational" };
-  }
-  if (id === "roblox") {
-    var r = robloxState();
-    if (r.s === "ok") return { s: "ok", l: "Connected" };
-    if (r.l === "Not connected") return { s: "info", l: "Ready to connect" };
-    if (r.s === "idle") return { s: "idle", l: "Checking" };
-    if (r.s === "err") return { s: "err", l: "Unreachable" };
-    return { s: r.s, l: r.l };
   }
   if (id === "intelligence") {
     if (!S.stats) return S.statsErr ? { s: "err", l: "Unreachable" } : { s: "idle", l: "Checking" };
@@ -482,16 +420,13 @@ function renderShell() {
             '<button class="btn btn--smhide" type="button" data-act="palette-open" aria-label="Search (Ctrl+K)">' + ic("search") + '<span class="lbl">Search</span></button>' +
             '<button class="btn theme-btn" id="theme-btn" type="button" data-act="theme-toggle" data-theme-state="auto" aria-label="Theme: system. Switch theme." title="Theme: system">' +
               '<span class="th-ico th-sun">' + ic("sun") + '</span><span class="th-ico th-moon">' + ic("moon") + '</span><span class="th-ico th-auto">' + ic("auto") + "</span></button>" +
-            '<button class="btn" id="account-btn" type="button" data-act="account-open" aria-label="' + (signedIn() ? "Open account page" : "Sign in") + '">' + ic("user") + '<span class="lbl" id="account-btn-label">' + (signedIn() ? esc(accountEmail()) : "Sign in") + "</span></button>" +
             '<button class="btn btn--primary" type="button" data-act="connect-open">' + ic("plug") + "<span>Connect MCP</span></button>" +
             '<button class="menu-btn" type="button" data-act="menu-toggle" aria-label="Open menu" aria-expanded="false" aria-controls="menu">' + ic("menu") + "</button>" +
           "</div>" +
         "</div>" +
         '<nav class="menu" id="menu" aria-label="Menu">' +
           '<div class="menu-in">' + menuPrim +
-            '<div class="mi-sec">Explore</div>' + menuSec +
-            '<div class="mi-sec">Account</div>' +
-            '<a class="mi" href="#/account" data-route="account">' + ic("user") + "<span>Account</span></a>" +
+            (menuSec ? '<div class="mi-sec">Explore</div>' + menuSec : "") +
             '<div class="mi-sec">Resources</div>' +
             (proj.docsTreeUrl ? '<a class="mi" href="' + esc(proj.docsTreeUrl) + '" target="_blank" rel="noreferrer noopener">' + ic("book") + "<span>Docs</span></a>" : "") +
             (proj.repoUrl ? '<a class="mi" href="' + esc(proj.repoUrl) + '" target="_blank" rel="noreferrer noopener">' + ic("code") + "<span>Source on GitHub</span></a>" : "") +
@@ -515,11 +450,6 @@ function renderHeaderState() {
   var ver = qs("#brand-ver");
   var live = (S.stats && S.stats.version) || VERSION;
   if (ver) ver.textContent = live ? "v" + live : "";
-  var acct = qs("#account-btn"), acctLbl = qs("#account-btn-label");
-  if (acct && acctLbl) {
-    acctLbl.textContent = S.sessionLoaded ? (signedIn() ? accountEmail() : "Sign in") : "Sign in";
-    acct.setAttribute("aria-label", signedIn() ? "Open account page" : "Sign in");
-  }
 }
 
 function renderView() {
@@ -528,8 +458,7 @@ function renderView() {
   var views = {
     overview: overviewView, capabilities: capabilitiesView, tools: toolsView, status: statusView,
     browser: browserView, video: videoView, research: researchView, routing: routingView,
-    roblox: robloxView, skills: skillsView, about: aboutView, collab: collabView,
-    auth: authView, account: accountView, reset: resetView, verify: verifyLinkView, notfound: notfoundView
+    skills: skillsView, about: aboutView, collab: collabView, notfound: notfoundView
   };
   var fn = views[S.route] || notfoundView;
   var view = qs("#view");
@@ -679,11 +608,10 @@ function accessPanel() {
   var proj = DATA.PROJECT || {};
   return panel("Access model", "shield",
     '<div class="row" style="margin-bottom:12px"><span class="badge-secure">' + ic("shield") + "Public tools · no login</span></div>" +
-    note("Connect DEMO directly to your MCP-compatible client. The browser, video, research and utility tools work immediately — external authorization is asked for only where a capability genuinely needs it: today that is <b>Roblox OAuth</b>, and only for Roblox-account features.") +
+    note("Connect DEMO directly to your MCP-compatible client. The browser, video, research, reverse engineering and utility tools work immediately with no account or login.") +
     '<div class="row" style="margin-top:14px">' +
       '<button class="btn btn--primary" type="button" data-act="connect-open">' + ic("plug") + "Connect MCP</button>" +
       (proj.docsTreeUrl ? '<a class="btn" href="' + esc(proj.docsTreeUrl) + '" target="_blank" rel="noreferrer noopener">' + ic("book") + "Docs</a>" : "") +
-      '<a class="btn" href="#/roblox">Roblox status</a>' +
     "</div>");
 }
 
@@ -883,7 +811,6 @@ function capabilityRows() {
     kv("YouTube", sc.youtube ? (sc.youtube.available ? st("ok", "Configured") : st("off", "No API key")) : (S.statsErr ? st("err", "Unreachable") : st("idle", "…"))),
     kv("Jev engine", S.stats ? (jev.available ? st("ok", "Operational") : st("off", "Not configured")) : st("idle", "…"), jev.model ? '<span class="hint mono">' + esc(jev.model) + "</span>" : ""),
     kv("Laya provider", S.stats ? (laya.available ? st("ok", "Operational") : st("off", "Not configured")) : st("idle", "…"), laya.endpointHost ? '<span class="hint mono">' + esc(laya.endpointHost) + "</span>" : ""),
-    kv("Roblox (optional)", st(robloxState().s, robloxState().l), "external authorization — not a DEMO login"),
     kv("Reverse engineering", live ? (hv("reverseEngineering") ? (hv("reverseEngineeringAnalyzer") ? st("ok", "Static + service") : st("warn", "Static only")) : st("off", "Disabled")) : st("idle", "…"),
       hv("reverseEngineeringDynamic") ? '<span class="hint">dynamic analysis enabled</span>' : '<span class="hint">static analysis only</span>')
   ];
@@ -1154,10 +1081,8 @@ function routingView() {
         secretRow("Laya endpoint", laya.configured, laya.available ? "" : "not bound") +
         secretRow("Laya credential", laya.credentialConfigured, "optional") +
         secretRow("YouTube Data API", sc.youtube ? sc.youtube.available : undefined, "key configured server-side") +
-        secretRow("Roblox OAuth client", sc.robloxOAuth ? sc.robloxOAuth.configured : undefined, "id + secret configured server-side") +
-        secretRow("Roblox token vault", sc.robloxOAuth ? sc.robloxOAuth.storage === "durable-object" : undefined, sc.robloxOAuth ? "encryption: " + sc.robloxOAuth.tokenEncryption : "") +
         "</div>" +
-        '<div class="panel-bd"><div class="hint">These rows read <b>presence booleans</b> from <code class="chip-v">/platform/stats</code>. Secret values live only as Worker secrets — they are never sent to a browser, never logged, never rendered. Per-tool OAuth protects <code class="chip-v">roblox_account_*</code> and <code class="chip-v">jev_decide</code>; public tools remain available without a login.</div></div>',
+        '<div class="panel-bd"><div class="hint">These rows read <b>presence booleans</b> from <code class="chip-v">/platform/stats</code>. Secret values live only as Worker secrets — they are never sent to a browser, never logged, never rendered. Per-tool OAuth protects <code class="chip-v">jev_decide</code> and <code class="chip-v">collab_*</code>; public tools remain available without a login.</div></div>',
         { flush: false }) +
     "</div>" +
     '<div class="grid grid--2" style="margin-top:16px">' +
@@ -1295,394 +1220,6 @@ function collabView() {
       panel("Workspaces", "database", spaceRows, { flush: true }) +
       panel("Collaboration tools", "tools", '<div class="panel-bd--flush">' + toolRows + "</div>", { flush: true }) +
     "</div>";
-}
-
-/* roblox */
-function robloxView() {
-  var s = robloxState();
-  var r = S.roblox;
-  var conf = (r && r.configuration) || {};
-  var acc = (r && r.account) || null;
-  var canConnect = (s.l === "Not connected" || s.l === "Authorization required" || s.l === "Insufficient scope" || s.l === "DEMO sign-in required" || s.l === "Checking");
-
-  var head = '<div class="panel"><div class="panel-bd">' +
-    '<div class="eyebrow">Separate approvals — no DEMO signup</div>' +
-    '<h1 style="font-size:22px;margin:10px 0 12px;letter-spacing:-.02em;font-weight:800;line-height:1.2">Roblox account connection</h1>' +
-    '<div class="row" style="gap:10px">' + st(s.s, s.l) +
-      (acc && acc.username ? '<span class="mono" style="font-size:14px;font-weight:600">@' + esc(acc.username) + "</span>" : "") +
-    "</div>" +
-    (s.s === "err" && S.robloxErr ? note(esc(S.robloxErr.message || "Status could not be read.")) : "") +
-    (s.l === "Not configured" && S.robloxErr && S.robloxErr.payload && S.robloxErr.payload.hint ? note("<b>Setup:</b> " + esc(S.robloxErr.payload.hint)) : "") +
-    (s.l === "DEMO sign-in required" ? note("<b>Sign in required:</b> Sign in to your DEMO account (Account section) with the same identity you use for ChatGPT, then open the link-code form again. Cloudflare Access is honoured too when a deployment is fronted by it.") : "") +
-    (s.l === "Insufficient scope" ? note("<b>Missing scope:</b> " + esc(s.missing || "a requested scope") + " is not on the granted token. Reconnect and approve every scope — account tools report <code class=\"chip-v\">scope_required</code> until then.") : "") +
-    (s.l === "Disabled" && conf.disabledReason ? note(esc(conf.disabledReason)) : "") +
-    (s.l === "Not configured" && conf.enabled === false && conf.disabledReason ? note(esc(conf.disabledReason)) : "") +
-    '<div class="row" style="margin-top:16px">' +
-      (s.l === "Connected" ? '<button class="btn btn--danger btn--touch" type="button" data-act="roblox-disconnect">' + ic("x") + "Disconnect</button>" :
-        canConnect ? '<button class="btn btn--primary btn--touch" type="button" data-act="roblox-connect">' + ic("external") + "Connect Roblox account</button>" : "") +
-      '<button class="btn" type="button" data-act="roblox-refresh">' + ic("refresh") + "Re-check status</button>" +
-    "</div></div></div>";
-
-  var connectNote = "";
-  if (canConnect) {
-    connectNote = note("To link Roblox, first connect in ChatGPT using <b>Mixed Authentication</b> and call <code class=\"chip-v\">roblox_account_link_start</code>. Open its <code class=\"chip-v\">linkUrl</code>, paste the one-time <code class=\"chip-v\">linkCode</code>, sign in to DEMO (or Cloudflare Access where configured) as the same human identity, then approve only on Roblox's official consent page. DEMO OAuth and Roblox OAuth are separate approvals. No Roblox password or cookie is requested; Roblox tokens stay encrypted server-side.");
-  } else if (s.l === "Connected") {
-    connectNote = note("Linked through Roblox's official OAuth. The encrypted grant is owned by the verified Cloudflare Access identity used to link it; the stored Roblox identity comes from Roblox's verified userinfo (<code class=\"chip-v\">sub</code> claim). Public lookups (<code class=\"chip-v\">roblox_user</code>, <code class=\"chip-v\">roblox_game</code>) remain login-free.");
-  }
-
-  var details;
-  if (r) {
-    var sec = r.security || {};
-    var ep = r.endpoints || {};
-    var rows = [];
-    if (acc) {
-      rows.push(kv("User id (sub)", '<code class="chip-v">' + esc(acc.userId || "—") + "</code>"));
-      rows.push(kv("Granted scopes", (acc.grantedScopes || []).map(function (x) { return '<span class="in-chip">' + esc(x) + "</span>"; }).join(" ") || "—"));
-      rows.push(kv("Expiry", '<span class="mono">' + esc(fmtTs(acc.accessTokenExpiresAt)) + "</span>", acc.canRefresh ? "refresh available" : "cannot refresh"));
-      if (acc.reauthorizationRequired && acc.reauthorizationReason) rows.push(kv("Re-authorization", st("warn", "Required"), esc(acc.reauthorizationReason)));
-    }
-    rows.push(kv("Flow", st("ok", "OAuth 2.0 + PKCE " + (conf.pkce || "S256"))));
-    rows.push(kv("State validation", '<span class="hint">' + esc(sec.stateValidation || "single-use, expiring, browser-bound") + "</span>"));
-    rows.push(kv("Cookie flags", '<code class="chip-v">' + esc(sec.cookieFlags || "HttpOnly; Secure; SameSite=Lax") + "</code>"));
-    rows.push(kv("Token storage", conf.storage === "durable-object" ? st("ok", "Durable Object · encrypted at rest") : st("warn", "Isolate memory (temporary)"), esc(conf.tokenEncryptionReason || conf.tokenEncryption || "")));
-    rows.push(kv("Client credentials", (conf.clientIdConfigured ? st("ok", "id present") : st("off", "id missing")) + " " + (conf.clientSecretConfigured ? st("ok", "secret present") : st("off", "secret missing"))));
-    rows.push(kv("Requested scopes", (conf.requestedScopes || []).map(function (x) { return '<span class="in-chip">' + esc(x) + "</span>"; }).join(" ") || "—"));
-    rows.push(kv("Tokens exposed to this page", boolSt(false, "", "Never")));
-    if (conf.redirectUri) rows.push(kv("Redirect URI to register", '<span class="copy-inline"><code class="chip-v">' + esc(conf.redirectUri) + '</code><button class="btn btn--sm" type="button" data-act="copy" data-copy="' + esc(conf.redirectUri) + '">' + ic("copy", 13) + "Copy</button></span>", "at create.roblox.com"));
-    if (ep.start) rows.push(kv("Start route", '<code class="chip-v">' + esc(ep.start) + "</code>"));
-    details = panel("Connection details", "shield", '<div class="panel-bd--flush">' + rows.join("") + "</div>", { flush: true });
-  } else if (S.robloxLoading) {
-    details = panel("Connection details", "shield", skeletonPanel(5));
-  } else {
-    var p = (S.robloxErr && S.robloxErr.payload) || {};
-    details = panel("What this means", "info",
-      note(esc(p.message || (S.robloxErr && S.robloxErr.message) || "The Roblox status route did not answer.")) +
-      (p.hint ? note("<b>Hint:</b> " + esc(p.hint)) : "") +
-      note("Roblox is optional infrastructure. Every other DEMO capability — browser, video, research, skills, utilities — works without it, and none of them require any account."));
-  }
-
-  var rtools = CAT.filter(function (t) { return t.group === "Roblox"; });
-  var rRows = rtools.length ? rtools.map(function (t) { return toolRow(t); }).join("") : emptyState("game", "No Roblox tools", "Roblox tools are not registered on this deployment.");
-
-  return pageHead("Roblox", "Roblox", "Public lookups need no login. Account tools require DEMO OAuth, followed by separate Roblox consent through official OAuth.") +
-    '<div style="height:20px"></div>' +
-    '<div style="margin-bottom:16px">' + head + "</div>" + connectNote +
-    '<div style="margin-top:16px">' + details + "</div>" +
-    '<div style="margin-top:16px">' + panel("Roblox tools", "game", '<div class="panel-bd--flush">' + rRows + "</div>", { flush: true, right: '<span class="hint">' + rtools.length + ' tools</span>' }) + "</div>";
-}
-
-/* account & auth views */
-function accountApi(path, method, payload) {
-  S.authBusy = true;
-  return jfetch(path, payload != null ? { method: method || "POST", body: payload } : { method: method }).then(function (d) {
-    S.authBusy = false;
-    return d;
-  }, function (e) {
-    S.authBusy = false;
-    throw e;
-  });
-}
-function pwIssue(pw) {
-  if (pw.length < 10) return "At least 10 characters.";
-  if (pw.length > 128) return "At most 128 characters.";
-  if (!/[A-Za-z]/.test(pw) || !/[0-9]/.test(pw)) return "Use letters and numbers.";
-  return "";
-}
-function formField(id, label, type, extra) {
-  return '<div class="form-field"><label for="' + id + '">' + esc(label) + '</label>' +
-    '<input id="' + id + '" name="' + id + '" type="' + type + '" ' + (extra || "") + "></div>";
-}
-
-/**
- * Password input with a visibility toggle. The input keeps type="password" (so
- * password managers and autofill behave), and the toggle only flips the type and
- * its own aria state — it never touches the value.
- */
-function passwordField(id, label, autocomplete, required) {
-  var shown = !!S.pwShow[id];
-  return '<div class="form-field"><label for="' + id + '">' + esc(label) + '</label>' +
-    '<span class="pw-wrap">' +
-    '<input id="' + id + '" name="' + id + '" type="' + (shown ? "text" : "password") + '"' +
-    ' autocomplete="' + esc(autocomplete) + '" minlength="10" maxlength="128"' + (required === false ? "" : " required") + ">" +
-    '<button class="pw-toggle" type="button" data-act="pw-toggle" data-field="' + id + '"' +
-    ' aria-pressed="' + (shown ? "true" : "false") + '" aria-label="' + (shown ? "Hide" : "Show") + ' ' + esc(label) + '">' +
-    (shown ? "Hide" : "Show") + "</button></span></div>";
-}
-
-/** Advisory-only strength hint; the server policy is authoritative. */
-function passwordMeter(id) {
-  return '<div class="pw-meter" data-meter="' + id + '" aria-live="polite">' +
-    '<div class="pw-meter-bar" aria-hidden="true"><span></span><span></span><span></span><span></span></div>' +
-    '<span class="pw-meter-text">Use 10+ characters with letters and numbers.</span></div>';
-}
-function authAlert() {
-  return (S.authErr ? '<p class="form-error" role="alert">' + esc(S.authErr) + "</p>" : "") +
-    (S.authMsg ? '<p class="form-success" role="status">' + esc(S.authMsg) + "</p>" : "");
-}
-function authTab(active, act, label) {
-  return '<button type="button" role="tab" aria-selected="' + (active === act ? "true" : "false") + '" data-act="auth-tab" data-tab="' + act + '">' + esc(label) + "</button>";
-}
-function authView() {
-  if (!S.sessionLoaded) {
-    return pageHead("Account", "Sign in", "Checking your session.") + '<div style="height:20px"></div>' +
-      '<div class="auth-wrap"><div class="auth-card"><div class="auth-body">' + skeletonPanel(4) + "</div></div></div>";
-  }
-  if (S.session && S.session.accountsAvailable === false) {
-    return pageHead("Account", "DEMO accounts", "The account store is not enabled on this deployment.") + '<div style="height:20px"></div>' +
-      errPanel("DEMO accounts unavailable", "/account/session", "core",
-        "This deployment has no DEMO_ACCOUNTS binding yet. Public MCP tools keep working without a login in the meantime.");
-  }
-  if (signedIn()) {
-    setTimeout(function () { go("account"); }, 0);
-    return "";
-  }
-  var head = pageHead("Account", S.authMode === "register" ? "Create your DEMO account" : "Sign in to DEMO",
-    "Sessions back protected account features — your Roblox link, and sign-in for MCP clients like ChatGPT and Claude. Public tools never require a login.");
-  var tabs = '<div class="auth-tabs" role="tablist">' + authTab(S.authMode, "signin", "Sign in") + authTab(S.authMode, "register", "Create account") + "</div>";
-  var bodyHtml = "";
-  if (S.authMode === "signin" || S.authMode === "register") {
-    var isReg = S.authMode === "register";
-    bodyHtml = '<div class="auth-body">' + authAlert() + emailDeliveryNotice() +
-      '<form data-form="' + S.authMode + '" novalidate>' +
-      formField("auth-email", "Email", "email", 'autocomplete="email" required maxlength="254"') +
-      (isReg ? formField("auth-name", "Display name (optional)", "text", 'autocomplete="nickname" minlength="3" maxlength="32"') : "") +
-      passwordField("auth-password", "Password", isReg ? "new-password" : "current-password") +
-      (isReg ? passwordField("auth-password2", "Confirm password", "new-password") : "") +
-      (isReg ? passwordMeter("auth-password") : "") +
-      (isReg ? '<ul class="password-rules"><li>10–128 characters</li><li>Use letters and numbers</li><li>Not a commonly breached password</li></ul>' : "") +
-      '<div class="form-actions"><button class="btn btn--primary" type="submit" ' + (S.authBusy ? "disabled aria-busy=\"true\"" : "") + ">" +
-        (S.authBusy ? '<span class="spin" aria-hidden="true"></span> ' : "") + esc(isReg ? "Create account" : "Sign in") + "</button></div>" +
-      "</form>" +
-      '<div class="auth-alt">' + (isReg
-        ? 'Already have an account? <button type="button" data-act="auth-tab" data-tab="signin">Sign in</button>'
-        : '<button type="button" data-act="auth-tab" data-tab="forgot">Forgot your password?</button>') +
-      "</div></div>";
-  } else {
-    bodyHtml = '<div class="auth-body">' + authAlert() + emailDeliveryNotice() +
-      '<form data-form="forgot" novalidate>' +
-      formField("auth-email", "Email", "email", 'autocomplete="email" required maxlength="254"') +
-      '<p class="form-hint">If an account exists for this address we email a reset link. The link works once and expires within the hour.</p>' +
-      '<div class="form-actions"><button class="btn btn--primary" type="submit" ' + (S.authBusy ? "disabled" : "") + ">" +
-        (S.authBusy ? '<span class="spin" aria-hidden="true"></span> ' : "") + "Send reset link</button></div>" +
-      "</form>" +
-      '<div class="auth-alt"><button type="button" data-act="auth-tab" data-tab="signin">Back to sign in</button></div></div>';
-  }
-  return head + '<div style="height:20px"></div><div class="auth-wrap"><div class="auth-card">' + tabs + bodyHtml + "</div></div>";
-}
-
-/**
- * Tell the truth about email delivery before the visitor types anything.
- * Without this a visitor registers, is promised a verification email, and waits
- * forever — the exact dead end this UI used to create.
- */
-function emailDeliveryNotice() {
-  if (!S.sessionLoaded || !S.session) return "";
-  var d = S.session.emailDelivery;
-  if (!d || d.configured) return "";
-  var reason = d.reason || "Email delivery is not configured on this deployment.";
-  return '<p class="form-error" id="email-delivery-notice" role="status">' + ic("alert") + " " + esc(reason) +
-    " You can still create an account and sign in; verification and password reset become available once the operator configures the sender.</p>";
-}
-
-/** Landing view for the one-click verification link (/#/verify?token=…). */
-function verifyLinkView() {
-  var head = pageHead("Account", "Verify your email", "One click confirms the address your DEMO account was registered with.");
-  if (!S.verifyToken) {
-    return head + '<div style="height:20px"></div><div class="auth-wrap"><div class="auth-card"><div class="auth-body">' +
-      '<p class="form-error">This verification link is missing its token. Sign in and request a new email from your account page.</p>' +
-      '<div class="form-actions"><a class="btn btn--primary" href="#/auth">Go to sign in</a></div>' +
-      "</div></div></div>";
-  }
-  var body;
-  if (S.verifyBusyLink) {
-    body = '<div class="verify-state"><p>Checking your verification link…</p></div>';
-  } else if (S.verifyDone) {
-    body = '<div class="verify-state verify-state--ok"><span class="verify-state__icon">' + ic("check") + "</span>" +
-      "<h2>Email verified</h2><p>" + esc(S.verifyMsg || "Your email address is confirmed.") + "</p>" +
-      '<a class="btn btn--primary" href="' + (signedIn() ? "#/account" : "#/auth") + '">' +
-      (signedIn() ? "Open your account" : "Sign in") + "</a></div>";
-  } else {
-    body = '<div class="verify-state verify-state--err"><span class="verify-state__icon">' + ic("alert") + "</span>" +
-      "<h2>This link did not work</h2><p>" + esc(S.verifyErr || "The link was already used or has expired.") + "</p>" +
-      '<a class="btn btn--primary" href="#/auth">Sign in and request a new email</a></div>';
-  }
-  return head + '<div style="height:20px"></div><div class="auth-wrap"><div class="auth-card"><div class="auth-body">' + body + "</div></div></div>";
-}
-
-function resetView() {
-  var head = pageHead("Account", "Choose a new password", "The emailed link works once and expires within about an hour.");
-  if (!S.resetToken) {
-    return head + '<div style="height:20px"></div><div class="auth-wrap"><div class="auth-card"><div class="auth-body">' +
-      '<p class="form-error">This reset link is missing its token. Request a fresh one from the <a href="#/auth">sign-in page</a>.</p>' +
-      "</div></div></div>";
-  }
-  return head + '<div style="height:20px"></div><div class="auth-wrap"><div class="auth-card"><div class="auth-body">' + authAlert() +
-    '<form data-form="reset" novalidate>' +
-    passwordField("auth-password", "New password", "new-password") +
-    passwordField("auth-password2", "Confirm new password", "new-password") +
-    '<ul class="password-rules"><li>10–128 characters, letters and numbers</li><li>Every existing session is signed out</li></ul>' +
-    '<div class="form-actions"><button class="btn btn--primary" type="submit" ' + (S.authBusy ? "disabled" : "") + ">" +
-      (S.authBusy ? '<span class="spin" aria-hidden="true"></span> ' : "") + "Set new password</button></div>" +
-    "</form></div></div></div>";
-}
-
-function verifyPanel() {
-  var bodyHtml = '<p class="note" id="verify-hint">The verification email carries a one-click link and an 8-character code. Requesting a new one replaces both — only the newest works.</p>' +
-    (S.verifyErr ? '<p class="form-error" role="alert">' + esc(S.verifyErr) + "</p>" : "") +
-    (S.verifyMsg ? '<p class="form-success" role="status">' + esc(S.verifyMsg) + "</p>" : "") +
-    '<form data-form="verify-code" novalidate><div class="form-field"><label for="auth-code">Verification code</label>' +
-    '<input id="auth-code" type="text" inputmode="text" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" minlength="8" maxlength="8" pattern="[A-Z2-9]{8}" style="font-family:var(--mono);letter-spacing:.3em;text-transform:uppercase" required></div>' +
-    '<div class="form-actions"><button class="btn btn--primary" type="submit" ' + (S.verifyBusy ? "disabled" : "") + ">" +
-      (S.verifyBusy ? '<span class="spin" aria-hidden="true"></span> ' : "") + "Verify email</button>" +
-    '<button class="btn" type="button" data-act="verification-resend" ' + (S.verifyBusy ? "disabled" : "") + ">Email me a new code</button></div></form>";
-  return panel("Email verification", "inbox", bodyHtml);
-}
-
-function profilePanel() {
-  var a = S.session && S.session.account ? S.session.account : {};
-  var label = a.displayName || a.email || "?";
-  var initials = String(label).trim().charAt(0).toUpperCase();
-  var delivery = (S.session && S.session.emailDelivery) || null;
-  var verified = !!a.emailVerified;
-  // The session's absolute expiry is session.expiresAt; the account object has no
-  // such field, so reading it here used to render an endless dash.
-  var expiresAt = S.session && S.session.session ? S.session.session.expiresAt : null;
-  var rows = [
-    kv("Email", '<code class="chip-v">' + esc(a.email || "—") + "</code>"),
-    kv("Display name", a.displayName ? esc(a.displayName) : '<span class="faint">not set</span>',
-      "Shown on your account. Letters, numbers, spaces and . _ -"),
-    kv("Verification", verified ? st("ok", "Verified") : st("warn", "Not verified"),
-      verified
-        ? "verification-gated features are unlocked"
-        : (delivery && delivery.configured
-            ? "check your inbox, or request a new email below"
-            : (delivery && delivery.reason) || "email delivery is not configured on this deployment")),
-    kv("Account created", '<span class="mono">' + esc(fmtTs(a.createdAt)) + "</span>"),
-    kv("Session expires", expiresAt ? '<span class="mono">' + esc(fmtTs(expiresAt)) + "</span>" : '<span class="faint">—</span>',
-      "absolute expiry — sign in again afterwards")
-  ].join("");
-  var nameForm = S.nameLoaded
-    ? '<form data-form="display-name" novalidate><div class="form-field"><label for="name-input">Display name</label>' +
-      '<input id="name-input" name="name-input" type="text" minlength="3" maxlength="32" autocomplete="nickname" value="' + esc(S.nameValue || a.displayName || "") + '" required>' +
-      '<span class="form-hint">3—32 characters. Leave empty to clear it.</span></div>' +
-      (S.nameErr ? '<p class="form-error" role="alert">' + esc(S.nameErr) + "</p>" : "") +
-      '<div class="form-actions"><button class="btn btn--primary" type="submit" ' + (S.nameBusy ? "disabled" : "") + ">Save display name</button>" +
-      '<button class="btn" type="button" data-act="name-form-close">Cancel</button></div></form>'
-    : (S.nameMsg ? '<p class="form-success" role="status">' + esc(S.nameMsg) + "</p>" : "") +
-      '<div class="row" style="margin-top:12px"><button class="btn btn--sm" type="button" data-act="name-form-open">' +
-      (a.displayName ? "Change display name" : "Add a display name") + "</button></div>";
-  return panel("Profile", "user",
-    '<div class="acct-head"><span class="acct-avatar" aria-hidden="true">' + esc(initials) + "</span>" +
-    '<div class="acct-id"><h2>' + esc(label) + "</h2><p>" + esc(a.id || "") + "</p></div></div>" +
-    '<div class="panel-bd--flush" style="margin-top:14px">' + rows + "</div>" +
-    '<div class="panel-bd--flush" style="margin-top:8px">' + nameForm + "</div>", { flush: false });
-}
-
-function passwordPanel() {
-  var bodyHtml = (S.pwErr ? '<p class="form-error" role="alert">' + esc(S.pwErr) + "</p>" : "") +
-    (S.pwMsg ? '<p class="form-success" role="status">' + esc(S.pwMsg) + "</p>" : "") +
-    '<form data-form="password-change" novalidate>' +
-    passwordField("pw-current", "Current password", "current-password") +
-    passwordField("pw-new", "New password", "new-password") +
-    passwordField("pw-new2", "Confirm new password", "new-password") +
-    '<ul class="password-rules"><li>10–128 characters, letters and numbers</li><li>Changing it signs out your other sessions</li></ul>' +
-    '<div class="form-actions"><button class="btn btn--primary" type="submit" ' + (S.pwBusy ? "disabled" : "") + ">" +
-      (S.pwBusy ? '<span class="spin" aria-hidden="true"></span> ' : "") + "Change password</button></div></form>";
-  return panel("Password", "key", bodyHtml);
-}
-
-function sessionsPanel() {
-  var inner;
-  if (S.sessionsErr) {
-    inner = '<p class="form-error">Could not list sessions: ' + esc(S.sessionsErr) + '</p><div class="row"><button class="btn btn--sm" type="button" data-act="sessions-reload">' + ic("refresh", 13) + "Retry</button></div>";
-  } else if (!S.sessions) {
-    inner = skeletonPanel(3);
-  } else if (!S.sessions.length) {
-    inner = '<p class="note">No active sessions.</p>';
-  } else {
-    inner = S.sessions.map(function (s) {
-      return '<div class="sess-row"><div class="sess-info"><div class="sess-label">' + esc(s.label || "Unknown device") + (s.current ? " " + st("info", "current") : "") + "</div>" +
-        '<div class="sess-meta">signed in ' + esc(fmtTs(s.createdAt)) + " · expires " + esc(fmtTs(s.expiresAt)) + " · id " + esc(s.id) + "</div></div>" +
-        (s.current ? "" : '<button class="btn btn--sm" type="button" data-act="session-revoke" data-id="' + esc(s.id) + '">Revoke</button>') +
-        "</div>";
-    }).join("");
-    inner += '<div class="row" style="margin-top:12px"><button class="btn" type="button" data-act="sessions-revoke-others">' + ic("logout") + "Sign out other sessions</button></div>";
-  }
-  return panel("Sessions", "shield", inner, { right: '<button class="btn btn--sm" type="button" data-act="sessions-reload">' + ic("refresh", 12) + "Refresh</button>" });
-}
-
-function robloxAccountPanel() {
-  var connected = !!(S.roblox && S.roblox.connected && S.roblox.account);
-  var canTryStatus = !S.robloxErr || (S.roblox && S.roblox.configuration && S.roblox.configuration.enabled !== false);
-  var bodyHtml = "";
-  var banner = accountVerified() ? "" :
-    '<div class="verify-banner">' + ic("alert") + '<span>Verify your email below before linking Roblox — reset links and Roblox notices go to that address. <button type="button" data-act="scroll-verify">Fix now</button></span></div>';
-  if (connected) {
-    var acc = S.roblox.account;
-    bodyHtml = '<div class="acct-head"><span class="acct-avatar" aria-hidden="true">R</span>' +
-      '<div class="acct-id"><h2>@' + esc(acc.username || "Roblox user") + "</h2><p>" + esc("user id " + (acc.userId || "—")) + "</p></div></div>" +
-      '<p class="note" style="margin-top:12px">Linked ' + esc(fmtTs(acc.connectedAt)) + '. Roblox tokens are stored encrypted server-side and are never shown here.</p>' +
-      '<div class="row" style="margin-top:14px"><a class="btn" href="#/roblox">Open the Roblox page</a>' +
-      '<button class="btn btn--danger" type="button" data-act="roblox-disconnect">Unlink Roblox account</button></div>';
-  } else if (S.robloxLoading) {
-    bodyHtml = skeletonPanel(3);
-  } else {
-    bodyHtml = '<p class="note">No Roblox account linked. You go straight to Roblox\'s official sign-in and consent page — DEMO never sees your Roblox password, and one DEMO account links at most one Roblox account.</p>' +
-      (canTryStatus
-        ? '<div class="row"><a class="btn btn--primary" href="/oauth/roblox/link">' + ic("external") + "Connect Roblox account</a></div>" +
-          '<p class="hint mono" style="margin-top:10px">/oauth/roblox/link · returns you here after consent</p>' +
-          '<p class="form-hint" style="margin-top:8px">' + esc(S.robloxErr ? "If connecting fails: " + (S.robloxErr.message || "Roblox is not fully configured yet.") : "") + "</p>"
-        : '<p class="form-error">Roblox OAuth is not configured on this deployment yet. The rest of your account keeps working.</p>');
-  }
-  return panel("Roblox link", "game", banner + bodyHtml);
-}
-
-function dangerPanel() {
-  var bodyHtml;
-  if (S.deleteArmed) {
-    bodyHtml = '<p class="form-error"><b>This permanently deletes your DEMO account:</b> the profile, every active session, the verification record, and the encrypted Roblox link. Any Roblox authorization you granted expires with your account. This cannot be undone.</p>' +
-      '<form data-form="delete-account" novalidate>' +
-      '<div class="form-field"><label for="del-confirm">Type <b>DELETE</b> to confirm</label><input id="del-confirm" type="text" autocomplete="off" spellcheck="false" required></div>' +
-      '<div class="form-field"><label for="del-password">Your password</label><input id="del-password" type="password" autocomplete="current-password" required></div>' +
-      (S.authErr ? '<p class="form-error" role="alert">' + esc(S.authErr) + "</p>" : "") +
-      '<div class="form-actions"><button class="btn btn--danger" type="submit" ' + (S.authBusy ? "disabled" : "") + ">" +
-        (S.authBusy ? '<span class="spin" aria-hidden="true"></span> ' : "") + "Delete my account permanently</button>" +
-      '<button class="btn" type="button" data-act="delete-cancel">Keep my account</button></div></form>';
-  } else {
-    bodyHtml = '<p class="note">Deleting your DEMO account removes your profile, sessions and your linked Roblox account with its encrypted tokens. MCP clients you signed into keep working until their tokens naturally expire.</p>' +
-      '<div class="row"><button class="btn btn--danger" type="button" data-act="delete-arm">Delete account…</button></div>';
-  }
-  return panel("Danger zone", "alert", bodyHtml, { cls: "danger-zone" });
-}
-
-function loadAccountExtras() {
-  S.sessions = null; S.sessionsErr = "";
-  jfetch("/account/sessions").then(function (d) {
-    S.sessions = (d && d.sessions) || [];
-  }, function (e) {
-    S.sessionsErr = e && e.message ? e.message : "request failed";
-  }).then(function () { if (S.route === "account") renderView(); });
-}
-
-function accountView() {
-  if (!S.sessionLoaded) {
-    return pageHead("Account", "Your DEMO account", "Loading session.") + '<div style="height:20px"></div>' + skeletonPanel(4);
-  }
-  if (S.session && S.session.accountsAvailable === false) {
-    return pageHead("Account", "DEMO accounts", "Not enabled on this deployment.") + '<div style="height:20px"></div>' +
-      errPanel("DEMO accounts unavailable", "/account/session", "core", "This deployment has no DEMO_ACCOUNTS binding yet.");
-  }
-  if (!signedIn()) {
-    setTimeout(function () { go("auth"); }, 0);
-    return "";
-  }
-  return pageHead("Account", "Your DEMO account", "Session, verification, linked Roblox account and security settings — everything here is read from and written to the backend, nothing is static.") +
-    '<div style="height:20px"></div>' +
-    (accountVerified() ? "" : '<div class="verify-banner" id="verify-banner">' + ic("alert") + '<span>Your email is not verified yet. Request or enter a code below — verification is required before Roblox linking and for reset emails.</span></div>') +
-    '<div class="grid grid--2">' + profilePanel() + (accountVerified() ? passwordPanel() : verifyPanel()) + "</div>" +
-    '<div style="height:16px"></div><div class="grid grid--2">' + robloxAccountPanel() + sessionsPanel() + "</div>" +
-    (accountVerified() ? "" : '<div style="height:16px"></div>' + passwordPanel()) +
-    '<div style="height:16px"></div>' + dangerPanel();
 }
 
 /* skills */
@@ -2218,44 +1755,6 @@ function loadCore(force) {
   return S.core;
 }
 
-function loadRoblox(force) {
-  if (S.roblox && !force) return Promise.resolve();
-  if (S.robloxInflight) return Promise.resolve();
-  // The Roblox status route is private: an anonymous caller gets 401 by design
-  // (verified live). Ask the session first, and for a visitor who is not signed
-  // in report the local fact instead of firing a request that can only fail and
-  // would log a console error on every page load.
-  if (!S.sessionLoaded) {
-    if (!S.robloxDeferred) {
-      S.robloxDeferred = loadSession().then(function () {
-        S.robloxDeferred = null;
-        return loadRoblox(force);
-      });
-    }
-    return S.robloxDeferred;
-  }
-  if (!signedIn()) {
-    S.roblox = null;
-    S.robloxErr = { status: 401, payload: { error: "unauthenticated", message: "Sign in to your DEMO account to connect a Roblox account." } };
-    S.robloxLoading = false;
-    if (S.route === "roblox" || S.route === "account") renderView();
-    return Promise.resolve();
-  }
-  S.robloxInflight = true;
-  S.robloxLoading = true;
-  return jfetch("/oauth/roblox/status").then(function (d) {
-    S.roblox = d;
-    S.robloxErr = null;
-  }, function (e) {
-    S.robloxErr = e;
-    S.roblox = null;
-  }).then(function () {
-    S.robloxLoading = false;
-    S.robloxInflight = false;
-    renderView();
-  });
-}
-
 function loadLazy(key) {
   if (S.lazy[key] || S.lazyInflight[key]) return;
   var path = LAZY_ROUTES[key];
@@ -2367,7 +1866,6 @@ document.addEventListener("click", function (ev) {
   }
   else if (act === "refresh") {
     loadCore(true);
-    loadRoblox(true);
     toast("Refreshing telemetry…");
   }
   else if (act === "retry") {
@@ -2375,325 +1873,8 @@ document.addEventListener("click", function (ev) {
     if (!key || key === "core") { S.core = null; loadCore(true); }
     else { S.lazyErr[key] = null; S.lazy[key] = null; loadLazy(key); }
   }
-  else if (act === "roblox-connect") { location.href='/oauth/roblox/link'; }
-  else if (act === "roblox-disconnect") {
-    el.disabled = true;
-    jfetch("/oauth/roblox/logout", { method: "POST" }).then(function () {
-      toast("Disconnected from Roblox.");
-    }, function (e) {
-      toast("Disconnect failed: " + (e.message || "unknown error"));
-    }).then(function () {
-      S.roblox = null;
-      return loadRoblox(true);
-    }).then(function () { el.disabled = false; });
-  }
-  else if (act === "roblox-refresh") {
-    S.roblox = null;
-    renderView();
-    loadRoblox(true);
-  }
   else if (act === "theme-toggle") cycleTheme();
-  else if (act === "account-open") go(signedIn() ? "account" : "auth");
-  else if (act === "pw-toggle") {
-    var field = el.getAttribute("data-field");
-    var input = field ? qs("#" + field) : null;
-    if (input) {
-      var show = input.type === "password";
-      input.type = show ? "text" : "password";
-      S.pwShow[field] = show;
-      el.setAttribute("aria-pressed", show ? "true" : "false");
-      el.textContent = show ? "Hide" : "Show";
-      el.setAttribute("aria-label", (show ? "Hide " : "Show ") + (el.getAttribute("aria-label") || "").replace(/^(Hide|Show) /, "").replace(/ password/i, "") + " password");
-      if (input.focus) input.focus();
-    }
-  }
-  else if (act === "name-form-open") { S.nameLoaded = true; S.nameErr = ""; S.nameMsg = ""; renderView(); var ni = qs("#name-input"); if (ni) ni.focus(); }
-  else if (act === "name-form-close") { S.nameLoaded = false; S.nameErr = ""; S.nameMsg = ""; renderView(); }
-  else if (act === "auth-tab") {
-    S.authMode = el.getAttribute("data-tab") || "signin";
-    S.authErr = ""; S.authMsg = "";
-    renderView();
-    var fe = qs("#auth-email"); if (fe) fe.focus();
-  }
-  else if (act === "auth-logout") {
-    el.disabled = true;
-    accountApi("/account/logout").then(function () {
-      S.session = { signedIn: false, accountsAvailable: true };
-      loadSession();
-      S.roblox = null;
-      S.deleteArmed = false; S.sessions = null;
-      toast("Signed out.");
-      go("overview");
-      renderView();
-    }, function (e) {
-      el.disabled = false;
-      toast("Sign out failed: " + (e.message || "unknown error"));
-    });
-  }
-  else if (act === "verification-resend") {
-    el.disabled = true;
-    S.verifyErr = ""; S.verifyMsg = "";
-    accountApi("/account/verify/request").then(function (d) {
-      var v = (d && d.verification) || null;
-      if (d && d.alreadyVerified) {
-        S.verifyMsg = "Your email is already verified.";
-      } else if (v && v.sent) {
-        S.verifyMsg = "Sent — check your inbox at " + accountEmail() +
-          (v.linkIncluded ? " for a one-click link and an 8-character code." : " for the 8-character code.");
-        if (v.retryAfterSeconds) S.verifyMsg += " You can request another in " + v.retryAfterSeconds + "s.";
-      } else {
-        S.verifyErr = (v && v.reason) || "The verification email could not be sent.";
-      }
-      renderView();
-    }, function (e) {
-      S.verifyErr = e.message || "Could not request a code.";
-      renderView();
-    });
-  }
-  else if (act === "scroll-verify") {
-    var vp = qs("#verify-hint");
-    if (vp && vp.scrollIntoView) vp.scrollIntoView({ behavior: "smooth", block: "start" });
-  }
-  else if (act === "sessions-reload") loadAccountExtras();
-  else if (act === "session-revoke") {
-    el.disabled = true;
-    accountApi("/account/sessions/revoke", "POST", { id: el.getAttribute("data-id") }).then(function () {
-      toast("Session revoked.");
-      loadAccountExtras();
-    }, function (e) {
-      el.disabled = false;
-      toast("Revoke failed: " + (e.message || "unknown error"));
-    });
-  }
-  else if (act === "sessions-revoke-others") {
-    el.disabled = true;
-    accountApi("/account/sessions/revoke-others").then(function (d) {
-      toast((d && typeof d.revoked === "number" ? d.revoked : 0) + " other session(s) signed out.");
-      loadAccountExtras();
-    }, function (e) {
-      el.disabled = false;
-      toast("Failed: " + (e.message || "unknown error"));
-    });
-  }
-  else if (act === "delete-arm") { S.deleteArmed = true; S.authErr = ""; renderView(); var dc = qs("#del-confirm"); if (dc) dc.focus(); }
-  else if (act === "delete-cancel") { S.deleteArmed = false; S.authErr = ""; renderView(); }
 });
-
-/* Advisory password-strength meter: cosmetic only. The server's policy is the
-   authority, and this never blocks a submit. */
-document.addEventListener("input", function (ev) {
-  var el = ev.target;
-  if (!el || !el.id) return;
-  var meter = qs('[data-meter="' + el.id + '"]');
-  if (!meter) return;
-  var value = String(el.value || "");
-  var score = 0;
-  if (value.length >= 10) score++;
-  if (value.length >= 14) score++;
-  if (/[A-Za-z]/.test(value) && /[0-9]/.test(value)) score++;
-  if (/[^A-Za-z0-9]/.test(value) || value.length >= 20) score++;
-  var bars = meter.querySelectorAll(".pw-meter-bar span");
-  for (var i = 0; i < bars.length; i++) {
-    bars[i].setAttribute("data-on", i < score ? (score >= 3 ? "1" : "warn") : "");
-  }
-  var label = meter.querySelector(".pw-meter-text");
-  if (label) {
-    label.textContent = !value ? "Use 10+ characters with letters and numbers."
-      : score <= 1 ? "Too short \u2014 use at least 10 characters."
-      : score === 2 ? "Getting there \u2014 add numbers or length."
-      : score === 3 ? "Good \u2014 meets the DEMO policy."
-      : "Strong.";
-  }
-});
-
-document.addEventListener("submit", function (ev) {
-  var form = ev.target;
-  if (!form || !form.getAttribute) return;
-  var kind = form.getAttribute("data-form");
-  if (!kind) return;
-  ev.preventDefault();
-  var val = function (id) { var el2 = qs("#" + id); return el2 ? String(el2.value || "") : ""; };
-  S.authErr = ""; S.authMsg = ""; S.verifyErr = ""; S.verifyMsg = ""; S.pwErr = ""; S.pwMsg = "";
-
-  if (kind === "signin") {
-    // Read the form first: renderView() rebuilds the DOM, so values captured
-    // afterwards would arrive at the server blank.
-    var signinEmail = val("auth-email");
-    var signinPassword = val("auth-password");
-    S.authBusy = true; renderView();
-    accountApi("/account/login", "POST", { email: signinEmail, password: signinPassword }).then(function (d) {
-      if (d && d.authenticated && d.account) {
-        afterAuthChange(d);
-        toast(d.verificationRequired ? "Signed in — verify your email to unlock linked-account features." : "Signed in.");
-        go("account");
-        renderView();
-        return;
-      }
-      S.authErr = (d && d.message) || "Sign in did not complete. Try again.";
-      renderView();
-    }, function (e) {
-      S.authErr = e.message || "Sign in failed.";
-      renderView();
-    });
-  } else if (kind === "register") {
-    var issue = pwIssue(val("auth-password"));
-    if (issue) { S.authErr = "Password: " + issue; renderView(); return; }
-    if (val("auth-password") !== val("auth-password2")) { S.authErr = "The two passwords did not match."; renderView(); return; }
-    var wantedName = val("auth-name").replace(/\s+/g, " ").trim();
-    var regEmail = val("auth-email");
-    var regPassword = val("auth-password");
-    var regConfirm = val("auth-password2");
-    S.authBusy = true; renderView();
-    accountApi("/account/register", "POST", {
-      email: regEmail,
-      password: regPassword,
-      passwordConfirm: regConfirm,
-      displayName: wantedName || undefined
-    }).then(function (d) {
-      // 'authenticated' is the documented success field: it is true only when the
-      // server really created the account AND issued a session cookie. Reporting
-      // success on anything else is exactly what used to strand new accounts.
-      if (d && d.authenticated && d.account) {
-        afterAuthChange(d);
-        S.authMsg = verificationMessage(d);
-        toast("Account created — you are signed in.");
-        go("account");
-        return;
-      }
-      S.authMsg = (d && d.message) || "If this email is not already registered, an account was created. Check your inbox, or sign in.";
-      renderView();
-    }, function (e) {
-      S.authErr = e.message || "Registration failed.";
-      renderView();
-    });
-  } else if (kind === "forgot") {
-    accountApi("/account/password/forgot", "POST", { email: val("auth-email") }).then(function () {
-      S.authMsg = "If an account exists for that address, a reset link is on its way. It works once and expires within about an hour.";
-      renderView();
-    }, function (e) {
-      S.authErr = e.message || "Could not process the request.";
-      renderView();
-    });
-  } else if (kind === "reset") {
-    var issue2 = pwIssue(val("auth-password"));
-    if (issue2) { S.authErr = "Password: " + issue2; renderView(); return; }
-    if (val("auth-password") !== val("auth-password2")) { S.authErr = "The two passwords did not match."; renderView(); return; }
-    accountApi("/account/password/reset", "POST", {
-      token: S.resetToken,
-      password: val("auth-password"),
-      passwordConfirm: val("auth-password2")
-    }).then(function () {
-      S.resetToken = "";
-      S.authMode = "signin";
-      S.authMsg = "Password updated. Every previous session has been signed out — sign in with your new password.";
-      history.replaceState(null, "", "#/auth");
-      S.route = "auth";
-      renderView();
-    }, function (e) {
-      S.authErr = e.status === 410 ? "This reset link was already used or has expired. Request a fresh one from the sign-in page." : (e.message || "Reset failed.");
-      renderView();
-    });
-  } else if (kind === "verify-code") {
-    S.verifyBusy = true;
-    accountApi("/account/verify/confirm", "POST", { code: val("auth-code").toUpperCase() }).then(function (d) {
-      S.verifyBusy = false;
-      S.verifyMsg = "Email verified.";
-      S.verifyErr = "";
-      if (d && d.account) S.session.account = d.account;
-      loadSession().then(function () { renderView(); });
-    }, function (e) {
-      S.verifyBusy = false;
-      S.verifyErr = e.message || "Verification failed.";
-      renderView();
-    });
-  } else if (kind === "password-change") {
-    var issue3 = pwIssue(val("pw-new"));
-    if (issue3) { S.pwErr = "New password: " + issue3; renderView(); return; }
-    if (val("pw-new") !== val("pw-new2")) { S.pwErr = "The two new passwords did not match."; renderView(); return; }
-    S.pwBusy = true;
-    accountApi("/account/password/change", "POST", {
-      currentPassword: val("pw-current"),
-      newPassword: val("pw-new"),
-      newPasswordConfirm: val("pw-new2")
-    }).then(function (d) {
-      S.pwBusy = false;
-      S.pwErr = "";
-      S.pwMsg = "Password changed. " + (d && typeof d.otherSessionsRevoked === "number" ? d.otherSessionsRevoked : 0) + " other session(s) signed out.";
-      loadAccountExtras();
-      renderView();
-    }, function (e) {
-      S.pwBusy = false;
-      S.pwErr = e.message || "Could not change the password.";
-      renderView();
-    });
-  } else if (kind === "display-name") {
-    var nextName = val("name-input").replace(/\s+/g, " ").trim();
-    S.nameBusy = true; S.nameErr = ""; S.nameMsg = "";
-    renderView();
-    accountApi("/account/profile", "POST", { displayName: nextName }).then(function (d) {
-      S.nameBusy = false;
-      if (d && d.account) {
-        S.session = Object.assign({}, S.session, { account: d.account });
-        S.nameValue = d.account.displayName || "";
-      }
-      S.nameMsg = "Display name saved.";
-      S.nameLoaded = false;
-      toast("Display name updated.");
-      renderView();
-    }, function (e) {
-      S.nameBusy = false;
-      S.nameErr = e.message || "Could not save the display name.";
-      renderView();
-    });
-  } else if (kind === "delete-account") {
-    var confirmText = val("del-confirm");
-    if (confirmText !== "DELETE") { S.authErr = "Type DELETE exactly to confirm."; renderView(); return; }
-    accountApi("/account/delete", "POST", { password: val("del-password"), confirmation: confirmText }).then(function () {
-      S.session = { signedIn: false, accountsAvailable: true };
-      loadSession();
-      S.roblox = null;
-      S.sessions = null; S.deleteArmed = false; S.authErr = "";
-      toast("Account deleted.");
-      go("overview");
-      renderHeaderState();
-    }, function (e) {
-      S.authErr = e.status === 403 ? "Wrong current password." : (e.message || "Deletion failed.");
-      renderView();
-    });
-  }
-});
-
-function afterAuthChange(d) {
-  if (d && d.account) {
-    S.session = {
-      signedIn: true,
-      accountsAvailable: true,
-      account: d.account,
-      emailDelivery: d.emailDelivery || S.session && S.session.emailDelivery || null,
-      verificationRequired: !!d.verificationRequired
-    };
-  } else {
-    loadSession();
-  }
-  S.authMode = "signin"; S.authErr = ""; S.authMsg = "";
-  S.sessions = null; S.sessionsErr = "";
-  S.roblox = null;         // Roblox state belongs to this identity now — re-read fresh
-  S.robloxLoading = true;
-  loadRoblox(true);
-  renderHeaderState();
-}
-
-/** Plain-language result of a registration, driven by the server's own report. */
-function verificationMessage(d) {
-  var v = (d && d.verification) || null;
-  if (v && v.sent) {
-    return "Signed in. We emailed " + accountEmail() + (v.linkIncluded
-      ? " a one-click verification link and an 8-character code."
-      : " an 8-character verification code.") + " It expires in " + Math.round((v.expiresInSeconds || 1800) / 60) + " minutes.";
-  }
-  if (v && v.reason) return "Signed in. " + v.reason;
-  return "Signed in. Your account is ready.";
-}
 
 document.addEventListener("input", function (ev) {
   var el = ev.target;
@@ -2736,64 +1917,23 @@ document.addEventListener("keydown", function (ev) {
 window.addEventListener("hashchange", function () {
   var next = routeFromHash();
   if (next !== S.route) { S.route = next; S.openTool = null; }
-  if (S.route === "reset") S.resetToken = hashParam("token");
-  if (S.route === "verify") { S.verifyToken = hashParam("token"); S.verifyDone = false; S.verifyErr = ""; }
   renderView();
   enterRoute();
 });
 
 /* boot */
-function hashParam(name) {
-  var h = location.hash || "";
-  var q = h.indexOf("?");
-  if (q === -1) return "";
-  try {
-    return new URLSearchParams(h.slice(q + 1)).get(name) || "";
-  } catch (e) { return ""; }
-}
-
 function enterRoute() {
-  if (S.route === "roblox" && !S.roblox && !S.robloxErr) loadRoblox();
   if (S.route === "video") loadLazy("video");
   if (S.route === "research") loadLazy("expanded");
   if (S.route === "collab") { loadLazy("collab"); loadLazy("byox"); loadLazy("collabWorkspaces"); }
-  if (S.route === "account" && signedIn()) { loadSession(); if (!S.sessions && !S.sessionsErr) loadAccountExtras(); if (!S.roblox && !S.robloxErr) loadRoblox(); }
-  if (S.route === "reset") S.resetToken = hashParam("token");
-  if (S.route === "verify") { S.verifyToken = hashParam("token"); confirmVerifyLink(); }
-}
-
-/**
- * Redeem a one-click verification token. Deliberately independent of the
- * session: the link often opens on a different device than the one used to
- * register, and possession of the emailed token is the proof of mailbox control.
- */
-function confirmVerifyLink() {
-  if (!S.verifyToken || S.verifyBusyLink || S.verifyDone) return;
-  S.verifyBusyLink = true; S.verifyErr = "";
-  accountApi("/account/verify/confirm", "POST", { token: S.verifyToken }).then(function (d) {
-    S.verifyBusyLink = false; S.verifyDone = true;
-    S.verifyMsg = (d && d.viaLink) ? "Your DEMO account can now use verification-gated features." : "Your email address is confirmed.";
-    if (d && d.account) loadSession();
-    renderView();
-  }, function (e) {
-    S.verifyBusyLink = false; S.verifyDone = false;
-    S.verifyErr = e.status === 410
-      ? "This link was already used or has expired. Sign in and request a fresh verification email."
-      : (e.message || "The verification link could not be checked.");
-    renderView();
-  });
 }
 
 function boot() {
   S.route = routeFromHash();
-  if (S.route === "reset") S.resetToken = hashParam("token");
-  if (S.route === "verify") S.verifyToken = hashParam("token");
   applyStoredTheme();
   renderShell();
   renderView();
   loadCore(false);
-  loadSession();
-  loadRoblox(false);
   enterRoute();
 }
 

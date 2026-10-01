@@ -165,11 +165,9 @@ function subsystemHealth(env: Record<string, unknown>): Record<string, { status:
   };
 
   // Roblox
-  const robloxClientId = String(env.ROBLOX_CLIENT_ID ?? "").trim();
-  const robloxSecret = String(env.ROBLOX_CLIENT_SECRET ?? "").trim();
   health.Roblox = {
-    status: robloxClientId && robloxSecret ? "online" : "limited",
-    detail: robloxClientId && robloxSecret ? "OAuth 2.0 configured" : "Not fully configured",
+    status: "online",
+    detail: "Public user and experience lookup (no API key)",
   };
 
   // JEV / TypeSafe
@@ -251,9 +249,7 @@ function buildCapabilitiesList(env: Record<string, unknown>): string[] {
   const hasAi = Boolean(env.AI && typeof (env.AI as { run?: unknown }).run === "function");
   if (hasAi || env.TRANSCRIPTION_ENDPOINT) caps.push("Audio extraction", "Transcription", "Vision");
   if (resolveYouTubeConfig(env).available) caps.push("YouTube");
-  const robloxClientId = String(env.ROBLOX_CLIENT_ID ?? "").trim();
-  const robloxSecret = String(env.ROBLOX_CLIENT_SECRET ?? "").trim();
-  if (robloxClientId && robloxSecret) caps.push("Roblox");
+  caps.push("Roblox lookup");
   if (resolveJevConfig(env).available) caps.push("JEV");
   if (resolveLayaConfig(env).available) caps.push("Laya");
   caps.push(

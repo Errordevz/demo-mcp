@@ -132,7 +132,7 @@ describe("wrangler.jsonc", () => {
     expect(credentialShaped).toEqual([]);
     // …while still documenting them, so a reader cannot conclude they are forgotten.
     const source = await readFile(path.join(ROOT, "wrangler.jsonc"), "utf8");
-    for (const name of ["ROBLOX_CLIENT_SECRET", "ROBLOX_TOKEN_KEY", "TYPESAFE_API_KEY", "LAYA_API_KEY", "SMTP_PASSWORD", "RESEND_API_KEY", "RE_ANALYZER_KEY"]) {
+    for (const name of ["TYPESAFE_API_KEY", "LAYA_API_KEY", "RE_ANALYZER_KEY"]) {
       expect(source).toContain(name);
     }
     expect(source).not.toContain("DEMO_API_KEY");
@@ -160,8 +160,8 @@ describe("wrangler.jsonc", () => {
 
   it("binds the Durable Objects and migrations the code expects", async () => {
     const data = await config();
-    expect(data.durable_objects.bindings.map((entry: { name: string }) => entry.name).sort()).toEqual(["BROWSER_SESSIONS", "DEMO_ACCOUNTS", "MCP_AUTH", "ROBLOX_AUTH"]);
-    expect(data.migrations.map((entry: { tag: string }) => entry.tag)).toEqual(["v1", "v2", "v3", "v4"]);
+    expect(data.durable_objects.bindings.map((entry: { name: string }) => entry.name).sort()).toEqual(["BROWSER_SESSIONS", "DEMO_ACCOUNTS", "MCP_AUTH"]);
+    expect(data.migrations.map((entry: { tag: string }) => entry.tag)).toEqual(["v1", "v2", "v3", "v4", "v5"]);
     expect(data.r2_buckets.map((entry: { binding: string }) => entry.binding)).toContain("SCREENSHOTS");
     expect(data.browser.binding).toBe("BROWSER");
     expect(data.ai.binding).toBe("AI");
@@ -170,7 +170,7 @@ describe("wrangler.jsonc", () => {
   it("only declares variables the code actually reads, and reads the flags it declares", async () => {
     const data = await config();
     const readers = await Promise.all(
-      ["index.ts", "platform-entry.ts", "src/auth/oauth-config.ts", "src/auth/access-identity.ts", "src/session/factory.ts", "src/video/processor.ts", "src/video/capabilities.ts", "src/jev/config.ts", "src/laya/config.ts", "src/decisions/provider.ts", "src/roblox/config.ts", "src/account/config.ts", "src/account/email.ts", "src/git/config.ts", "src/core/rate-limit.ts", "src/web/storage.ts", "src/web/monitor.ts", "src/reverse-engineering/config.ts"].map((file) =>
+      ["index.ts", "platform-entry.ts", "src/auth/oauth-config.ts", "src/auth/access-identity.ts", "src/session/factory.ts", "src/video/processor.ts", "src/video/capabilities.ts", "src/jev/config.ts", "src/laya/config.ts", "src/decisions/provider.ts", "src/git/config.ts", "src/core/rate-limit.ts", "src/web/storage.ts", "src/web/monitor.ts", "src/reverse-engineering/config.ts"].map((file) =>
         readFile(path.join(ROOT, file), "utf8"),
       ),
     );

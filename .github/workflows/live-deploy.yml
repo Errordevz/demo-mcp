@@ -79,7 +79,25 @@ jobs:
           # previous release. A deploy that did not happen must fail the job.
           set -o pipefail
           set +e
-          npx wrangler deploy --keep-vars 2>&1 | tee deploy.log
+          EXTRA_VARS=()
+          while IFS= read -r line; do
+            [ -n "$line" ] && EXTRA_VARS+=(--var "$line")
+          done < <(node -e '
+            const acc = process.env.CLOUDFLARE_ACCOUNT_ID;
+            const tok = process.env.CLOUDFLARE_API_TOKEN;
+            if (!acc || !tok) process.exit(0);
+            fetch(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(acc)}/workers/scripts/demo-mcp/settings`, {
+              headers: { Authorization: `Bearer ${tok}` }
+            }).then(r => r.json()).then(s => {
+              const keep = new Set(["LAYA_BASE_URL", "RE_ANALYZER_URL", "DEV_BASE_URL"]);
+              for (const b of s?.result?.bindings ?? []) {
+                if (b.type === "plain_text" && keep.has(b.name) && typeof b.text === "string") {
+                  console.log(`${b.name}:${b.text}`);
+                }
+              }
+            }).catch(() => {});
+          ')
+          npx wrangler deploy "${EXTRA_VARS[@]}" 2>&1 | tee deploy.log
           DEPLOY_STATUS=${PIPESTATUS[0]}
           set -e
           if [ "$DEPLOY_STATUS" -ne 0 ]; then
@@ -134,10 +152,6 @@ jobs:
       - name: Verify unauthenticated MCP handshake and ping
         run: node scripts/verify-mcp.mjs '${{ steps.deploy.outputs.worker_url }}'
 
-      # Deployment-side email check. Prints the secret NAMES bound to this Worker
-      # (values are never printed by wrangler and never logged here) and the live
-      # emailDelivery report, so "the secret is set but the Worker says it is not"
-      # is visible in the run log instead of only on the sign-up page.
       # Seed or refresh the Build Your Own X catalog. The index is
       # administrator-only by design (the key travels in a header, never a query
       # string), incremental (ETag/If-None-Match, then a SHA-256 comparison) and
@@ -159,15 +173,6 @@ jobs:
         if: env.DEMO_API_KEY == ''
         run: |
           echo "::notice ::DEMO_API_KEY is not configured as a repository secret, so the Build Your Own X catalog was not seeded. An operator can seed it with: curl -X POST <worker-url>/byox/refresh -H \"x-demo-admin-key: \$DEMO_API_KEY\""
-
-      - name: Report account-email delivery status (names only, never values)
-        run: |
-          echo "Secrets bound to this Worker (names only):"
-          npx wrangler secret list || echo "(could not list secrets — the token needs Workers:Edit)"
-          echo
-          echo "Live email delivery status:"
-          curl -sS '${{ steps.deploy.outputs.worker_url }}/account/session' || true
-          echo
 
       - name: Apply video-artifacts lifecycle rule
         run: >

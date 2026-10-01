@@ -10,7 +10,6 @@
 export const MCP_AUTH_DO_NAME = "demo-mcp-auth";
 const MAX_CONSENT_SECONDS = 10 * 60;
 const MAX_CODE_SECONDS = 2 * 60;
-const MAX_LINK_SECONDS = 5 * 60;
 
 export interface ConsentRequestRecord {
   version: 1;
@@ -48,12 +47,6 @@ export interface McpAccessTokenRecord {
   expiresAt: number;
 }
 
-export interface RobloxLinkCodeRecord {
-  version: 1;
-  principalHash: string;
-  expiresAt: number;
-}
-
 export interface ChargeResult {
   allowed: boolean;
   count: number;
@@ -74,8 +67,6 @@ export interface McpAuthStoreApi {
   putAccessToken(tokenHash: string, record: McpAccessTokenRecord): Promise<void>;
   getAccessToken(tokenHash: string, now: number): Promise<McpAccessTokenRecord | null>;
   revokeAccessToken(tokenHash: string, clientIdHash: string): Promise<boolean>;
-  putRobloxLinkCode(codeHash: string, record: RobloxLinkCodeRecord): Promise<boolean>;
-  consumeRobloxLinkCode(codeHash: string, now: number): Promise<RobloxLinkCodeRecord | null>;
   charge(bucket: string, scopeHash: string, limit: number, windowMs: number, now: number): Promise<ChargeResult>;
 }
 
@@ -92,8 +83,6 @@ export class McpAuthStore implements McpAuthStoreApi {
   putAccessToken(tokenHash: string, record: McpAccessTokenRecord) { return this.stub.putAccessToken(tokenHash, record); }
   getAccessToken(tokenHash: string, now: number) { return this.stub.getAccessToken(tokenHash, now); }
   revokeAccessToken(tokenHash: string, clientIdHash: string) { return this.stub.revokeAccessToken(tokenHash, clientIdHash); }
-  putRobloxLinkCode(codeHash: string, record: RobloxLinkCodeRecord) { return this.stub.putRobloxLinkCode(codeHash, record); }
-  consumeRobloxLinkCode(codeHash: string, now: number) { return this.stub.consumeRobloxLinkCode(codeHash, now); }
   charge(bucket: string, scopeHash: string, limit: number, windowMs: number, now: number) {
     return this.stub.charge(bucket, scopeHash, limit, windowMs, now);
   }
@@ -120,7 +109,6 @@ export class InMemoryMcpAuthStore implements McpAuthStoreApi {
   private consents = new Map<string, ConsentRequestRecord>();
   private codes = new Map<string, AuthorizationCodeRecord>();
   private tokens = new Map<string, McpAccessTokenRecord>();
-  private linkCodes = new Map<string, RobloxLinkCodeRecord>();
   private limits = new Map<string, { startedAt: number; count: number }>();
 
   async putConsent(hash: string, record: ConsentRequestRecord): Promise<boolean> {
@@ -161,16 +149,6 @@ export class InMemoryMcpAuthStore implements McpAuthStoreApi {
     if (!record || record.clientIdHash !== clientIdHash) return false;
     this.tokens.delete(hash);
     return true;
-  }
-  async putRobloxLinkCode(hash: string, record: RobloxLinkCodeRecord) {
-    if (this.linkCodes.has(hash)) return false;
-    this.linkCodes.set(hash, structuredClone(record));
-    return true;
-  }
-  async consumeRobloxLinkCode(hash: string, now: number) {
-    const record = this.linkCodes.get(hash);
-    this.linkCodes.delete(hash);
-    return record && record.expiresAt > now ? structuredClone(record) : null;
   }
   async charge(bucket: string, scopeHash: string, limit: number, windowMs: number, now: number): Promise<ChargeResult> {
     const key = `${bucket}:${scopeHash}`;
@@ -241,12 +219,6 @@ export class McpAuth extends DurableObject<Record<string, unknown>> {
     });
     return revoked;
   }
-  async putRobloxLinkCode(hash: string, record: RobloxLinkCodeRecord): Promise<boolean> {
-    return this.putOnce(`link:${hash}`, record, MAX_LINK_SECONDS);
-  }
-  async consumeRobloxLinkCode(hash: string, now: number) {
-    return this.consume<RobloxLinkCodeRecord>(`link:${hash}`, now, () => true);
-  }
   async charge(bucket: string, scopeHash: string, limit: number, windowMs: number, now: number): Promise<ChargeResult> {
     const key = `limit:${bucket}:${scopeHash}`;
     let result: ChargeResult = { allowed: true, count: 1, retryAfterSeconds: 0 };
@@ -272,7 +244,7 @@ export class McpAuth extends DurableObject<Record<string, unknown>> {
     const now = Date.now();
     const entries = await this.storage.list({ limit: 1000 });
     for (const [key, value] of entries) {
-      if (key.startsWith("consent:") || key.startsWith("code:") || key.startsWith("token:") || key.startsWith("link:") || key.startsWith("limit:")) {
+      if (key.startsWith("consent:") || key.startsWith("code:") || key.startsWith("token:") || key.startsWith("limit:")) {
         const expiresAt = (value as { expiresAt?: number } | undefined)?.expiresAt;
         if (typeof expiresAt === "number" && expiresAt <= now) await this.storage.delete(key);
       }

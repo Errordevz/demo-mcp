@@ -26,8 +26,6 @@ const workerBundleFixture = [
   `securitySchemes`,
   `oauth-protected-resource`,
   `CF-Access-Jwt-Assertion`,
-  `/oauth/roblox/callback`,
-  `ROBLOX_TOKEN_KEY`,
 ].join("\n");
 
 function respond(req: IncomingMessage, res: ServerResponse) {
@@ -38,9 +36,7 @@ function respond(req: IncomingMessage, res: ServerResponse) {
       result: {
         bindings: [
           { type: "durable_object_namespace", name: "MCP_AUTH" },
-          { type: "durable_object_namespace", name: "ROBLOX_AUTH" },
-          { type: "secret_text", name: "ROBLOX_CLIENT_SECRET" },
-          { type: "secret_text", name: "ROBLOX_TOKEN_KEY" },
+          { type: "durable_object_namespace", name: "DEMO_ACCOUNTS" },
           { type: "plain_text", name: "BROWSER_KEEPALIVE_MS", text: "300000" },
           { type: "plain_text", name: "BROWSER_PROVIDER", text: "cloudflare" },
           { type: "plain_text", name: "DEMO_PLATFORM_ORIGIN", text: "https://demo-platform.pages.dev" },
@@ -49,8 +45,6 @@ function respond(req: IncomingMessage, res: ServerResponse) {
           { type: "plain_text", name: "MCP_AUTH_ACCESS_AUD", text: "<your-cloudflare-access-application-aud-tag>" },
           { type: "plain_text", name: "MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS", text: "900" },
           { type: "plain_text", name: "MCP_AUTH_RATE_LIMIT_PER_MINUTE", text: "30" },
-          { type: "plain_text", name: "OAUTH_STATE_TTL_SECONDS", text: "600" },
-          { type: "plain_text", name: "ROBLOX_OAUTH_SCOPES", text: "openid profile" },
         ],
       },
     }));
@@ -116,20 +110,15 @@ it("audits the deployed Worker from the documented script endpoint without revea
       MCP_AUTH_ACCESS_AUD: true,
       MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS: true,
       MCP_AUTH_RATE_LIMIT_PER_MINUTE: true,
-      OAUTH_STATE_TTL_SECONDS: true,
-      ROBLOX_OAUTH_SCOPES: true,
     });
     expect(report.bindingNames).toContain("MCP_AUTH");
-    expect(report.bindingNames).toContain("ROBLOX_AUTH");
-    expect(report.bindingNames).toContain("ROBLOX_TOKEN_KEY");
+    expect(report.bindingNames).toContain("DEMO_ACCOUNTS");
     expect(report.codeMarkers).toEqual({
       mcpTransport: true,
       perToolOAuth: true,
       securitySchemes: true,
       protectedResourceMetadata: true,
       accessIdentityVerifier: true,
-      robloxOAuthCallback: true,
-      robloxTokenEncryption: true,
     });
     expect(result.stdout).not.toContain(fakeToken);
     expect(result.stdout).not.toContain("requireMcpScope");

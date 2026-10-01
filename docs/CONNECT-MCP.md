@@ -2,7 +2,7 @@
 
 Research date: 2026-09-28. The inspector's **Connect MCP** dialog is a launcher into each client's setup; it does not imitate that UI or claim a connection succeeded. Handoff URLs are built by `src/ui/mcp-clients.ts` and covered by `tests/mcp-clients.test.ts`.
 
-DEMO's public Streamable HTTP endpoint is `https://demo-mcp.amidevz.workers.dev/mcp`. Do not configure a shared bearer/API key. MCP initialization, tool discovery, resources, and public tools work without a login. Only account-specific Roblox tools and paid `jev_decide` request per-tool DEMO OAuth. The ChatGPT flow described below is the expected setup, but the actual ChatGPT Mixed Authentication UI and live compatibility have **not** been verified for this deployment.
+DEMO's public Streamable HTTP endpoint is `https://demo-mcp.amidevz.workers.dev/mcp`. Do not configure a shared bearer/API key. MCP initialization, tool discovery, resources, and public tools work without a login. Only paid `jev_decide`, shared-workspace `collab_*` tools, and `byox_refresh_index` request per-tool DEMO OAuth. The ChatGPT flow described below is the expected setup, but the actual ChatGPT Mixed Authentication UI and live compatibility have **not** been verified for this deployment.
 
 ## Client setup
 
@@ -22,14 +22,12 @@ DEMO's public Streamable HTTP endpoint is `https://demo-mcp.amidevz.workers.dev/
 3. Open the ChatGPT Plugins/connection page and use the **plus** button to add a remote MCP server. Name it **DEMO** and set the exact endpoint to `https://demo-mcp.amidevz.workers.dev/mcp` (or your deployed canonical origin followed by `/mcp`).
 4. Choose **Mixed Authentication** for the per-tool public no-auth and protected OAuth schemes, if ChatGPT offers it. This exact UI choice and this deployment have not been live-tested; do not report compatibility until the connection succeeds and a protected challenge completes.
 5. Refresh the tools. Test a public tool such as `demo_ping` first; it should not ask for login. Call a protected tool next; the expected behavior is a DEMO OAuth consent flow. Sign in with the Cloudflare Access human identity and review the requested scope. Reauthorize when ChatGPT challenges for a scope not yet granted.
-6. For Roblox, call `roblox_account_link_start` after DEMO OAuth. Open its returned `linkUrl` in a browser signed into the same Access identity, paste the one-time code, and approve Roblox's official consent. This is separate from the ChatGPT → DEMO authorization.
 
 **If ChatGPT doesn't offer Mixed Authentication or doesn't follow the protected-tool OAuth challenge, use only public tools.** Do not replace the design with a shared API key or describe it as a successful mixed-auth integration. Diagnose the actual deployed `/tools/list`, `WWW-Authenticate` MCP metadata challenge, and OAuth endpoints with MCP Inspector before retesting ChatGPT.
 
 ## Disconnect
 
 - Remove/disconnect DEMO in ChatGPT's connection settings. DEMO's `/oauth/revoke` endpoint supports revocation; an access token not explicitly revoked expires within at most 15 minutes. No DEMO refresh token is issued.
-- To disconnect only Roblox, use `roblox_account_unlink` or the signed-in DEMO UI's Disconnect control. Removing ChatGPT and unlinking Roblox are separate actions.
 
 ## Sources
 

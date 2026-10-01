@@ -7,9 +7,6 @@ export type McpSecurityScheme =
   | { type: "oauth2"; scopes: McpOAuthScope[] };
 
 const PUBLIC: McpSecurityScheme[] = [{ type: "noauth" }];
-const READ: McpSecurityScheme[] = [{ type: "oauth2", scopes: ["roblox:read"] }];
-const LINK: McpSecurityScheme[] = [{ type: "oauth2", scopes: ["roblox:link"] }];
-const DISCONNECT: McpSecurityScheme[] = [{ type: "oauth2", scopes: ["roblox:disconnect"] }];
 const DECISION: McpSecurityScheme[] = [{ type: "oauth2", scopes: ["decision:use"] }];
 const COLLAB: McpSecurityScheme[] = [{ type: "oauth2", scopes: ["collab:write"] }];
 const BYOX_ADMIN: McpSecurityScheme[] = [{ type: "oauth2", scopes: ["collab:admin"] }];
@@ -33,16 +30,6 @@ function cloneSchemes(schemes: McpSecurityScheme[]): McpSecurityScheme[] {
 
 export function securitySchemesForTool(name: string): McpSecurityScheme[] {
   switch (name) {
-    case "roblox_account_status":
-    case "roblox_account_profile":
-    case "roblox_account_inventory":
-    case "roblox_account_avatar_thumbnail":
-    case "roblox_account_capabilities":
-      return cloneSchemes(READ);
-    case "roblox_account_link_start":
-      return cloneSchemes(LINK);
-    case "roblox_account_unlink":
-      return cloneSchemes(DISCONNECT);
     case "jev_decide":
       return cloneSchemes(DECISION);
     case "byox_refresh_index":

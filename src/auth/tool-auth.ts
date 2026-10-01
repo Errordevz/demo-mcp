@@ -1,7 +1,7 @@
 /** Per-tool authentication for OAuth-protected MCP tools. */
 
 import { errorResult, type ToolResult } from "../mcp/results.js";
-import { sha256Hex } from "../roblox/crypto.js";
+import { sha256Hex } from "./crypto.js";
 import { mcpOAuthChallenge } from "./oauth-routes.js";
 import { resolveMcpOAuthConfig, type McpOAuthScope } from "./oauth-config.js";
 import { resolveMcpAuthStore, type McpAccessTokenRecord } from "./oauth-store.js";
@@ -14,8 +14,6 @@ export interface McpProtectedRequestContext {
 export interface McpPrincipal {
   /** Server-derived hash of the verified Cloudflare Access subject and tenant. */
   subjectHash: string;
-  /** Deterministic per-principal storage key; never supplied by a tool argument. */
-  robloxAccountKey: string;
   scopes: string[];
 }
 
@@ -83,15 +81,9 @@ export async function requireMcpScope(
     ok: true,
     principal: {
       subjectHash: grant.principalHash,
-      robloxAccountKey: robloxAccountKeyForSubjectHash(grant.principalHash),
       scopes: [...grant.scopes],
     },
   };
-}
-
-export function robloxAccountKeyForSubjectHash(subjectHash: string): string {
-  if (!/^[a-f0-9]{64}$/.test(subjectHash)) throw new TypeError("Invalid verified MCP subject hash");
-  return `u_${subjectHash}`;
 }
 
 function bearerToken(value: string | null | undefined): string | null {

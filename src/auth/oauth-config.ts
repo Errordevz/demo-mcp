@@ -1,12 +1,9 @@
 /** Pinned public issuer and resource configuration for DEMO's MCP OAuth server. */
 
-export const MCP_OAUTH_SCOPES = ["roblox:read", "roblox:link", "roblox:disconnect", "decision:use", "collab:write", "collab:admin"] as const;
+export const MCP_OAUTH_SCOPES = ["decision:use", "collab:write", "collab:admin"] as const;
 export type McpOAuthScope = (typeof MCP_OAUTH_SCOPES)[number];
 
 export const MCP_OAUTH_SCOPE_DESCRIPTIONS: Readonly<Record<McpOAuthScope, string>> = {
-  "roblox:read": "Read the authenticated user's own linked Roblox profile and permitted account data.",
-  "roblox:link": "Create a one-time link code to separately authorize a Roblox account.",
-  "roblox:disconnect": "Revoke and remove the authenticated user's own Roblox grant.",
   "decision:use": "Run a DEMO paid typed-decision request.",
   "collab:write": "Read and change the shared coding workspace (tasks, patches, reviews, test records).",
   "collab:admin": "Perform administrator operations such as refreshing the Build Your Own X index.",
@@ -23,10 +20,9 @@ export interface McpOAuthConfig {
   revocationEndpoint: string;
   codeTtlSeconds: number;
   consentTtlSeconds: number;
-  linkCodeTtlSeconds: number;
   accessTokenTtlSeconds: number;
   rateLimitPerMinute: number;
-  /** True when a Cloudflare Access team domain + audience are configured (one identity option). */
+  /** True when a Cloudflare Access team domain + audience are configured. */
   accessConfigured: boolean;
 }
 
@@ -36,8 +32,6 @@ export interface McpOAuthConfigEnv {
   MCP_AUTH_ACCESS_AUD?: string;
   MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS?: string | number;
   MCP_AUTH_RATE_LIMIT_PER_MINUTE?: string | number;
-  /** Presence-only check for the account store (the other identity option). */
-  DEMO_ACCOUNTS?: unknown;
 }
 
 function numberFrom(value: string | number | undefined, fallback: number, min: number, max: number): number {
@@ -78,7 +72,6 @@ export function resolveMcpOAuthConfig(env: McpOAuthConfigEnv): McpOAuthConfig | 
     revocationEndpoint: `${origin}/oauth/revoke`,
     codeTtlSeconds: 120,
     consentTtlSeconds: 600,
-    linkCodeTtlSeconds: 300,
     accessTokenTtlSeconds: numberFrom(env.MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS, 900, 300, 900),
     rateLimitPerMinute: numberFrom(env.MCP_AUTH_RATE_LIMIT_PER_MINUTE, 30, 1, 300),
     accessConfigured,
@@ -93,9 +86,7 @@ export function mcpOAuthReady(env: McpOAuthConfigEnv & { MCP_AUTH?: unknown }): 
   const config = resolveMcpOAuthConfig(env);
   if (!config) return false;
   const hasStore = Boolean(env.MCP_AUTH && typeof (env.MCP_AUTH as { idFromName?: unknown }).idFromName === "function" && typeof (env.MCP_AUTH as { get?: unknown }).get === "function");
-  const accounts = env.DEMO_ACCOUNTS as { idFromName?: unknown; get?: unknown } | undefined;
-  const hasAccounts = Boolean(accounts && typeof accounts.idFromName === "function" && typeof accounts.get === "function");
-  return hasStore && (config.accessConfigured || hasAccounts);
+  return hasStore && config.accessConfigured;
 }
 
 export function resourceMetadata(config: McpOAuthConfig) {

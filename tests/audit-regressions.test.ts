@@ -226,23 +226,10 @@ describe("inspector UI status truth", () => {
     expect(browserCard ?? "").toMatch(/Operational/);
   });
 
-  it("does not request the private Roblox status route for an anonymous visitor", async () => {
+  it("does not request any private account or OAuth status route on boot", async () => {
     const { requests, doc } = await bootUi();
-    expect(requests).not.toContain("/oauth/roblox/status");
-    // The local verdict is honest and actionable rather than "Unreachable".
+    expect(requests).toEqual(["/health", "/platform/stats"]);
     expect(renderedText(doc)).toContain("Public tools · no login");
-  });
-
-  it("still reads the signed-in Roblox status when a session exists", async () => {
-    const { requests } = await bootUi({
-      signedIn: true,
-      statusResponse: () => jsonResponse({
-        available: true,
-        connected: false,
-        configuration: { enabled: true, clientIdConfigured: true, clientSecretConfigured: true, requestedScopes: ["openid", "profile"] },
-      }),
-    });
-    expect(requests).toContain("/oauth/roblox/status");
   });
 });
 

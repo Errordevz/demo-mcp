@@ -13,7 +13,7 @@ export const PROJECT = {
   name: "DEMO",
   tagline: "Execution infrastructure for AI agents.",
   blurb:
-    "A public MCP server for browser automation, web intelligence, video understanding, Roblox integrations, skills, and typed decision routing. Public tools work immediately with no login; protected Roblox and paid-decision tools use per-tool OAuth.",
+    "A public MCP server for browser automation, web intelligence, video understanding, reverse engineering, skills, and typed decision routing. Public tools work immediately with no login; protected paid-decision and workspace tools use per-tool OAuth.",
   repoUrl: "https://github.com/Errordevz/demo-mcp",
   repoLabel: "github.com/Errordevz/demo-mcp",
   docsTreeUrl: "https://github.com/Errordevz/demo-mcp/tree/main/docs",
@@ -29,14 +29,9 @@ export const SECTIONS = [
   { id: "video", label: "Video", icon: "play", blurb: "Resolve, extract, transcribe, analyze with evidence", nav: "primary" },
   { id: "research", label: "Research", icon: "search", blurb: "Web, feeds, archive, PDFs, Git, sources", nav: "primary" },
   { id: "routing", label: "Routing", icon: "branch", blurb: "Jev / Laya typed decision providers", nav: "primary" },
-  { id: "roblox", label: "Roblox", icon: "game", blurb: "OAuth connection — one per DEMO identity", nav: "primary" },
   { id: "skills", label: "Skills", icon: "puzzle", blurb: "Built-ins and the live skills.sh surface", nav: "primary" },
   { id: "collab", label: "Collaboration", icon: "users", blurb: "Shared workspace, patch review, typed delegation", nav: "primary" },
   { id: "about", label: "About", icon: "info", blurb: "Open source, architecture, security, privacy", nav: "primary" },
-  { id: "account", label: "Account", icon: "user", blurb: "DEMO session, verification, sessions, Roblox link", nav: "hidden" },
-  { id: "auth", label: "Sign in", icon: "key", blurb: "DEMO account sign in and registration", nav: "hidden" },
-  { id: "reset", label: "Reset password", icon: "key", blurb: "Set a new password from an emailed link", nav: "hidden" },
-  { id: "verify", label: "Verify email", icon: "checkc", blurb: "Confirm an address from a one-click link", nav: "hidden" },
 ] as const;
 
 export const CAPABILITY_CATEGORIES = [
@@ -65,16 +60,7 @@ export const CAPABILITY_CATEGORIES = [
     route: "research",
     description: "Fetch, extract, diff, and monitor public web content — plus feeds, archives, PDFs, Git, and evidence-backed research.",
     highlights: ["Extraction", "Change monitoring", "Archive & feeds", "Evidence-backed research"],
-    groups: ["Core", "Web Intelligence", "Research", "Internet Archive", "Feeds", "Documents", "Git", "Network", "Utilities"],
-  },
-  {
-    id: "roblox",
-    title: "Roblox",
-    icon: "game",
-    route: "roblox",
-    description: "Public profiles and games need no login. Account tools use DEMO OAuth per tool, then a separate official Roblox OAuth 2.0 + PKCE consent — never a Roblox password or cookie.",
-    highlights: ["Public profiles", "Games", "OAuth account tools"],
-    groups: ["Roblox"],
+    groups: ["Core", "Web Intelligence", "Research", "Internet Archive", "Feeds", "Documents", "Git", "Network", "Utilities", "Roblox"],
   },
   {
     id: "intelligence",
@@ -212,15 +198,12 @@ export const API_ROUTES = [
   { path: "/video-assets/:ref", note: "Expiring video/audio artifact (Range supported, 410 when expired)" },
   { path: "/.well-known/oauth-*", note: "DEMO OAuth metadata for ChatGPT's mixed-auth connection" },
   { path: "/oauth/{authorize,token,revoke}", note: "DEMO OAuth 2.1 + PKCE, pinned ChatGPT client and short-lived grants" },
-  { path: "/oauth/roblox/*", note: "Separate Roblox OAuth 2.0 + PKCE (one-time link · callback · status · disconnect)" },
 ];
 
 export const PRIVACY_FACTS = [
-  "Public MCP tools and routes work immediately without a DEMO account or login.",
-  "Only account-specific Roblox tools and paid jev_decide are protected by per-tool OAuth; a missing token triggers a scoped challenge.",
-  "The DEMO OAuth grant is separate from Roblox OAuth. Roblox linking requires a one-time code and explicit approval on Roblox's official consent page.",
-  "User identity is verified from a signed Cloudflare Access assertion, then reduced to a server-side subject hash; tool arguments cannot choose an account.",
-  "Roblox tokens are encrypted in the RobloxAuth Durable Object and never reach the browser, MCP result, URL, log, or telemetry.",
+  "Public MCP tools and routes work immediately without any account or login.",
+  "Only paid jev_decide and shared-workspace tools are protected by per-tool OAuth; a missing token triggers a scoped challenge.",
+  "User identity for protected OAuth scopes is verified from a signed Cloudflare Access assertion, then reduced to a server-side subject hash.",
   "This page sets no cookie and runs no analytics, fingerprinting or IP tracking. OAuth state cookies are short-lived, HttpOnly and Secure.",
   "Every outbound fetch passes the SSRF guard; private/internal targets are refused. CAPTCHAs, login walls and DRM are reported, never bypassed.",
 ];
@@ -233,10 +216,8 @@ DEMO MCP Worker (Cloudflare Workers)
         ├── tools/list            protected tools declare scoped OAuth 2.1 schemes
         ├── /.well-known/*        protected-resource + authorization-server metadata
         ├── /oauth/{authorize,token,revoke} short-lived PKCE grants; codes/tokens stored as hashes
-        ├── Cloudflare Access     verified human subject only at interactive authorize/link surfaces
-        ├── /oauth/roblox/*       separate Roblox OAuth 2.0 + PKCE consent flow
-        ├── MCP_AUTH DO           atomic consent, one-time codes, token hashes, link codes, rate limits
-        ├── RobloxAuth DO         per-subject encrypted Roblox token vault (server-side only)
+        ├── Cloudflare Access     verified human subject only at interactive authorize surfaces
+        ├── MCP_AUTH DO           atomic consent, one-time codes, token hashes, rate limits
         ├── BrowserSession DO     persistent sessions, tabs, handoff state
         ├── /health · /tools      liveness + inventory (public)
         ├── /platform/stats       safe telemetry (no secrets, no user content)

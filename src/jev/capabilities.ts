@@ -1,7 +1,7 @@
 /**
  * Capability report for the Jev Decision Engine — one source of truth.
  *
- * Mirrors `src/video/capabilities.ts` and `src/roblox/capabilities.ts`: the connected AI
+ * Mirrors `src/video/capabilities.ts`: the connected AI
  * must be able to see, before it promises anything, whether this deployment can ask for
  * typed decisions at all, what each decision template is allowed to answer, what the
  * thresholds mean, and what the engine explicitly cannot do.

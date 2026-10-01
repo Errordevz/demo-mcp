@@ -2,9 +2,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { clearChatGptClientMetadataCacheForTests, handleMcpOAuthRoute, isChatGptClientId } from "../src/auth/oauth-routes.js";
 import { resolveMcpOAuthConfig } from "../src/auth/oauth-config.js";
 import { InMemoryMcpAuthStore } from "../src/auth/oauth-store.js";
-import { requireMcpScope, robloxAccountKeyForSubjectHash } from "../src/auth/tool-auth.js";
+import { requireMcpScope } from "../src/auth/tool-auth.js";
 import type { VerifiedAccessIdentity } from "../src/auth/access-identity.js";
-import { createPkcePair, randomOpaqueToken, sha256Hex } from "../src/roblox/crypto.js";
+import { createPkcePair, randomOpaqueToken, sha256Hex } from "../src/auth/crypto.js";
 
 const ORIGIN = "https://demo.test";
 const CLIENT_ID = "https://chatgpt.com/oauth/client.json";
@@ -73,7 +73,7 @@ async function beginConsent(store = new InMemoryMcpAuthStore(), principal = SUBJ
     redirect_uri: REDIRECT_URI,
     response_type: "code",
     response_mode: "query",
-    scope: "roblox:read roblox:link",
+    scope: "decision:use collab:write",
     state,
     code_challenge: pkce.challenge,
     code_challenge_method: "S256",
@@ -138,7 +138,7 @@ describe("DEMO OAuth 2.1 authorization code + PKCE", () => {
       resource: ORIGIN,
       authorization_servers: [ORIGIN],
       bearer_methods_supported: ["header"],
-      scopes_supported: ["roblox:read", "roblox:link", "roblox:disconnect", "decision:use", "collab:write", "collab:admin"],
+      scopes_supported: ["decision:use", "collab:write", "collab:admin"],
     });
     const server = await route(`${ORIGIN}/.well-known/oauth-authorization-server`, { method: "GET" }, envValue, routeDeps);
     expect(await server.json()).toMatchObject({
@@ -164,7 +164,7 @@ describe("DEMO OAuth 2.1 authorization code + PKCE", () => {
       client_id: CLIENT_ID,
       redirect_uri: REDIRECT_URI,
       response_type: "code",
-      scope: "roblox:read roblox:link",
+      scope: "decision:use collab:write",
       state: randomOpaqueToken(24),
       code_challenge: pkce.challenge,
       code_challenge_method: "S256",
@@ -180,10 +180,9 @@ describe("DEMO OAuth 2.1 authorization code + PKCE", () => {
     expect(flow.authorize.headers.get("content-security-policy")).toContain("script-src 'none'");
     const html = await flow.authorize.text();
     expect(html).toContain("Authorize protected tools?");
-    expect(html).toContain("roblox:read");
-    expect(html).toContain("roblox:link");
+    expect(html).toContain("decision:use");
+    expect(html).toContain("collab:write");
     expect(html).toContain("Public tools stay public");
-    expect(html).toContain("does not connect a Roblox account");
     const cookie = flow.authorize.headers.getSetCookie().find((value) => value.startsWith("demo_mcp_oauth_flow="));
     expect(cookie).toContain("HttpOnly");
     expect(cookie).toContain("Secure");
@@ -199,7 +198,7 @@ describe("DEMO OAuth 2.1 authorization code + PKCE", () => {
       ["client_id", "https://evil.example/oauth/client.json", "invalid_client"],
       ["redirect_uri", "https://evil.example/callback", "invalid_request"],
       ["response_type", "token", "unsupported_response_type"],
-      ["scope", "roblox:read admin", "invalid_scope"],
+      ["scope", "decision:use admin", "invalid_scope"],
       ["resource", "https://other.test", "invalid_target"],
       ["code_challenge_method", "plain", "invalid_request"],
     ] as const) {
@@ -208,7 +207,7 @@ describe("DEMO OAuth 2.1 authorization code + PKCE", () => {
         client_id: CLIENT_ID,
         redirect_uri: REDIRECT_URI,
         response_type: "code",
-        scope: "roblox:read",
+        scope: "decision:use",
         state: randomOpaqueToken(24),
         code_challenge: pkce.challenge,
         code_challenge_method: "S256",
@@ -255,12 +254,12 @@ describe("DEMO OAuth 2.1 authorization code + PKCE", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("access-control-allow-origin")).toBe("https://chatgpt.com");
     const payload = await response.json() as Record<string, any>;
-    expect(payload).toMatchObject({ token_type: "Bearer", expires_in: 900, scope: "roblox:read roblox:link", resource: ORIGIN });
+    expect(payload).toMatchObject({ token_type: "Bearer", expires_in: 900, scope: "decision:use collab:write", resource: ORIGIN });
     expect(payload.access_token).toMatch(/^[A-Za-z0-9_-]{32,128}$/);
     expect(payload).not.toHaveProperty("refresh_token");
     const rawToken = payload.access_token as string;
     const hashed = await sha256Hex(rawToken);
-    expect(await flow.store.getAccessToken(hashed, NOW)).toMatchObject({ principalHash: SUBJECT_A, scopes: ["roblox:read", "roblox:link"], audience: ORIGIN });
+    expect(await flow.store.getAccessToken(hashed, NOW)).toMatchObject({ principalHash: SUBJECT_A, scopes: ["decision:use", "collab:write"], audience: ORIGIN });
     expect(await flow.store.getAccessToken(rawToken, NOW)).toBeNull();
     const tokenKeys = [...(flow.store as unknown as { tokens: Map<string, unknown> }).tokens.keys()];
     expect(tokenKeys).toEqual([hashed]);
@@ -334,10 +333,10 @@ describe("DEMO OAuth 2.1 authorization code + PKCE", () => {
 });
 
 describe("user-bound protected tool authorization", () => {
-  it("derives separate Roblox keys from opaque user principals, never request arguments", async () => {
+  it("resolves distinct user principals from opaque tokens, never request arguments", async () => {
     const store = new InMemoryMcpAuthStore();
     const configured = env(store);
-    const config = resolveMcpOAuthConfig(configured)!;
+    resolveMcpOAuthConfig(configured)!;
     const tokenA = randomOpaqueToken(32);
     const tokenB = randomOpaqueToken(32);
     const clientIdHash = await sha256Hex(CLIENT_ID);
@@ -346,22 +345,20 @@ describe("user-bound protected tool authorization", () => {
         version: 1,
         clientIdHash,
         principalHash: subjectHash,
-        scopes: ["roblox:read"],
+        scopes: ["decision:use"],
         audience: ORIGIN,
         issuedAt: NOW,
         expiresAt: NOW + 900_000,
       });
     }
-    const authA = await requireMcpScope({ env: configured, authorization: `Bearer ${tokenA}` }, "roblox_account_profile", "roblox:read", NOW);
-    const authB = await requireMcpScope({ env: configured, authorization: `Bearer ${tokenB}` }, "roblox_account_profile", "roblox:read", NOW);
+    const authA = await requireMcpScope({ env: configured, authorization: `Bearer ${tokenA}` }, "jev_decide", "decision:use", NOW);
+    const authB = await requireMcpScope({ env: configured, authorization: `Bearer ${tokenB}` }, "jev_decide", "decision:use", NOW);
     expect(authA.ok).toBe(true);
     expect(authB.ok).toBe(true);
     if (!authA.ok || !authB.ok) return;
     expect(authA.principal.subjectHash).toBe(SUBJECT_A);
     expect(authB.principal.subjectHash).toBe(SUBJECT_B);
-    expect(authA.principal.robloxAccountKey).toBe(robloxAccountKeyForSubjectHash(SUBJECT_A));
-    expect(authB.principal.robloxAccountKey).toBe(robloxAccountKeyForSubjectHash(SUBJECT_B));
-    expect(authA.principal.robloxAccountKey).not.toBe(authB.principal.robloxAccountKey);
+    expect(authA.principal.subjectHash).not.toBe(authB.principal.subjectHash);
   });
 
   it("rejects missing, expired, wrong-audience, revoked, and under-scoped tokens with OAuth challenges", async () => {
@@ -379,7 +376,7 @@ describe("user-bound protected tool authorization", () => {
         version: 1,
         clientIdHash,
         principalHash: SUBJECT_A,
-        scopes: kind === "scope" ? ["roblox:read"] : ["roblox:disconnect"],
+        scopes: kind === "scope" ? ["decision:use"] : ["collab:admin"],
         audience: kind === "audience" ? "https://other.test" : ORIGIN,
         issuedAt: NOW - 10_000,
         expiresAt: kind === "expired" ? NOW - 1 : NOW + 60_000,
@@ -387,16 +384,16 @@ describe("user-bound protected tool authorization", () => {
     }
     await store.revokeAccessToken(await sha256Hex(tokens.revoked), clientIdHash);
     for (const token of [undefined, "Bearer malformed"] as const) {
-      const result = await requireMcpScope({ env: configured, authorization: token }, "roblox_account_profile", "roblox:read", NOW);
+      const result = await requireMcpScope({ env: configured, authorization: token }, "jev_decide", "decision:use", NOW);
       expect(result.ok).toBe(false);
       if (!result.ok) expect((result.result._meta?.["mcp/www_authenticate"] as string[] | undefined)?.[0]).toContain('error="invalid_token"');
     }
     for (const token of [tokens.expired, tokens.audience, tokens.revoked]) {
-      const result = await requireMcpScope({ env: configured, authorization: `Bearer ${token}` }, "roblox_account_profile", "roblox:read", NOW);
+      const result = await requireMcpScope({ env: configured, authorization: `Bearer ${token}` }, "jev_decide", "decision:use", NOW);
       expect(result.ok).toBe(false);
       if (!result.ok) expect((result.result._meta?.["mcp/www_authenticate"] as string[] | undefined)?.[0]).toContain('error="invalid_token"');
     }
-    const underScoped = await requireMcpScope({ env: configured, authorization: `Bearer ${tokens.scope}` }, "roblox_account_unlink", "roblox:disconnect", NOW);
+    const underScoped = await requireMcpScope({ env: configured, authorization: `Bearer ${tokens.scope}` }, "byox_refresh_index", "collab:admin", NOW);
     expect(underScoped.ok).toBe(false);
     if (!underScoped.ok) expect((underScoped.result._meta?.["mcp/www_authenticate"] as string[] | undefined)?.[0]).toContain('error="insufficient_scope"');
   });
