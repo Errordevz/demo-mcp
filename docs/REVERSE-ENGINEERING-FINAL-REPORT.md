@@ -37,36 +37,39 @@ All seven are annotated `readOnlyHint: true`.
 
 ## 2. Files changed
 
-### New — capability (21 modules, `src/reverse-engineering/`)
+### New — capability (27 modules, `src/reverse-engineering/`)
 
 | Module | Lines | What it does |
 | --- | --- | --- |
-| `types.ts` | 190 | Shared vocabulary: `EvidenceLabel`, `Evidence`, `AnalysisDocument`, `AnalysisFinding`, `GeneratedArtifact`, `CapabilityReport`. |
-| `binary-reader.ts` | 110 | Bounded `ByteReader` (`u8/u16/u32/u64/i8/i16/i32`, `cString`, `fixedString`, `slice`, `has`, `hex`) + `parseCount` (accepts decimal and hex strings). |
-| `entropy.ts` | 230 | Shannon entropy (whole file and ranges), 4 KiB block entropy, classification, crc32/crc32c/crc16/adler32/RFC-1071 sum16/xor8, byte statistics, best-single-byte-XOR-key search, hexdump. |
-| `strings.ts` | 130 | Bounded ASCII/UTF-16 string extraction with themes (URL, path, crypto marker, error, registry, format string, GUID, base64, IP). |
-| `evidence.ts` | 175 | The evidence store: ids, labels, confidence, timestamps, `crossCheck` (different sources only), `singleSourced`, `query`, `page`, `counts`, `unknowns`. |
-| `containers.ts` | 545 | Magic/arch/endian detection for ELF, PE, Mach-O (incl. fat), WASM, Java class, JAR/ZIP, DEX, .NET, ASAR, PCAP/PCAPNG, Python bytecode, SQLite, text — and an explicit `unknown` verdict. |
-| `elf.ts` | 400 | ELF32/64 both endiannesses: sections with per-section entropy, symbols, dynamic symbols/needed, program headers, build-id, `.comment`, `.go.buildinfo`. |
-| `pe.ts` | 300 | PE32/PE32+: machine, subsystem, DLL characteristics, sections with entropy, exports, imports, CodeView PDB path, .NET detection. |
-| `macho.ts` | 240 | Mach-O 32/64 both endiannesses + fat header: cputype, filetype, flags, UUID, entry, sections, dylibs, code signature, symbols. |
-| `wasm.ts` | 300 | WASM sections with entropy, imports/exports, function/memory/table/global/data counts, start function, name section, WASI imports. |
-| `managed.ts` | 507 | Java class constant pool, DEX header, .NET metadata streams, ASAR header, ZIP central directory (never decompresses), `.pyc` magics + `ZIP_LIMITS`. |
-| `pcap.ts` | 373 | Classic (both endiannesses, µs and ns) and PCAPNG; Ethernet/802.1Q/IPv4/IPv6/TCP/UDP; stream reassembly heads; bounded at 512 packets. |
-| `modern-binaries.ts` | 300 | Go `pclntab` locator + version + candidate names, Rust v0 and legacy demangling, Swift symbol detection. |
-| `protocol-analysis.ts` | 400 | Column-wise alignment, per-column classification, length-prefix discovery, checksum discovery **by recomputation**, state-machine reconstruction, specification emission. |
-| `deobfuscation.ts` | 300 | Packing assessment, encrypted-string candidates, anti-analysis markers, explicit `requiresAnalysisService` list. |
-| `cleanroom.ts` | 260 | Specification freeze (with an `excluded` one-way wall), golden-case derivation, byte-exact comparison. |
-| `struct.ts` | 90 | Struct-layout validation: overlap, padding, alignment, total size. Port of upstream `validate_struct.py`. |
-| `compare.ts` | 190 | Artifact comparison across nine dimensions with the specific differences. |
-| `triage.ts` | 480 | The deterministic pass that produces the evidence everything else cites. |
-| `report.ts` | 250 | Report builder grouped by label, with the single-source list. |
-| `store.ts` | 190 | R2 expiring artifacts (SCREENSHOTS bucket) with an in-memory fallback. |
-| `sandbox.ts` | 165 | Authorization, sandbox policy, `evaluateDynamicRequest`, `REFUSED_OPERATIONS`, `staticBudgets`, `safetyContract`. |
-| `tool-discovery.ts` | 320 | 21 Worker engines, 20 external tools, `detectCapabilities`, `recommendWorkflow`. |
-| `engine.ts` | 210 | The only door to the optional analysis service: closed operation allow-list, SSRF-guarded URL, bounded bytes, enforced timeout. |
-| `config.ts` | 130 | `resolveReverseEngineeringPolicy` / `resolveReverseEngineeringConfig` / `reverseEngineeringFlags`, with published ceilings. |
-| `router.ts` | 950 | `runReverseRequest` — the single entry point every tool delegates to. |
+| Module | Lines | What it does |
+| --- | --- | --- |
+| `types.ts` | 175 | shared vocabulary: `EvidenceLabel`, `Evidence`, `AnalysisDocument`, `AnalysisFinding`, `GeneratedArtifact`, `CapabilityReport`. |
+| `binary-reader.ts` | 113 | bounded `ByteReader` (`u8/u16/u32/u64/i8/i16/i32`, `cString`, `fixedString`, `slice`, `has`, `hex`) and `parseCount` (decimal or hex strings). |
+| `entropy.ts` | 245 | Shannon entropy (whole file and ranges), 4 KiB block entropy, classification, crc32/crc32c/crc16/adler32/RFC-1071 sum16/xor8, byte statistics, best-single-byte-XOR-key search, hexdump. |
+| `strings.ts` | 132 | bounded ASCII/UTF-16 string extraction with themes (URL, path, crypto marker, error, registry, format string, GUID, base64, IP). |
+| `evidence.ts` | 188 | the evidence store: ids, labels, confidence, timestamps, `crossCheck` (different sources only), `singleSourced`, `query`, `page`, `counts`, `unknowns`. |
+| `containers.ts` | 534 | magic, architecture and endianness detection for ELF, PE, Mach-O (incl. fat), WASM, Java class, JAR/ZIP, DEX, .NET, ASAR, PCAP/PCAPNG, Python bytecode, SQLite, text — and an explicit `unknown` verdict. |
+| `elf.ts` | 468 | ELF32/64 both endiannesses: sections with per-section entropy, symbols, dynamic symbols and needed libraries, program headers, build-id, `.comment`, `.go.buildinfo`. |
+| `pe.ts` | 373 | PE32/PE32+: machine, subsystem, DLL characteristics, sections with entropy, exports, imports, CodeView PDB path, .NET detection. |
+| `macho.ts` | 256 | Mach-O 32/64 both endiannesses and fat headers: cputype, filetype, flags, UUID, entry, sections, dylibs, code signature, symbols. |
+| `wasm.ts` | 290 | WASM sections with entropy, imports and exports, function/memory/table/global/data counts, start function, name section, WASI imports. |
+| `managed.ts` | 511 | Java class constant pool, DEX header, .NET metadata streams, ASAR header, ZIP central directory (never decompresses), `.pyc` magics. |
+| `pcap.ts` | 373 | classic (both endiannesses, µs and ns) and PCAPNG; Ethernet/802.1Q/IPv4/IPv6/TCP/UDP; stream reassembly heads; bounded at 512 packets. |
+| `modern-binaries.ts` | 318 | Go `pclntab` locator, version and candidate names; Rust v0 and legacy demangling; Swift symbol detection. |
+| `protocol-analysis.ts` | 411 | column-wise alignment, per-column classification, length-prefix discovery, checksum discovery by recomputation, state-machine reconstruction, specification emission. |
+| `deobfuscation.ts` | 261 | packing assessment, encrypted-string candidates, anti-analysis markers, explicit `requiresAnalysisService` list. |
+| `cleanroom.ts` | 222 | specification freeze (with an `excluded` one-way wall), golden-case derivation, byte-exact comparison. |
+| `struct.ts` | 91 | struct-layout validation: overlap, padding, alignment, total size. Port of upstream `validate_struct.py`. |
+| `compare.ts` | 174 | artifact comparison across nine dimensions with the specific differences. |
+| `triage.ts` | 592 | the deterministic pass that produces the evidence everything else cites. |
+| `report.ts` | 211 | report builder grouped by label, with the single-source list. |
+| `store.ts` | 165 | R2 expiring artifacts (`SCREENSHOTS` bucket) with an in-memory fallback. |
+| `sandbox.ts` | 158 | authorization, sandbox policy, `evaluateDynamicRequest`, `REFUSED_OPERATIONS`, `staticBudgets`, `safetyContract`. |
+| `tool-discovery.ts` | 188 | 21 Worker engines, 20 external tools, `detectCapabilities`, `recommendWorkflow`. |
+| `workspace.ts` | 276 | isolated workspace with `assertSafeWorkspacePath` (allow-list, `re-workspace/…` root). |
+| `engine.ts` | 206 | the only door to the optional analysis service: closed operation allow-list, SSRF-guarded URL, bounded bytes, enforced timeout. |
+| `config.ts` | 131 | `resolveReverseEngineeringPolicy` / `resolveReverseEngineeringConfig` / `reverseEngineeringFlags`, with published ceilings. |
+| `router.ts` | 971 | `runReverseRequest` — the single entry point every tool delegates to. |
 
 ### New — MCP and tests
 
