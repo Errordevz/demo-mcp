@@ -78,9 +78,17 @@ jobs:
           # while no version ID was printed and the Worker kept answering the
           # previous release. A deploy that did not happen must fail the job.
           set -o pipefail
-          if ! npx wrangler deploy --keep-vars 2>&1 | tee deploy.log; then
-            echo "::error title=Deploy failed::wrangler deploy exited non-zero; the Worker was not updated. Last lines:"
-            tail -n 20 deploy.log
+          set +e
+          npx wrangler deploy --keep-vars 2>&1 | tee deploy.log
+          DEPLOY_STATUS=${PIPESTATUS[0]}
+          set -e
+          if [ "$DEPLOY_STATUS" -ne 0 ]; then
+            # GitHub annotations truncate multi-line messages, so the cause has to
+            # fit on one line: otherwise the run UI says only "deploy failed" and
+            # the reason stays buried in a log the API may not even serve.
+            EXCERPT=$(grep -aiE 'error|denied|unauthor|not authorized|permission|authentication|forbidden|invalid|10000' deploy.log | tail -n 4 | tr '\n' '|' | sed -E 's/[[:space:]]+/ /g' | cut -c1-700)
+            echo "::error title=Deploy failed::wrangler deploy exited ${DEPLOY_STATUS}: ${EXCERPT:-no matching error line, see the step log}"
+            tail -n 25 deploy.log
             exit 1
           fi
           URL=$(grep -oE 'https://[a-z0-9-]+\.[a-z0-9-]+\.workers\.dev' deploy.log | head -n 1)
