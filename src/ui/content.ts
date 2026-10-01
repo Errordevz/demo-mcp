@@ -95,6 +95,15 @@ export const CAPABILITY_CATEGORIES = [
     groups: ["Collaboration", "Build Your Own X"],
   },
   {
+    id: "reverse",
+    title: "Reverse Engineering",
+    icon: "cpu",
+    route: "capabilities",
+    description: "Evidence-driven analysis of binaries, containers, captures and archives: deterministic parsers do the math, and every claim is labelled observed, inferred, proposed, web or unknown. Static only by default — bytes are read as data and never executed.",
+    highlights: ["Deterministic parsers", "Evidence labels", "Static by default", "No code execution"],
+    groups: ["Reverse Engineering"],
+  },
+  {
     id: "infrastructure",
     title: "Platform",
     icon: "database",
@@ -139,6 +148,17 @@ export const HONESTY_RULES = [
   "A post caption is not a transcript; a thumbnail is not a frame — they never count as visual evidence.",
   "Any access_status other than public is reported as the reason retrieval failed — content is never described anyway.",
   "A successful download proves retrieval only, never understanding — analysis requires frames or transcript.",
+];
+
+export const REVERSE_ENGINEERING_RULES = [
+  "Static analysis only by default: DEMO reads bytes as data and never executes a target.",
+  "Never execute a file merely because it was uploaded — an upload produces evidence, not a process.",
+  "Every claim is labelled observed, inferred, proposed, web or unknown; an inference is never restated as an observation.",
+  "Scripts do the math and the model does the semantics — entropy, checksums, symbol tables and struct layouts are computed, never guessed.",
+  "A claim backed by a single tool is reported as single-sourced; cross-checks name both sources.",
+  "A missing engine is reported as missing. DEMO never simulates Ghidra, radare2, Frida or Jadx.",
+  "Dynamic analysis is opt-in, sandboxed and refused unless the deployment, an analysis service and an explicit authorization all agree.",
+  "Extracted files stay inside an isolated per-analysis workspace; no destructive patching and no malware deployment.",
 ];
 
 export const BUILTIN_SKILLS = [

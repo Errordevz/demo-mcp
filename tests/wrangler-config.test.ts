@@ -132,7 +132,7 @@ describe("wrangler.jsonc", () => {
     expect(credentialShaped).toEqual([]);
     // …while still documenting them, so a reader cannot conclude they are forgotten.
     const source = await readFile(path.join(ROOT, "wrangler.jsonc"), "utf8");
-    for (const name of ["ROBLOX_CLIENT_SECRET", "ROBLOX_TOKEN_KEY", "TYPESAFE_API_KEY", "LAYA_API_KEY", "SMTP_PASSWORD", "RESEND_API_KEY"]) {
+    for (const name of ["ROBLOX_CLIENT_SECRET", "ROBLOX_TOKEN_KEY", "TYPESAFE_API_KEY", "LAYA_API_KEY", "SMTP_PASSWORD", "RESEND_API_KEY", "RE_ANALYZER_KEY"]) {
       expect(source).toContain(name);
     }
     expect(source).not.toContain("DEMO_API_KEY");
@@ -141,6 +141,11 @@ describe("wrangler.jsonc", () => {
     // The Laya endpoint is per-deployment infrastructure: documented, never defaulted.
     expect(source).toContain("LAYA_BASE_URL");
     expect(source).not.toMatch(/LAYA_BASE_URL"\s*:/);
+    // Same rule for the reverse-engineering analysis service: documented, never
+    // defaulted, and its credential is a secret rather than a var.
+    expect(source).toContain("RE_ANALYZER_URL");
+    expect(source).not.toMatch(/RE_ANALYZER_URL"\s*:/);
+    expect(source).not.toMatch(/RE_ANALYZER_KEY"\s*:/);
     expect(source).not.toMatch(/"sk-[A-Za-z0-9_-]{16,}"/);
   });
 
@@ -165,7 +170,7 @@ describe("wrangler.jsonc", () => {
   it("only declares variables the code actually reads, and reads the flags it declares", async () => {
     const data = await config();
     const readers = await Promise.all(
-      ["index.ts", "platform-entry.ts", "src/auth/oauth-config.ts", "src/auth/access-identity.ts", "src/session/factory.ts", "src/video/processor.ts", "src/video/capabilities.ts", "src/jev/config.ts", "src/laya/config.ts", "src/decisions/provider.ts", "src/roblox/config.ts", "src/account/config.ts", "src/account/email.ts", "src/git/config.ts", "src/core/rate-limit.ts", "src/web/storage.ts", "src/web/monitor.ts"].map((file) =>
+      ["index.ts", "platform-entry.ts", "src/auth/oauth-config.ts", "src/auth/access-identity.ts", "src/session/factory.ts", "src/video/processor.ts", "src/video/capabilities.ts", "src/jev/config.ts", "src/laya/config.ts", "src/decisions/provider.ts", "src/roblox/config.ts", "src/account/config.ts", "src/account/email.ts", "src/git/config.ts", "src/core/rate-limit.ts", "src/web/storage.ts", "src/web/monitor.ts", "src/reverse-engineering/config.ts"].map((file) =>
         readFile(path.join(ROOT, file), "utf8"),
       ),
     );
@@ -199,6 +204,43 @@ describe("wrangler.jsonc", () => {
     expect(data.vars.LAYA_ENABLED).toBe("true");
     expect(data.vars.DECISION_PROVIDER_MODE).toBe("auto");
   });
+
+/** Reverse-engineering policy. The analysis service is never committed. */
+const REVERSE_VARS: Record<string, string> = {
+  RE_ENABLED: "true",
+  RE_MAX_TARGET_MB: "16",
+  RE_MAX_ANALYSIS_MS: "20000",
+  RE_DYNAMIC_ENABLED: "false",
+  RE_ARTIFACT_TTL_SECONDS: "3600",
+  RE_RATE_LIMIT_PER_MINUTE: "12",
+};
+
+describe("wrangler.jsonc reverse-engineering policy", () => {
+  it("declares exactly the policy the config module reads, and nothing that points at a service", async () => {
+    const data = await config();
+    const reverse = Object.keys(data.vars as Record<string, unknown>).filter((name) => name.startsWith("RE_"));
+    expect(reverse.sort()).toEqual(Object.keys(REVERSE_VARS).sort());
+    for (const [name, value] of Object.entries(REVERSE_VARS)) {
+      expect(data.vars[name], name).toBe(value);
+    }
+    // Deploying this file must not enable dynamic analysis, and must not point
+    // at an analysis service that nobody reviewed.
+    expect(data.vars.RE_DYNAMIC_ENABLED).toBe("false");
+  });
+
+  it("defaults to static analysis and caps that the code enforces", async () => {
+    const { resolveReverseEngineeringConfig } = await import("../src/reverse-engineering/config.js");
+    const policy = resolveReverseEngineeringConfig({});
+    expect(policy.enabled).toBe(true);
+    expect(policy.dynamicAllowed).toBe(false);
+    expect(policy.dynamicEnabled).toBe(false);
+    expect(policy.maxTargetBytes).toBe(16 * 1024 * 1024);
+    // A hostile env can only raise a value up to the published ceiling.
+    const clamped = resolveReverseEngineeringConfig({ RE_MAX_TARGET_MB: "999999", RE_MAX_ANALYSIS_MS: "1" });
+    expect(clamped.maxTargetBytes).toBeLessThanOrEqual(64 * 1024 * 1024);
+    expect(clamped.maxAnalysisMs).toBeGreaterThanOrEqual(1000);
+  });
+});
 
 /**
  * What `SSRF_DNS_FAIL_OPEN` actually does, pinned by behavior rather than by a
